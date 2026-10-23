@@ -46,7 +46,7 @@ function escapeHTML(value) {
 export function compactLinkContents(input, label, base) {
   const url = checkedLink(input, base);
   if (url.hash.startsWith('#card=')) cardFromInput(url.href, base);
-  else if (!/^#pso=(?:PSO1|PSO-DEMO1)\.[A-Za-z0-9_.-]+$/.test(url.hash)) throw new Error('Неизвестный формат ссылки.');
+  else if (!/^#pso=(?:PSO1|PSO-DEMO1)\.[A-Za-z0-9_.-]+$/.test(url.hash) && !/^#r=[A-Za-z0-9_-]{21}[AQgw]$/.test(url.hash)) throw new Error('Неизвестный формат ссылки.');
   // Plain-text editors receive the full working link, never a label without its target.
   return {plain:url.href, html:'<a href="' + escapeHTML(url.href) + '">' + escapeHTML(label) + '</a>'};
 }

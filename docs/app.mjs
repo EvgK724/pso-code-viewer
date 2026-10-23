@@ -2,8 +2,11 @@ import {sealDemo, openDemo, tokenFromInput, linkForToken} from './crypto.mjs';
 import {exportPublicCard, importPublicCard, deviceIdentity, sealSurname, openSurname} from './exchange.mjs';
 import {readDevice, loadContacts, saveContact, deleteContact, getMyName, setMyName} from './storage.mjs';
 import {cardLinkFor, cardFromInput, compactLinkContents, copyRenderedLink} from './sharing.mjs';
+import {ShortLinkClient, shortIDFromInput} from './shortlinks.mjs';
+import {SHORTLINK_ENDPOINT} from './shortlink-config.mjs';
 
 const appBase = new URL('./', import.meta.url).href;
+const shortLinks = SHORTLINK_ENDPOINT ? new ShortLinkClient(SHORTLINK_ENDPOINT) : null;
 const $ = id => document.getElementById(id);
 let device, selfContact, contacts = [], candidate = null;
 let ready = false, busy = false, generation = 0, timer, endsAt = 0, demoLink = '';
@@ -63,9 +66,13 @@ function messageCaption() {
   return $('message-caption').value === 'test' ? 'Проверочная история' :
     $('compose-orit').checked ? 'Новый пациент ОРИТ' : 'Новый пациент';
 }
-function updateCaptionPreview() { $('output-preview').textContent = messageCaption(); }
+function updateCaptionPreview() {
+  $('output-preview').textContent = messageCaption();
+  $('output-message').value = $('output-link').value ? messageCaption() + '\n' + $('output-link').value : '';
+}
 function invalidateComposed() {
   $('compose-output').hidden = true; $('output-link').value = '';
+  $('output-message').value = '';
   $('output-preview').href = '#'; setBusy(busy);
 }
 function parseInput(input) {
@@ -82,6 +89,7 @@ function inputKind(input) {
   let card = value.startsWith('PSO-CARD1.');
   try { card ||= new URL(value).hash.startsWith('#card='); } catch {}
   if (card) { cardFromInput(value, appBase); return 'card'; }
+  if (shortIDFromInput(value, appBase)) return 'message';
   const token = parseInput(value);
   if (!/^(?:PSO1(?:\.[A-Za-z0-9_-]+){4}|PSO-DEMO1\.[A-Za-z0-9_-]+)$/.test(token)) throw new Error('Код неполный или имеет другой формат. Скопируйте ссылку целиком через «Скопировать адрес для Пачки».');
   return 'message';
@@ -173,7 +181,11 @@ async function reveal(input) {
   if (busy || !ready) return;
   showMode('read'); const current = generation; setBusy(true); say('Проверяем ссылку…');
   try {
-    const token = parseInput(input); $('token').value = token;
+    const shortID = shortIDFromInput(input, appBase);
+    if (shortID && !shortLinks) throw new Error('Для короткой ссылки нужна обновлённая версия просмотрщика. Откройте приложение с интернетом и затем перезапустите его.');
+    const token = shortID ? await shortLinks.resolve(input, appBase) : parseInput(input);
+    if (current !== generation || document.hidden) return;
+    $('token').value = shortID ? input : token;
     const isDemo = token.startsWith('PSO-DEMO1.'); let data;
     if (isDemo) data = await openDemo(device, token);
     else { contacts = await loadContacts(); renderContacts(); data = await openSurname(device, token, contacts); }
@@ -228,16 +240,25 @@ $('compose-form').addEventListener('submit', async event => {
     const token = await sealSurname(device, recipient, name, {department, ttlMinutes});
     name = ''; $('compose-surname').value = '';
     if (current !== generation || document.hidden) return;
-    $('output-link').value = linkForToken(token, appBase);
+    const output = shortLinks ? await shortLinks.create(device, token, ttlMinutes, appBase) : linkForToken(token, appBase);
+    if (current !== generation || document.hidden) return;
+    $('output-link').value = output;
     $('output-preview').href = $('output-link').value;
     updateCaptionPreview();
     $('output-recipient').textContent = selectedID === selfContact.id ? 'Получатель: только этот просмотрщик — проверка' : 'Получатель: ' + recipient.name;
-    $('compose-output').hidden = false; say('Подпись со ссылкой готова. Нажмите «Скопировать готовую надпись» и вставьте в Пачку.');
+    $('compose-output').hidden = false;
+    say(shortLinks ? 'Короткая ссылка готова. Нажмите «Скопировать ссылку» и вставьте в Пачку.' : 'Подпись со ссылкой готова. Нажмите «Скопировать готовую надпись» и вставьте в Пачку.');
     $('compose-output').scrollIntoView({block:'nearest', behavior:'auto'});
   } catch (error) { if (current === generation) say(error.message || 'Не удалось создать ссылку.', true); }
   finally { name = ''; setBusy(false); }
 });
-$('copy-composed').addEventListener('click', () => copyCompactLink($('output-link').value, messageCaption(), 'output-link', 'compose-full-link', true));
+$('copy-composed').addEventListener('click', () => {
+  if (shortLinks) {
+    updateCaptionPreview();
+    return copyText($('output-message').value, 'output-message', 'Скопированы подпись и короткая ссылка. Вставьте в Пачку.');
+  }
+  return copyCompactLink($('output-link').value, messageCaption(), 'output-link', 'compose-full-link', true);
+});
 $('copy-composed-compact').addEventListener('click', () => {
   if (busy || !$('output-link').value) return;
   updateCaptionPreview();
@@ -300,7 +321,7 @@ async function handleIncoming(hash) {
   clearSensitive(); setCandidate(null);
   if (busy) { queuedIncoming = hash; return; }
   clearHandoff();
-  if (!hash.startsWith('#pso=') && !hash.startsWith('#card=')) { say('Неизвестный формат ссылки.', true); return; }
+  if (!hash.startsWith('#pso=') && !hash.startsWith('#card=') && !hash.startsWith('#r=')) { say('Неизвестный формат ссылки.', true); return; }
   const link = appBase + hash;
   try {
     inputKind(link);
@@ -320,6 +341,12 @@ addEventListener('pagehide', clearSensitive);
 
 async function init() {
   setBusy(true);
+  if (shortLinks) {
+    $('copy-composed').textContent = 'Скопировать ссылку';
+    $('short-output').hidden = false;
+    $('copy-output-help').textContent = 'В Пачку вставятся подпись и короткий адрес https://. Адрес можно нажать, даже если оформление текста не сохранится.';
+    $('compose-full-link').hidden = true;
+  }
   try {
     if (!globalThis.crypto?.subtle) throw new Error('Нужны современный браузер и подключение по HTTPS.');
     device = await readDevice(); const identity = await deviceIdentity(device);

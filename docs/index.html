@@ -116,7 +116,11 @@
             <p id="output-recipient" class="output-recipient"></p>
             <p class="compact-preview"><a id="output-preview" class="text-link" href="#">Новый пациент</a></p>
             <button id="copy-composed" type="button" class="button button-primary">Скопировать готовую надпись</button>
-            <p class="field-help compact-help">Подпись уже связана с адресом. Вставьте её в Пачку. При первой проверке убедитесь, что вставилась именно ссылка: приложение может убрать оформление.</p>
+            <p id="copy-output-help" class="field-help compact-help">Подпись уже связана с адресом. Вставьте её в Пачку. При первой проверке убедитесь, что вставилась именно ссылка: приложение может убрать оформление.</p>
+            <div id="short-output" hidden>
+              <label for="output-message">Сообщение для Пачки</label>
+              <textarea id="output-message" rows="3" readonly spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off"></textarea>
+            </div>
             <details id="compose-full-link" class="sharing-details">
               <summary>Другие способы копирования</summary>
               <div class="details-body">

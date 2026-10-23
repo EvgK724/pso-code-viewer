@@ -10,6 +10,8 @@ import {performance} from 'node:perf_hooks';
 import * as cryptography from '../docs/crypto.mjs';
 import * as exchange from '../docs/exchange.mjs';
 import * as sharing from '../docs/sharing.mjs';
+import * as shortlinks from '../docs/shortlinks.mjs';
+import {createShortlinkHandler} from '../server/shortlink-handler.mjs';
 
 if (!globalThis.crypto) globalThis.crypto = webcrypto;
 const html = await readFile(new URL('../docs/index.html', import.meta.url), 'utf8');
@@ -76,7 +78,7 @@ async function persistentDevice() {
 async function harness(persistent, initialHash = '', {
   richClipboard = false, rejectRich = false, rejectText = false,
   readText = '', rejectRead = false, deferRead = false, standalone = false, legacyStandalone = false,
-  nativeCopy = undefined
+  nativeCopy = undefined, shortlinkEndpoint = '', shortlinkFetch = undefined
 } = {}) {
   const elements = new Map();
   for (const match of html.matchAll(/<([a-z][a-z0-9-]*)\b([^>]*)>/gi)) {
@@ -179,7 +181,15 @@ async function harness(persistent, initialHash = '', {
     clearInterval(id) { intervals.delete(id); },
     addEventListener(type, fn) { globalListeners.set(type, fn); }
   });
-  const exportsFor = {'./crypto.mjs':cryptography, './exchange.mjs':exchange, './storage.mjs':storage, './sharing.mjs':sharing};
+  // Exercise the actual client and HTTP handler while replacing only transport.
+  class InjectedShortLinkClient extends shortlinks.ShortLinkClient {
+    constructor(endpoint) { super(endpoint, {fetch:shortlinkFetch}); }
+  }
+  const exportsFor = {
+    './crypto.mjs':cryptography, './exchange.mjs':exchange, './storage.mjs':storage, './sharing.mjs':sharing,
+    './shortlinks.mjs':{...shortlinks, ShortLinkClient:InjectedShortLinkClient},
+    './shortlink-config.mjs':{SHORTLINK_ENDPOINT:shortlinkEndpoint}
+  };
   const module = new vm.SourceTextModule(appSource, {context, identifier:origin + appPath + 'app.mjs', initializeImportMeta(meta) { meta.url = origin + appPath + 'app.mjs'; }});
   await module.link(specifier => {
     const entries = exportsFor[specifier];
@@ -741,4 +751,158 @@ test('native copy rejection falls back to labeled HTML and finally the complete 
     if (richClipboard) await assertCompactPayload(app, url);
     else assert.ok(app.clipboardAttempts().plain > 0);
   }
+});
+
+// No network or database is mocked above the HTTP boundary: these UI tests use
+// real client validation, signed envelopes, broker verification and decryption.
+async function shortlinkBroker(writerDevice) {
+  const senderID = (await exchange.deviceIdentity(writerDevice)).id;
+  const rows = new Map(), requests = [];
+  let enabled = true, pendingResolve;
+  const store = {
+    async getWriter(id) {
+      return id === senderID ? {enabled, signingPublicKey:writerDevice.signing.publicKey} : null;
+    },
+    async put(row) {
+      // Atomic within this fake adapter: no await separates the checks and write.
+      if (!enabled || row.senderID !== senderID) return 'denied';
+      const existing = rows.get(row.idHash);
+      if (existing) return existing.requestHash === row.requestHash && existing.senderID === row.senderID ? 'exists' : 'conflict';
+      rows.set(row.idHash, row);
+      return 'created';
+    },
+    async resolve(idHash, now) {
+      const row = rows.get(idHash);
+      return row && row.expires > now ? row : null;
+    }
+  };
+  const handler = createShortlinkHandler({store, allowedOrigin:origin, crypto:webcrypto});
+  const endpoint = 'https://relay.example/shortlinks';
+  const fetcher = async (url, options) => {
+    assert.equal(url, endpoint, 'All broker traffic uses the configured endpoint, without IDs in the URL');
+    const body = JSON.parse(options.body);
+    requests.push(body);
+    if (body.op === 'resolve' && pendingResolve) {
+      const gate = pendingResolve; pendingResolve = undefined;
+      gate.enter(); await gate.wait;
+    }
+    return handler(new Request(url, {...options, headers:{...options.headers, Origin:origin}}));
+  };
+  return {
+    rows, requests, options:{shortlinkEndpoint:endpoint, shortlinkFetch:fetcher},
+    disableWriter() { enabled = false; },
+    deferNextResolve() {
+      let enter, release;
+      const started = new Promise(resolve => { enter = resolve; });
+      const wait = new Promise(resolve => { release = resolve; });
+      pendingResolve = {enter, wait};
+      return {started, release};
+    }
+  };
+}
+
+async function composeShortMessage(app, recipientID, caption = 'patient') {
+  await app.event('show-write');
+  app.el('recipient').value = recipientID;
+  await app.event('recipient', 'change');
+  app.el('message-caption').value = caption;
+  await app.event('message-caption', 'change');
+  app.el('compose-surname').value = 'Тестов';
+  await app.event('compose-surname', 'input');
+  await app.event('compose-form', 'submit'); await app.idle();
+  assert.equal(app.el('compose-output').hidden, false, app.el('notice').textContent);
+  const url = app.el('output-link').value;
+  assert.equal(new URL(url).origin, origin);
+  assert.equal(new URL(url).pathname, appPath);
+  assert.match(new URL(url).hash, /^#r=[A-Za-z0-9_-]{22}$/);
+  assert.ok(url.length < 80 && !url.includes('PSO1.') && !url.includes('Тестов'));
+  return url;
+}
+
+test('short-link UI copies actual caption and short URL as plain text; recipient pastes full message or opens hash for 30 seconds', async () => {
+  const sender = await persistentDevice(), recipient = await persistentDevice();
+  const broker = await shortlinkBroker(sender.device);
+  // Even with both rich and native copy available, the primary action is plain
+  // text containing an actionable short URL, never the unlinked caption alone.
+  const a = await harness(sender, '', {...broker.options, richClipboard:true, nativeCopy:true});
+  const b = await harness(recipient, '', broker.options);
+  const senderCard = await exportCard(a, 'Тестовый отправитель');
+  const recipientCard = await exportCard(b, 'Тестовый получатель');
+  await addCard(a, recipientCard); await addCard(b, senderCard);
+  const recipientID = (await exchange.importPublicCard(recipientCard)).id;
+  let lastURL;
+  for (const [caption, label, department] of [
+    ['patient', 'Новый пациент', ''],
+    ['orit', 'Новый пациент ОРИТ', 'ОРИТ'],
+    ['test', 'Проверочная история', 'ОРИТ']
+  ]) {
+    lastURL = await composeShortMessage(a, recipientID, caption);
+    const before = a.clipboardAttempts();
+    await a.event('copy-composed');
+    assert.equal(a.clipboard(), label + '\n' + lastURL);
+    assert.deepEqual(a.clipboardAttempts(), {rich:before.rich, plain:before.plain+1});
+    assert.equal(a.nativeCopyAttempts(), 0);
+    assert.equal(a.el('output-message').value, a.clipboard());
+    assert.equal(a.el('compose-surname').value, '');
+    b.setReadText(a.clipboard());
+    await b.event('paste-open'); await b.idle();
+    assert.equal(b.el('result').hidden, false, b.el('notice').textContent);
+    assert.equal(b.el('surname').textContent, 'Тестов');
+    assert.equal(b.el('department').textContent, department);
+    assert.match(b.el('case-code').textContent, /Тестовый отправитель/);
+    b.advance(30001);
+    assert.equal(b.el('result').hidden, true);
+    assert.equal(b.el('surname').textContent, '');
+  }
+  assert.equal(broker.rows.size, 3);
+  assert.ok(!JSON.stringify(broker.requests).includes('Тестов'), 'Only ciphertext reaches the broker');
+  const reopened = await harness(recipient, new URL(lastURL).hash, {...broker.options, standalone:true});
+  await reopened.idle();
+  assert.equal(reopened.location.hash, '', 'Incoming capability is removed from the address bar');
+  assert.equal(reopened.el('handoff-panel').hidden, true);
+  assert.equal(reopened.el('surname').textContent, 'Тестов');
+  assert.equal(reopened.el('department').textContent, 'ОРИТ');
+  reopened.advance(30001);
+  assert.equal(reopened.el('result').hidden, true);
+  assert.equal(reopened.el('surname').textContent, '');
+});
+
+test('failed broker registration clears prior output and does not expose a fallback long or unregistered short link', async () => {
+  const device = await persistentDevice(), broker = await shortlinkBroker(device.device);
+  const app = await harness(device, '', broker.options);
+  await composeShortMessage(app, (await exchange.deviceIdentity(device.device)).id);
+  broker.disableWriter();
+  app.el('compose-surname').value = 'Тестов';
+  await app.event('compose-surname', 'input');
+  await app.event('compose-form', 'submit'); await app.idle();
+  assert.match(app.el('notice').textContent, /не подключён/);
+  assert.equal(app.el('compose-output').hidden, true);
+  assert.equal(app.el('output-link').value, '');
+  assert.equal(app.el('output-message').value, '');
+  assert.equal(app.el('copy-composed').disabled, true);
+  assert.equal(app.el('copy-composed-address').disabled, true);
+  assert.equal(app.el('compose-surname').value, '');
+  assert.equal(broker.rows.size, 1, 'Failed create does not register a second record');
+});
+
+test('a short-link resolve finishing after the app enters background cannot reveal a surname', async () => {
+  const sender = await persistentDevice(), recipient = await persistentDevice();
+  const broker = await shortlinkBroker(sender.device);
+  const a = await harness(sender, '', broker.options), b = await harness(recipient, '', broker.options);
+  const senderCard = await exportCard(a, 'Тестовый отправитель');
+  const recipientCard = await exportCard(b, 'Тестовый получатель');
+  await addCard(a, recipientCard); await addCard(b, senderCard);
+  const url = await composeShortMessage(a, (await exchange.importPublicCard(recipientCard)).id);
+  const gate = broker.deferNextResolve();
+  b.setReadText('Новый пациент\n' + url);
+  const opening = b.event('paste-open');
+  await gate.started;
+  await b.hide();
+  gate.release(); await opening; await b.idle();
+  assert.equal(b.el('result').hidden, true);
+  assert.equal(b.el('surname').textContent, '');
+  await b.show();
+  assert.equal(b.el('result').hidden, true, 'Returning to the foreground must not reveal automatically');
+  await b.event('paste-open'); await b.idle();
+  assert.equal(b.el('surname').textContent, 'Тестов', 'An explicit new request can still open the same valid link');
 });
