@@ -9,6 +9,7 @@ import {webcrypto} from 'node:crypto';
 import {performance} from 'node:perf_hooks';
 import * as cryptography from '../docs/crypto.mjs';
 import * as exchange from '../docs/exchange.mjs';
+import * as sharing from '../docs/sharing.mjs';
 
 if (!globalThis.crypto) globalThis.crypto = webcrypto;
 const html = await readFile(new URL('../docs/index.html', import.meta.url), 'utf8');
@@ -39,6 +40,7 @@ class Element {
     }
   }
   setAttribute(name, value) { this.attributes.set(name, value); }
+  removeAttribute(name) { this.attributes.delete(name); }
   append(...nodes) {
     this.children.push(...nodes);
     if (this.tag === 'select' && this.children.length === nodes.length) this.value = this.children[0]?.value || '';
@@ -69,7 +71,7 @@ async function persistentDevice() {
   return {device:await cryptography.makeDevice(), contacts:new Map(), name:''};
 }
 
-async function harness(persistent, initialHash = '') {
+async function harness(persistent, initialHash = '', {richClipboard = false, rejectRich = false, rejectText = false} = {}) {
   const elements = new Map();
   for (const match of html.matchAll(/<([a-z][a-z0-9-]*)\b([^>]*)>/gi)) {
     const id = match[2].match(/\bid="([^"]+)"/);
@@ -82,7 +84,7 @@ async function harness(persistent, initialHash = '') {
   };
   el('expiry').value = '1440';
   const docListeners = new Map(), globalListeners = new Map(), intervals = new Map();
-  let nextTimer = 1, clipboard = '', clock = 0;
+  let nextTimer = 1, clipboard = '', clock = 0, richItems = [], richAttempts = 0, plainAttempts = 0;
   const document = {
     hidden:false,
     getElementById:el,
@@ -109,17 +111,38 @@ async function harness(persistent, initialHash = '') {
     async getMyName() { return persistent.name; },
     async setMyName(name) { persistent.name = name; }
   };
+  class FakeClipboardItem {
+    constructor(contents) { this.contents = contents; this.types = Object.keys(contents); }
+    async getType(type) {
+      assert.ok(this.types.includes(type), 'Requested clipboard type exists');
+      return await this.contents[type];
+    }
+  }
+  const clipboardAPI = {
+    async writeText(value) {
+      plainAttempts++;
+      if (rejectText) throw new Error('Plain clipboard permission denied');
+      clipboard = value;
+    }
+  };
+  if (richClipboard) clipboardAPI.write = async items => {
+    richAttempts++;
+    if (rejectRich) throw new Error('Rich clipboard permission denied');
+    richItems = items;
+    clipboard = await (await items[0].getType('text/plain')).text();
+  };
   const context = vm.createContext({
     document, location,
     history:{replaceState() { location.hash = ''; }},
-    navigator:{clipboard:{async writeText(value) { clipboard = value; }}},
-    crypto:webcrypto, URL, console,
+    navigator:{clipboard:clipboardAPI},
+    crypto:webcrypto, URL, console, Blob,
+    ClipboardItem:richClipboard ? FakeClipboardItem : undefined,
     performance:{now:() => clock},
     setInterval(fn) { const id = nextTimer++; intervals.set(id, fn); return id; },
     clearInterval(id) { intervals.delete(id); },
     addEventListener(type, fn) { globalListeners.set(type, fn); }
   });
-  const exportsFor = {'./crypto.mjs':cryptography, './exchange.mjs':exchange, './storage.mjs':storage};
+  const exportsFor = {'./crypto.mjs':cryptography, './exchange.mjs':exchange, './storage.mjs':storage, './sharing.mjs':sharing};
   const module = new vm.SourceTextModule(appSource, {context, identifier:origin + appPath + 'app.mjs', initializeImportMeta(meta) { meta.url = origin + appPath + 'app.mjs'; }});
   await module.link(specifier => {
     const entries = exportsFor[specifier];
@@ -135,11 +158,14 @@ async function harness(persistent, initialHash = '') {
   return {
     el, persistent, location,
     clipboard:() => clipboard,
+    richItems:() => richItems,
+    clipboardAttempts:() => ({rich:richAttempts, plain:plainAttempts}),
     async event(id, type = 'click') { await el(id).fire(type); },
     async idle() { await waitUntil(() => !el('open').disabled, 'async operation completion'); },
     async hide() { document.hidden = true; await docListeners.get('visibilitychange')(); },
     async show() { document.hidden = false; await docListeners.get('visibilitychange')(); },
     async pagehide() { await globalListeners.get('pagehide')(); },
+    async hashchange(hash) { location.hash = hash; await globalListeners.get('hashchange')(); },
     advance(milliseconds) { clock += milliseconds; for (const fn of [...intervals.values()]) fn(); }
   };
 }
@@ -239,4 +265,151 @@ test('incoming link from unknown sender remains hidden until the sender card is 
   await app.pagehide();
   assert.equal(app.el('result').hidden, true);
   assert.equal(app.el('surname').textContent, '');
+});
+
+async function composeForSelf(app, surname = 'Петрова') {
+  await app.event('show-write');
+  app.el('recipient').value = (await exchange.deviceIdentity(app.persistent.device)).id;
+  await app.event('recipient', 'change');
+  app.el('compose-surname').value = surname;
+  await app.event('compose-form', 'submit'); await app.idle();
+  assert.equal(app.el('compose-output').hidden, false, app.el('notice').textContent);
+  const link = app.el('output-link').value;
+  assert.ok(link.startsWith(origin + appPath + '#pso=PSO1.'));
+  return link;
+}
+
+async function assertCompactPayload(app, expectedURL) {
+  const items = app.richItems();
+  assert.equal(items.length, 1);
+  const item = items[0];
+  assert.deepEqual([...item.types].sort(), ['text/html', 'text/plain']);
+  const rich = await (await item.getType('text/html')).text();
+  const plain = await (await item.getType('text/plain')).text();
+  assert.equal(plain, expectedURL, 'Plain paste must preserve the complete actionable URL');
+  assert.ok(rich.includes('href="' + expectedURL + '"'), 'Compact text must retain the complete target');
+  const visible = rich.replace(/<[^>]*>/g, '').trim();
+  assert.ok(visible.length > 0 && visible.length < 100, 'The visible label is compact');
+  assert.ok(!visible.includes('PSO1.') && !visible.includes('PSO-CARD1.'), 'Full payload is hidden in the link target');
+  for (const representation of [rich, plain]) {
+    assert.ok(!representation.includes('Петрова'), 'Clipboard must not contain the plaintext patient surname');
+  }
+}
+
+test('compact copy supplies labeled HTML and the complete plain URL, retaining old copy and encryption', async () => {
+  const app = await harness(await persistentDevice(), '', {richClipboard:true});
+  const card = await exportCard(app, 'Доктор А');
+  const cardURL = app.el('my-card-link').value;
+  assert.equal(sharing.cardFromInput(cardURL, origin + appPath), card);
+  assert.equal(app.el('my-card-preview').href, cardURL);
+  await app.event('copy-card-compact');
+  await assertCompactPayload(app, cardURL);
+  assert.equal(app.el('my-card').value, card, 'Sharing must not replace the original compatible card');
+  await app.event('copy-card');
+  assert.equal(app.clipboard(), card, 'Legacy raw-card copy remains available');
+
+  const messageURL = await composeForSelf(app);
+  assert.equal(app.el('output-preview').href, messageURL);
+  await app.event('copy-composed-compact');
+  await assertCompactPayload(app, messageURL);
+  await app.event('copy-composed');
+  assert.equal(app.clipboard(), messageURL, 'Legacy full-link copy remains available');
+  app.el('token').value = messageURL;
+  await app.event('open-form', 'submit'); await app.idle();
+  assert.equal(app.el('surname').textContent, 'Петрова', 'Presentation changes must preserve decryption');
+});
+
+test('unsupported or rejected rich clipboard falls back to full URLs for cards and encrypted records', async t => {
+  for (const options of [{richClipboard:false}, {richClipboard:true, rejectRich:true}]) {
+    await t.test(options.richClipboard ? 'rich clipboard rejects' : 'rich clipboard unavailable', async () => {
+      const app = await harness(await persistentDevice(), '', options);
+      const card = await exportCard(app, 'Доктор А');
+      const cardURL = app.el('my-card-link').value;
+      let before = app.clipboardAttempts();
+      await app.event('copy-card-compact');
+      assert.equal(app.clipboard(), cardURL);
+      assert.equal(app.clipboardAttempts().plain, before.plain + 1);
+      assert.equal(app.el('my-card').value, card);
+
+      const messageURL = await composeForSelf(app);
+      before = app.clipboardAttempts();
+      await app.event('copy-composed-compact');
+      assert.equal(app.clipboard(), messageURL);
+      assert.equal(app.clipboardAttempts().plain, before.plain + 1);
+      if (options.richClipboard) assert.equal(app.clipboardAttempts().rich, 2);
+    });
+  }
+});
+
+test('when both clipboard methods reject, manual-copy details expose the complete card and message URLs', async () => {
+  const app = await harness(await persistentDevice(), '', {richClipboard:true, rejectRich:true, rejectText:true});
+  app.el('my-name').value = 'Доктор А';
+  await app.event('export-card'); await app.idle();
+  const card = app.el('my-card').value, cardURL = app.el('my-card-link').value;
+  await app.event('copy-card-compact');
+  assert.equal(app.el('my-card-full').open, true);
+  assert.equal(app.el('my-card-link').value, cardURL);
+  assert.equal(app.el('my-card').value, card);
+  assert.match(app.el('notice').textContent, /Скопировать/);
+  const messageURL = await composeForSelf(app);
+  await app.event('copy-composed-compact');
+  assert.equal(app.el('compose-full-link').open, true);
+  assert.equal(app.el('output-link').value, messageURL);
+  assert.match(app.el('notice').textContent, /Скопировать/);
+});
+
+test('compact demo copy preserves a complete legacy demo link that opens on the same device', async () => {
+  const app = await harness(await persistentDevice(), '', {richClipboard:true});
+  await app.event('demo'); await app.idle();
+  const link = app.el('open-link').href;
+  assert.ok(link.startsWith(origin + appPath + '#pso=PSO-DEMO1.'));
+  await app.event('copy-demo-compact');
+  await assertCompactPayload(app, link);
+  app.el('token').value = link;
+  await app.event('open-form', 'submit'); await app.idle();
+  assert.equal(app.el('surname').textContent, 'Иванов');
+});
+
+async function assertUnverifiedPreview(app, expectedName, expectedFingerprint) {
+  await waitUntil(() => !app.el('contact-confirm').hidden, 'incoming card preview');
+  await app.idle();
+  assert.equal(app.el('candidate-name').textContent, expectedName);
+  assert.equal(app.el('candidate-fingerprint').textContent, expectedFingerprint);
+  assert.equal(app.el('confirm-fingerprint').checked, false);
+  assert.equal(app.el('save-contact').disabled, true);
+  assert.equal(app.persistent.contacts.size, 0, 'Opening a link never trusts or saves its public keys');
+  await app.event('save-contact');
+  assert.equal(app.persistent.contacts.size, 0, 'A direct event cannot bypass fingerprint confirmation');
+}
+
+test('card links on startup and hashchange only preview the contact and require explicit verification', async () => {
+  const sender = await persistentDevice(), recipient = await persistentDevice();
+  const card = await exchange.exportPublicCard(sender.device, 'Доктор А');
+  const imported = await exchange.importPublicCard(card);
+  const cardURL = sharing.cardLinkFor(card, origin + appPath);
+  const app = await harness(recipient, new URL(cardURL).hash);
+  await assertUnverifiedPreview(app, 'Доктор А', imported.fingerprint);
+  assert.equal(app.location.hash, '');
+
+  // A later incoming card must reset a checkbox left checked for an earlier candidate.
+  app.el('confirm-fingerprint').checked = true;
+  await app.event('confirm-fingerprint', 'change');
+  await app.hashchange(new URL(cardURL).hash);
+  await assertUnverifiedPreview(app, 'Доктор А', imported.fingerprint);
+  assert.equal(app.location.hash, '');
+
+  app.el('confirm-fingerprint').checked = true;
+  await app.event('confirm-fingerprint', 'change');
+  await app.event('save-contact'); await app.idle();
+  assert.equal(recipient.contacts.size, 1);
+  assert.equal(recipient.contacts.get(imported.id).card, card, 'Persist the unchanged canonical card');
+});
+
+test('pasted card URL uses the same verification flow and stores an old-format compatible card', async () => {
+  const sender = await persistentDevice(), recipient = await persistentDevice();
+  const card = await exchange.exportPublicCard(sender.device, 'Доктор А');
+  const app = await harness(recipient);
+  await addCard(app, sharing.cardLinkFor(card, origin + appPath));
+  const imported = await exchange.importPublicCard(card);
+  assert.equal(recipient.contacts.get(imported.id).card, card);
 });

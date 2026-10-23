@@ -78,6 +78,11 @@ summary::marker { color: var(--blue); font-size: 12px; }
 .details-body ol { padding-left: 23px; margin: 0 0 16px; }
 .details-body li { padding-left: 3px; margin-bottom: 10px; }
 .details-body strong { color: var(--text); font-weight: 600; }
+.compact-preview { font-size: 19px; line-height: 1.5; margin: 0 0 16px; }
+.compact-help { margin: 12px 0 16px !important; }
+.sharing-details { margin-top: 16px; border-top: 1px solid var(--border); border-bottom: 0; }
+.sharing-details .details-body { padding: 0 0 6px; }
+#my-card-link + button { margin-bottom: 22px; }
 .contact-section { border-top: 1px solid var(--border); padding-top: 22px; margin-top: 24px; }
 .contact-section h2 { font-size: 21px; line-height: 1.3; color: var(--text); margin: 0 0 18px; font-weight: 650; letter-spacing: -.3px; }
 .contact-section label { color: var(--text); }

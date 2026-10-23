@@ -65,6 +65,7 @@
             <button id="demo" type="button" class="button button-secondary">Создать тестовый код</button>
           </div>
           <div id="link-tools" class="link-tools" hidden>
+            <button id="copy-demo-compact" type="button" class="button button-secondary">Копировать для чата</button>
             <button id="copy-link" type="button" class="button button-secondary">Скопировать ссылку</button>
             <a id="open-link" class="text-link" href="#">Открыть тестовую ссылку <span aria-hidden="true">↗</span></a>
           </div>
@@ -91,9 +92,17 @@
           <div id="compose-output" class="output-block" hidden>
             <p class="eyebrow">Ссылка готова</p>
             <p id="output-recipient" class="output-recipient"></p>
-            <label for="output-link">Ссылка для сообщения</label>
-            <textarea id="output-link" rows="3" readonly spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off"></textarea>
-            <button id="copy-composed" type="button" class="button button-secondary">Скопировать ссылку</button>
+            <p class="compact-preview"><a id="output-preview" class="text-link" href="#">Открыть фамилию</a></p>
+            <button id="copy-composed-compact" type="button" class="button button-primary">Копировать для чата</button>
+            <p class="field-help compact-help">В Пачке вставьте как обычно. Если появится длинный адрес, выделите слова «Открыть фамилию» в сообщении и добавьте адрес через кнопку ссылки (🔗).</p>
+            <details id="compose-full-link" class="sharing-details">
+              <summary>Полная ссылка</summary>
+              <div class="details-body">
+                <label for="output-link">Адрес для копирования</label>
+                <textarea id="output-link" rows="3" readonly spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off"></textarea>
+                <button id="copy-composed" type="button" class="button button-secondary">Скопировать ссылку</button>
+              </div>
+            </details>
           </div>
           <p class="fine-print">Вставьте ссылку в нужный чат Пачки и допишите комментарий. Комментарий в чате этим просмотрщиком не шифруется.</p>
         </section>
@@ -113,19 +122,30 @@
               <input id="my-name" name="doctor-name" type="text" maxlength="60" autocomplete="off" spellcheck="false" autocorrect="off" placeholder="Ваше имя — ПСО">
               <button id="export-card" type="button" class="button button-secondary">Моя карточка для коллеги</button>
               <div id="my-card-box" class="output-block" hidden>
-                <label for="my-card">Карточка для копирования</label>
-                <textarea id="my-card" rows="3" readonly spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off"></textarea>
+                <p class="compact-preview"><a id="my-card-preview" class="text-link" href="#">Карточка врача</a></p>
+                <button id="copy-card-compact" type="button" class="button button-primary">Копировать для чата</button>
+                <p class="field-help compact-help">Коллега открывает ссылку и сверяет код ниже. Если Пачка вставляет длинный адрес, добавьте его к словам «Карточка врача» через кнопку ссылки (🔗).</p>
                 <p class="device-label">Мой контрольный код</p>
                 <p id="my-fingerprint" class="device-id fingerprint"></p>
-                <button id="copy-card" type="button" class="button button-secondary">Скопировать карточку</button>
+                <details id="my-card-full" class="sharing-details">
+                  <summary>Полная ссылка и карточка</summary>
+                  <div class="details-body">
+                    <label for="my-card-link">Ссылка на карточку</label>
+                    <textarea id="my-card-link" rows="3" readonly spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off"></textarea>
+                    <button id="copy-card-link" type="button" class="button button-secondary">Скопировать ссылку</button>
+                    <label for="my-card">Карточка в прежнем формате</label>
+                    <textarea id="my-card" rows="3" readonly spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off"></textarea>
+                    <button id="copy-card" type="button" class="button button-secondary">Скопировать карточку</button>
+                  </div>
+                </details>
               </div>
             </section>
 
             <section class="contact-section" aria-labelledby="add-contact-heading">
               <h2 id="add-contact-heading">Добавить коллегу</h2>
               <form id="contact-form" autocomplete="off">
-                <label for="contact-input">Карточка от врача</label>
-                <textarea id="contact-input" rows="3" maxlength="5000" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" placeholder="Вставьте карточку, которую прислал коллега" required></textarea>
+                <label for="contact-input">Карточка или ссылка от врача</label>
+                <textarea id="contact-input" rows="3" maxlength="5000" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" placeholder="Вставьте карточку или ссылку, которую прислал коллега" required></textarea>
                 <button id="inspect-contact" type="submit" class="button button-secondary">Проверить карточку</button>
               </form>
               <div id="contact-confirm" class="contact-confirm" hidden>

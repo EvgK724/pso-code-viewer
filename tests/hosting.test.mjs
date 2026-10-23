@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import {readFile, access} from 'node:fs/promises';
 import {linkForToken, tokenFromInput} from '../docs/crypto.mjs';
+import {cardLinkFor, cardFromInput, compactLinkContents} from '../docs/sharing.mjs';
 
 const token = 'PSO1.recipient.sender.cipher.signature';
 const origin = 'https://viewer.example';
@@ -33,6 +34,56 @@ test('an app accepts only links for its own origin and app path', () => {
   ]) assert.throws(() => tokenFromInput(invalid, base), /данному просмотрщику/);
 });
 
+test('public-card links preserve complete cards and support existing raw cards and both hosting paths', () => {
+  const card = 'PSO-CARD1.eyJ2IjoxLCJuIjoiRG9jdG9yIn0';
+  for (const path of ['/', '/pso-code-viewer/']) {
+    const base = origin + path;
+    const url = cardLinkFor(card, base);
+    assert.equal(url, base + '#card=' + card);
+    assert.equal(cardLinkFor(card, base + 'index.html'), url);
+    assert.equal(cardFromInput(card, base), card, 'Raw cards remain supported');
+    assert.equal(cardFromInput(url, base), card);
+    assert.equal(cardFromInput(base + 'index.html#card=' + card, base), card);
+    assert.equal(new URL(url).search, '', 'Card material must remain in the URL fragment');
+  }
+});
+
+test('public-card URL parser rejects foreign destinations, query payloads, credentials and wrong routes', () => {
+  const base = origin + '/pso-code-viewer/';
+  const card = 'PSO-CARD1.eyJ2IjoxLCJuIjoiRG9jdG9yIn0';
+  for (const invalid of [
+    origin + '/#card=' + card,
+    origin + '/another-app/#card=' + card,
+    'https://other.example/pso-code-viewer/#card=' + card,
+    base + '?tracking=anything#card=' + card,
+    'https://user:password@viewer.example/pso-code-viewer/#card=' + card,
+    base + '#pso=' + card,
+    base + '#card=%',
+    base + '#card=' + 'x'.repeat(6000)
+  ]) assert.throws(() => cardFromInput(invalid, base), 'Untrusted or malformed card URL must be rejected');
+});
+
+test('compact clipboard payload preserves the entire target and escapes labels without HTML injection', () => {
+  const base = origin + '/pso-code-viewer/';
+  const url = linkForToken(token, base);
+  const content = compactLinkContents(url, 'Открыть запись', base);
+  assert.equal(content.plain, url);
+  assert.ok(content.html.includes('href="' + url + '"'));
+  assert.equal(content.html.replace(/<[^>]*>/g, ''), 'Открыть запись');
+  const maliciousLabel = '<img src=x onerror=alert(1)> & "Доктор"';
+  const escaped = compactLinkContents(url, maliciousLabel, base);
+  assert.ok(!escaped.html.includes('<img'));
+  assert.ok(escaped.html.includes('&lt;img'));
+  assert.ok(escaped.html.includes('&amp;'));
+  assert.equal(escaped.plain, url);
+  for (const invalid of [
+    'javascript:alert(1)',
+    'https://other.example/pso-code-viewer/#pso=' + token,
+    origin + '/another-app/#pso=' + token,
+    base + '?data=anything#pso=' + token
+  ]) assert.throws(() => compactLinkContents(invalid, 'Открыть', base));
+});
+
 test('PWA entry, scope and icon resources resolve inside both deployment locations', async () => {
   const manifest = JSON.parse(await readFile(new URL('../docs/manifest.webmanifest', import.meta.url), 'utf8'));
   for (const path of ['/', '/pso-code-viewer/']) {
@@ -57,7 +108,7 @@ test('service worker serves its own offline shell and leaves sibling app request
   for (const path of ['/', '/pso-code-viewer/']) {
     const handlers = new Map(), deleted = [], installed = [];
     const prefix = 'pso-viewer-' + encodeURIComponent(path) + '-shell-';
-    const current = prefix + 'github-v1';
+    const current = prefix + 'github-v2-compact';
     const unrelated = 'pso-viewer-%2Fanother-app%2F-shell-github-v1';
     const cached = {status:200, body:'offline-shell'};
     const cache = {
@@ -78,6 +129,7 @@ test('service worker serves its own offline shell and leaves sibling app request
     handlers.get('install')({waitUntil(promise) { installation = promise; }});
     await installation;
     assert.ok(installed.includes('./') && installed.includes('./index.html'));
+    assert.ok(installed.includes('./sharing.mjs'), 'Compact-sharing logic must be available offline');
     assert.ok(installed.every(file => new URL(file, origin + path + 'sw.js').pathname.startsWith(path)));
     let activation;
     handlers.get('activate')({waitUntil(promise) { activation = promise; }});
