@@ -3,11 +3,11 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#111113">
+  <meta name="theme-color" content="#0c1018">
   <meta name="referrer" content="no-referrer">
   <meta name="robots" content="noindex, nofollow, noarchive">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; worker-src 'self'; connect-src 'self' https://spugfikalpihorcwcdqc.supabase.co; manifest-src 'self'; base-uri 'none'; form-action 'none'">
-  <meta name="description" content="ПСО Код: создание и просмотр зашифрованных ссылок для выбранного врача.">
+  <meta name="description" content="ПСО: просмотр сообщений и проверочные истории для команды.">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="ПСО Просмотр">
@@ -26,10 +26,20 @@
 
     <main>
       <section class="intro" aria-labelledby="page-title">
-        <p class="prototype-badge">Пилот · ручной обмен</p>
-        <h1 id="page-title">Пациент<br>по коду</h1>
-        <p class="lead">Откройте фамилию по ссылке или создайте ссылку для&nbsp;коллеги.</p>
-        <p class="fine-print">Вход без учётной записи. Для подключения телефона добавьте приложение на экран «Домой» и создайте свою карточку.</p>
+        <h1 id="page-title">Сообщения ПСО</h1>
+        <p class="lead">Фамилия по ссылке — на 30 секунд.</p>
+      </section>
+
+      <section id="team-panel" class="team-panel" aria-labelledby="team-heading" hidden>
+        <div class="team-heading-row"><h2 id="team-heading">Подключение</h2><button id="team-refresh" type="button" class="text-button">Обновить</button></div>
+        <p id="team-state" role="status">Проверяем подключение…</p>
+        <div id="join-panel" hidden>
+          <p id="join-hint"></p>
+          <button id="team-claim" type="button" class="button button-primary">Подключить этот телефон</button>
+          <button id="copy-join" type="button" class="button button-secondary">Скопировать приглашение</button>
+          <details><summary>Ссылка приглашения</summary><textarea id="join-link" rows="2" readonly></textarea></details>
+        </div>
+        <details id="team-code-box" hidden><summary>Мой контрольный код</summary><p id="team-my-code" class="device-id fingerprint"></p></details>
       </section>
 
       <section id="result" class="result-card" aria-labelledby="surname" hidden>
@@ -49,16 +59,16 @@
 
       <nav class="mode-switch" aria-label="Действие с кодом">
         <button id="show-read" type="button" aria-pressed="true" aria-controls="read-panel">Открыть</button>
-        <button id="show-write" type="button" aria-pressed="false" aria-controls="write-panel">Создать ссылку</button>
+        <button id="show-write" type="button" aria-pressed="false" aria-controls="write-panel" hidden>Проверочная история</button>
       </nav>
 
       <div class="input-card">
         <p id="status" class="device-status" role="status">Подготовка…</p>
         <section id="handoff-panel" class="handoff-panel" aria-labelledby="handoff-heading" hidden>
           <h2 id="handoff-heading">Открыть в установленном просмотрщике</h2>
-          <p id="handoff-hint">Если подключали врачей через синий значок на экране «Домой», откройте ссылку там. Браузер может использовать другой ключ.</p>
+          <p id="handoff-hint">Откройте эту ссылку через синий значок на экране «Домой».</p>
           <button id="copy-handoff" type="button" class="button button-primary">Скопировать для приложения</button>
-          <p class="fine-print">Затем откройте синий значок «ПСО Код» → «Вставить и открыть». Эта страница не может сама переключить iPhone в установленный просмотрщик.</p>
+          <p class="fine-print">Синий значок → «Вставить и открыть».</p>
           <details id="handoff-full-link" class="sharing-details">
             <summary>Полная ссылка для ручного копирования</summary>
             <div class="details-body">
@@ -69,16 +79,12 @@
         </section>
         <section id="read-panel" aria-labelledby="input-label">
           <button id="paste-open" type="button" class="button button-primary">Вставить и открыть</button>
-          <p class="field-help compact-help">Сначала скопируйте ссылку из Пачки или браузера. Если iPhone спросит разрешение на вставку, подтвердите его.</p>
+          <p class="field-help compact-help">Скопируйте ссылку из Пачки и нажмите кнопку.</p>
           <form id="open-form" autocomplete="off">
-            <label id="input-label" for="token">Зашифрованный код или ссылка</label>
+            <label id="input-label" for="token">Ссылка из сообщения</label>
             <textarea id="token" name="token" rows="3" maxlength="5000" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" placeholder="Или вставьте ссылку вручную сюда"></textarea>
             <button id="open" type="submit" class="button button-secondary">Открыть на 30 секунд</button>
           </form>
-          <div class="demo-action">
-            <span class="demo-caption">Проверка на вымышленной фамилии — только на этом телефоне. Для коллеги используйте «Создать ссылку» и выберите его в получателях.</span>
-            <button id="demo" type="button" class="button button-secondary">Проверить этот телефон</button>
-          </div>
           <div id="link-tools" class="link-tools" hidden>
             <button id="copy-demo-compact" type="button" class="button button-secondary">Копировать для чата</button>
             <button id="copy-link" type="button" class="button button-secondary">Скопировать ссылку</button>
@@ -87,23 +93,17 @@
         </section>
 
         <section id="write-panel" aria-labelledby="compose-label" hidden>
-          <p class="field-help">Для создания коротких ссылок администратор один раз подключает вашу открытую карточку. Передайте ему карточку из раздела «Контакты врачей». Если она уже есть, используйте прежнюю.</p>
+          <p class="field-help">Для уточнения или проверки истории. Поступления сообщает бот.</p>
           <form id="compose-form" autocomplete="off">
             <label id="compose-label" for="compose-surname">Фамилия пациента</label>
-            <input id="compose-surname" name="surname" type="text" maxlength="80" spellcheck="false" autocapitalize="words" autocomplete="off" autocorrect="off" placeholder="Сначала проверьте на вымышленной фамилии" required>
-            <label for="recipient">Кому открыть фамилию</label>
+            <input id="compose-surname" name="surname" type="text" maxlength="80" spellcheck="false" autocapitalize="words" autocomplete="off" autocorrect="off" placeholder="Введите фамилию" required>
+            <label for="recipient">В какой чат</label>
             <select id="recipient" name="recipient" required>
-              <option value="">Сначала добавьте врача в контакты</option>
+              <option value="">Выберите чат</option>
             </select>
-            <p class="field-help">Ссылку сможет открыть только выбранный получатель. Для другого врача создайте отдельную ссылку.</p>
+            <p class="field-help">Ссылку откроют подключённые получатели этого чата.</p>
             <label class="check-label" for="compose-orit"><input id="compose-orit" type="checkbox"><span>Пациент в ОРИТ</span></label>
-            <label for="message-caption">Подпись ссылки в чате</label>
-            <select id="message-caption" name="message-caption">
-              <option value="patient" selected>Новый пациент</option>
-              <option value="orit">Новый пациент ОРИТ</option>
-              <option value="test">Проверочная история</option>
-            </select>
-            <p class="field-help">Подпись будет видна в чате. «Проверочная история» меняет только подпись — вымышленную фамилию введите сами.</p>
+            <input id="message-caption" type="hidden" value="test">
             <label for="expiry">Срок открытия ссылки</label>
             <select id="expiry" name="expiry">
               <option value="60">1 час</option>
@@ -111,12 +111,12 @@
               <option value="1440" selected>24 часа</option>
             </select>
             <button id="encrypt" type="submit" class="button button-primary">Создать ссылку</button>
-            <p id="push-compose-help" class="fine-print" hidden>При создании ссылки выбранному врачу сразу отправится уведомление, если он включил их и добавил вашу карточку.</p>
+            <p id="push-compose-help" class="fine-print" hidden>Получатели с включёнными уведомлениями получат оповещение.</p>
           </form>
           <div id="compose-output" class="output-block" hidden>
             <p class="eyebrow">Ссылка готова</p>
             <p id="output-recipient" class="output-recipient"></p>
-            <p class="compact-preview"><a id="output-preview" class="text-link" href="#">Новый пациент</a></p>
+            <p class="compact-preview"><a id="output-preview" class="text-link" href="#">Проверочная история</a></p>
             <button id="copy-composed" type="button" class="button button-primary">Скопировать готовую надпись</button>
             <p id="copy-output-help" class="field-help compact-help">Подпись уже связана с адресом. Вставьте её в Пачку. При первой проверке убедитесь, что вставилась именно ссылка: приложение может убрать оформление.</p>
             <div id="short-output" hidden>
@@ -134,28 +134,60 @@
               </div>
             </details>
           </div>
-          <p class="fine-print">Вставьте ссылку в нужный чат Пачки и допишите комментарий. Комментарий в чате этим просмотрщиком не шифруется.</p>
+          <p class="fine-print">Скопируйте ссылку в выбранный чат. Комментарий в Пачке виден участникам чата.</p>
         </section>
         <p id="notice" class="notice" role="status" aria-live="polite" tabindex="-1"></p>
       </div>
 
       <section id="push-panel" class="push-panel" aria-labelledby="push-heading">
         <h2 id="push-heading">Уведомления</h2>
-        <p>Нажмите уведомление «Новое сообщение ПСО» — откроется нужная запись в просмотрщике. Фамилии в уведомлении нет.</p>
+        <p>Нажатие на уведомление откроет запись. Фамилия остаётся внутри просмотрщика.</p>
         <p id="push-status" class="push-status" role="status" aria-live="polite">Подготовка уведомлений…</p>
         <div class="push-actions">
           <button id="push-enable" type="button" class="button button-primary" disabled>Включить уведомления</button>
           <button id="push-test" type="button" class="button button-secondary" disabled hidden>Проверить уведомление</button>
           <button id="push-disable" type="button" class="button button-secondary" disabled hidden>Отключить уведомления</button>
         </div>
-        <p class="fine-print">Принимать уведомления можно от добавленных вами врачей. Ссылку в Пачке можно использовать по-прежнему.</p>
+        <p class="fine-print">Разрешите один раз на этом телефоне.</p>
       </section>
 
+      <details id="team-admin" class="admin-panel" hidden>
+        <summary>Управление командой</summary>
+        <div class="details-body">
+          <section class="contact-section">
+            <h2>Пригласить врача</h2>
+            <form id="invite-form" autocomplete="off">
+              <label for="invite-name">Фамилия и имя</label>
+              <input id="invite-name" type="text" maxlength="60" required autocomplete="off" placeholder="Фамилия врача">
+              <label for="invite-role">Роль</label>
+              <select id="invite-role"><option value="neurologist">Невролог</option><option value="intensivist">Реаниматолог</option><option value="cardiologist">Кардиолог</option><option value="bot">Бот поступлений</option></select>
+              <button id="invite-create" type="submit" class="button button-primary">Создать приглашение</button>
+            </form>
+            <div id="invite-output" class="output-block" hidden>
+              <label for="invite-link">Личная ссылка подключения</label>
+              <textarea id="invite-link" rows="2" readonly></textarea>
+              <button id="copy-invite" type="button" class="button button-secondary">Скопировать приглашение</button>
+              <p class="fine-print">После заявки сверите код телефона с врачом и подтвердите подключение.</p>
+            </div>
+          </section>
+          <section class="contact-section"><h2>Заявки</h2><div id="team-pending"></div></section>
+          <section class="contact-section"><h2>Подключены</h2><div id="team-members"></div></section>
+        </div>
+      </details>
+      <details class="settings-panel">
+        <summary>Настройки и помощь</summary>
+        <div class="details-body">
+          <div class="demo-action">
+            <span class="demo-caption">Вымышленный пример — только для проверки этого телефона.</span>
+            <button id="demo" type="button" class="button button-secondary">Проверить этот телефон</button>
+          </div>
+        </div>
       <div class="details-group">
         <details id="contacts-details">
-          <summary>Контакты врачей</summary>
+          <summary>Контакты для старых ссылок</summary>
           <div class="details-body">
-            <p>Один раз обменяйтесь карточками с коллегой и добавьте друг друга в контакты. Карточка содержит открытые ключи, без фамилий пациентов и секретного ключа.</p>
+            <p>Прежние карточки сохранены для старых ссылок. Для новых сообщений администратор подключает врачей по приглашению и назначает роль.</p>
+            <p>Карточка содержит открытые ключи, без фамилий пациентов и секретного ключа.</p>
             <p>Добавляйте только врачей из ваших чатов. Сверьте контрольный код лично или по известному номеру телефона.</p>
 
             <section class="contact-section" aria-labelledby="my-card-heading">
@@ -231,9 +263,9 @@
           </div>
         </details>
       </div>
+      </details>
       <footer>
-        <p>Бот и больничные отчёты пока не подключены. Состав чатов Пачки автоматически не проверяется.</p>
-        <p class="footer-note">Сначала проверьте обмен между телефонами на вымышленных фамилиях.</p>
+        <p>Поступления — от бота. Проверочные истории — от неврологов.</p>
       </footer>
     </main>
   </div>

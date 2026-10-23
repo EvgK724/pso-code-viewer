@@ -4,7 +4,7 @@ import vm from 'node:vm';
 import {readFile, access} from 'node:fs/promises';
 import {linkForToken, tokenFromInput} from '../docs/crypto.mjs';
 import {cardLinkFor, cardFromInput, compactLinkContents} from '../docs/sharing.mjs';
-import {SHORTLINK_ENDPOINT, PUSH_ENDPOINT} from '../docs/shortlink-config.mjs';
+import {SHORTLINK_ENDPOINT, PUSH_ENDPOINT, TEAM_ENDPOINT} from '../docs/shortlink-config.mjs';
 
 const token = 'PSO1.recipient.sender.cipher.signature';
 const origin = 'https://viewer.example';
@@ -113,6 +113,9 @@ test('enabled broker uses one HTTPS endpoint permitted by exact CSP origin witho
   assert.equal(pushEndpoint.origin, endpoint.origin, 'Push uses the same explicitly permitted service origin');
   assert.equal(pushEndpoint.pathname, '/functions/v1/pso-push');
   for (const field of ['username', 'password', 'search', 'hash']) assert.equal(pushEndpoint[field], '');
+  const teamEndpoint = new URL(TEAM_ENDPOINT);
+  assert.equal(teamEndpoint.origin,endpoint.origin);
+  assert.equal(teamEndpoint.pathname,'/functions/v1/pso-team');
   const html = await readFile(new URL('../docs/index.html', import.meta.url), 'utf8');
   const policy = html.match(/http-equiv="Content-Security-Policy" content="([^"]+)"/)?.[1];
   assert.ok(policy, 'Document has an explicit CSP');
@@ -120,7 +123,7 @@ test('enabled broker uses one HTTPS endpoint permitted by exact CSP origin witho
   assert.deepEqual(directives.get('connect-src'), ["'self'", endpoint.origin]);
   assert.deepEqual(directives.get('script-src'), ["'self'"], 'Broker access must not grant external script execution');
   assert.deepEqual(directives.get('form-action'), ["'none'"]);
-  assert.match(html, /администратор один раз подключает вашу открытую карточку/);
+  assert.match(html, /После заявки сверите код телефона с врачом/);
 });
 
 test('service worker serves its own offline shell and leaves sibling app requests/caches alone', async () => {
@@ -128,7 +131,7 @@ test('service worker serves its own offline shell and leaves sibling app request
   for (const path of ['/', '/pso-code-viewer/']) {
     const handlers = new Map(), deleted = [], installed = [];
     const prefix = 'pso-viewer-' + encodeURIComponent(path) + '-shell-';
-    const current = prefix + 'github-v7-web-push';
+    const current = prefix + 'github-v8-team-roles';
     const unrelated = 'pso-viewer-%2Fanother-app%2F-shell-github-v1';
     const cached = {status:200, body:'offline-shell'};
     const cache = {
@@ -151,6 +154,7 @@ test('service worker serves its own offline shell and leaves sibling app request
     assert.ok(installed.includes('./') && installed.includes('./index.html'));
     assert.ok(installed.includes('./sharing.mjs'), 'Compact-sharing logic must be available offline');
     assert.ok(installed.includes('./shortlinks.mjs') && installed.includes('./shortlink-config.mjs'), 'Client and configuration must update with the same offline shell');
+    assert.ok(installed.includes('./team.mjs'), 'Team client updates with the shell');
     assert.ok(installed.includes('./push.mjs'), 'Notification client must update with its shell');
     assert.ok(installed.every(file => new URL(file, origin + path + 'sw.js').pathname.startsWith(path)));
     let activation;

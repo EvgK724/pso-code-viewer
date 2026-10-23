@@ -12,6 +12,7 @@ import * as exchange from '../docs/exchange.mjs';
 import * as sharing from '../docs/sharing.mjs';
 import * as shortlinks from '../docs/shortlinks.mjs';
 import * as push from '../docs/push.mjs';
+import * as team from '../docs/team.mjs';
 import {createShortlinkHandler} from '../server/shortlink-handler.mjs';
 
 if (!globalThis.crypto) globalThis.crypto = webcrypto;
@@ -80,7 +81,7 @@ async function harness(persistent, initialHash = '', {
   richClipboard = false, rejectRich = false, rejectText = false,
   readText = '', rejectRead = false, deferRead = false, standalone = false, legacyStandalone = false, initialHidden = false,
   nativeCopy = undefined, shortlinkEndpoint = '', shortlinkFetch = undefined,
-  pushEndpoint = '', pushFetch = undefined, notificationPermission = 'default', pushSubscription = null, permissionResult = 'granted', rejectSubscribe = false, rejectUnsubscribe = false
+  teamEndpoint = '', teamFetch = undefined, pushEndpoint = '', pushFetch = undefined, notificationPermission = 'default', pushSubscription = null, permissionResult = 'granted', rejectSubscribe = false, rejectUnsubscribe = false
 } = {}) {
   const elements = new Map();
   for (const match of html.matchAll(/<([a-z][a-z0-9-]*)\b([^>]*)>/gi)) {
@@ -195,11 +196,13 @@ async function harness(persistent, initialHash = '', {
     constructor(endpoint) { super(endpoint, {fetch:shortlinkFetch}); }
   }
   class InjectedPushClient extends push.PushClient { constructor(endpoint){super(endpoint,{fetch:pushFetch});} }
+  class InjectedTeamClient extends team.TeamClient {constructor(endpoint){super(endpoint,{fetch:teamFetch});}}
   const exportsFor = {
     './crypto.mjs':cryptography, './exchange.mjs':exchange, './storage.mjs':storage, './sharing.mjs':sharing,
     './shortlinks.mjs':{...shortlinks, ShortLinkClient:InjectedShortLinkClient},
-    './shortlink-config.mjs':{SHORTLINK_ENDPOINT:shortlinkEndpoint,PUSH_ENDPOINT:pushEndpoint},
-    './push.mjs':{...push,PushClient:InjectedPushClient}
+    './shortlink-config.mjs':{SHORTLINK_ENDPOINT:shortlinkEndpoint,PUSH_ENDPOINT:pushEndpoint,TEAM_ENDPOINT:teamEndpoint},
+    './push.mjs':{...push,PushClient:InjectedPushClient},
+    './team.mjs':{...team,TeamClient:InjectedTeamClient}
   };
   const module = new vm.SourceTextModule(appSource, {context, identifier:origin + appPath + 'app.mjs', initializeImportMeta(meta) { meta.url = origin + appPath + 'app.mjs'; }});
   await module.link(specifier => {
@@ -1108,4 +1111,93 @@ test('composition notifies only the created short-link capability; push failure 
     assert.equal((await exchange.openSurname(recipient.device, token, [senderContact])).surname, 'Тестов');
     await assert.rejects(exchange.openSurname(sender.device, token, [senderContact]), /получател|браузер/);
   });
+});
+
+async function teamFixture(stores,roles,{pushResult='unavailable',resolveStatus=0}={}){
+  const records=new Map(),requests=[],members=[];
+  for(let i=0;i<stores.length;i++){const card=await exchange.exportPublicCard(stores[i].device,'Врач '+i),c=await exchange.importPublicCard(card);members.push({id:c.id,name:'Врач '+i,role:roles[i],card});}
+  let pending=[];
+  const fetcher=async(url,options)=>{
+    const e=JSON.parse(options.body).envelope;requests.push(e);const own=await exchange.importPublicCard(e.card),m=members.find(m=>m.id===own.id);
+    const response=(v,status=200)=>new Response(JSON.stringify(v),{status,headers:{'Content-Type':'application/json'}});
+    if(e.op==='status')return response(m?{state:'active',name:m.name,role:m.role}:{state:'unregistered',name:null,role:null});
+    if(e.op==='directory')return response({members});
+    if(e.op==='pending')return response({members:pending});
+    if(e.op==='claim'){pending.push({id:own.id,name:'Заявка',role:'neurologist',card:e.card});return response({state:'pending'});}
+    if(e.op==='approve'){const entry=pending.find(v=>v.id===e.data.deviceId);if(entry){members.push(entry);pending=pending.filter(v=>v!==entry);}return response({state:'active'});}
+    if(e.op==='invite')return response({id:e.data.id,expires:Date.now()+60000});
+    if(e.op==='create'){records.set(e.data.id,{...e.data,sender:m});return response({id:e.data.id,expires:e.data.expires,push:pushResult});}
+    if(e.op==='resolve'){
+      if(resolveStatus)return response({error:'request_rejected'},resolveStatus);
+      const r=records.get(e.data.id);if(!r)return response({error:'request_rejected'},404);
+      const entry=r.entries.find(e=>e.recipientId===own.id);if(!entry)return response({error:'request_rejected'},403);
+      return response({token:entry.token,expires:r.expires,senderCard:r.sender.card,senderName:r.sender.name});
+    }
+    return response({error:'request_rejected'},403);
+  };
+  return {members,records,requests,setPending(value){pending=value;},options:{teamEndpoint:'https://team.example/api',teamFetch:fetcher,shortlinkEndpoint:'https://legacy.example/api',shortlinkFetch:async()=>new Response('{}',{status:404,headers:{'Content-Type':'application/json'}})}};
+}
+
+test('team UI exposes manual review only to neurologists/admin and never offers self/individual recipients',async()=>{
+ const stores=await Promise.all(Array.from({length:4},()=>persistentDevice()));const service=await teamFixture(stores,['neurologist','cardiologist','intensivist','bot']);
+ for(let i=0;i<stores.length;i++){
+  const app=await harness(stores[i],'',service.options);
+  assert.equal(app.el('show-write').hidden,i!==0);
+  assert.deepEqual(app.el('recipient').options.map(o=>o.value),['','cardiology','orit']);
+  if(i!==0){app.el('recipient').value='orit';app.el('compose-surname').value='Тестов';await app.event('compose-form','submit');assert.equal(app.el('compose-output').hidden,true);}
+ }
+ assert.equal(service.requests.filter(e=>e.op==='create').length,0);
+});
+
+test('one review link opens only each approved group recipient; unknown writer cards never persist locally',async()=>{
+ const stores=await Promise.all(Array.from({length:4},()=>persistentDevice()));const service=await teamFixture(stores,['neurologist','intensivist','intensivist','cardiologist'],{pushResult:'partial'});
+ const a=await harness(stores[0],'',service.options);a.el('recipient').value='orit';a.el('compose-surname').value='Тестов';a.el('compose-orit').checked=true;
+ await a.event('compose-form','submit');await a.idle();const url=a.el('output-link').value;assert.ok(url, a.el('notice').textContent);await a.event('copy-composed');assert.equal(a.clipboard(),'Проверочная история\n'+url);
+ const creation=service.requests.find(e=>e.op==='create');assert.equal(creation.data.kind,'review');assert.deepEqual(creation.data.entries.map(e=>e.recipientId).sort(),service.members.slice(1,3).map(m=>m.id).sort());assert.ok(!JSON.stringify(creation).includes('Тестов'));assert.match(a.el('notice').textContent,/Скопированы/);
+ for(let i=1;i<4;i++){
+  const b=await harness(stores[i],'',service.options);b.el('token').value=url;await b.event('open-form','submit');await b.idle();
+  if(i<3){assert.equal(b.el('surname').textContent,'Тестов');assert.equal(b.el('department').textContent,'ОРИТ');}else{assert.equal(b.el('result').hidden,true);assert.match(b.el('notice').textContent,/доступа/);}
+  assert.equal(stores[i].contacts.size,0,'Directory trust is memory-only; it does not replace legacy contact storage');
+ }
+});
+
+test('team resolve403 never falls back to legacy broker while404 still opens existing encrypted links',async()=>{
+ const sender=await persistentDevice(),recipient=await persistentDevice();const senderCard=await exchange.exportPublicCard(sender.device,'Отправитель'),senderContact=await exchange.importPublicCard(senderCard);recipient.contacts.set(senderContact.id,{id:senderContact.id,card:senderCard,verified:true});
+ const rec={...await exchange.importPublicCard(await exchange.exportPublicCard(recipient.device,'Получатель')),verified:true};const broker=await shortlinkBroker(sender.device);const client=new shortlinks.ShortLinkClient(broker.options.shortlinkEndpoint,{fetch:broker.options.shortlinkFetch});const link=await client.create(sender.device,await exchange.sealSurname(sender.device,rec,'Тестов'),1440,origin+appPath);
+ for(const status of [403,404]){
+  const service=await teamFixture([recipient],['cardiologist'],{resolveStatus:status});let legacyCalls=0;
+  const app=await harness(recipient,'',{...service.options,...broker.options,shortlinkFetch:async(...args)=>{legacyCalls++;return broker.options.shortlinkFetch(...args);}});
+  app.el('token').value=link;await app.event('open-form','submit');await app.idle();assert.equal(legacyCalls,status===404?1:0);assert.equal(app.el('result').hidden,status!==404);
+ }
+});
+
+test('activation never submits on opening invitation or in ordinary browser; explicit installed action requests review',async()=>{
+ const store=await persistentDevice(),service=await teamFixture([],[]),id=team.randomTeamID();
+ const browser=await harness(store,'#join='+id,service.options);await waitUntil(()=>!browser.el('join-panel').hidden,'join visible');assert.equal(service.requests.filter(e=>e.op==='claim').length,0);assert.equal(browser.el('team-claim').disabled,true);await browser.event('team-claim');assert.equal(service.requests.filter(e=>e.op==='claim').length,0);
+ const app=await harness(store,'#join='+id,{...service.options,standalone:true});await waitUntil(()=>!app.el('join-panel').hidden,'join visible installed');assert.equal(app.el('team-claim').disabled,false);await app.event('team-claim');assert.equal(service.requests.filter(e=>e.op==='claim').length,1);assert.equal(app.el('show-write').hidden,true,'A claim alone never grants a sender role');
+});
+
+test('admin approval requires explicit fingerprint checkbox even after ordinary busy updates',async()=>{
+ const admin=await persistentDevice(),applicant=await persistentDevice(),service=await teamFixture([admin],['admin']);const card=await exchange.exportPublicCard(applicant.device,'Врач'),contact=await exchange.importPublicCard(card);service.setPending([{id:contact.id,name:'Врач',role:'neurologist',card}]);
+ const app=await harness(admin,'',service.options);await waitUntil(()=>app.el('team-pending').querySelectorAll('button').length===1,'pending rendered');
+ const approve=app.el('team-pending').querySelectorAll('button')[0],check=app.el('team-pending').querySelectorAll('input')[0];
+ await app.event('recipient','change');assert.equal(approve.disabled,true);await approve.fire('click');assert.equal(service.requests.filter(e=>e.op==='approve').length,0);
+ check.checked=true;await check.fire('change');assert.equal(approve.disabled,false);await approve.fire('click');assert.equal(service.requests.filter(e=>e.op==='approve').length,1);
+});
+
+test('team create network failure clears stale output without producing any plaintext or legacy fallback',async()=>{
+ const stores=await Promise.all([persistentDevice(),persistentDevice()]),service=await teamFixture(stores,['neurologist','cardiologist']);let fail=false,legacyCalls=0;
+ const app=await harness(stores[0],'',{...service.options,teamFetch:async(url,options)=>{if(fail&&JSON.parse(options.body).envelope.op==='create')throw new TypeError('Offline');return service.options.teamFetch(url,options);},shortlinkFetch:async()=>{legacyCalls++;throw new Error('No legacy writes');}});
+ app.el('recipient').value='cardiology';app.el('compose-surname').value='Тестов';await app.event('compose-form','submit');assert.ok(app.el('output-link').value);
+ fail=true;app.el('compose-surname').value='Другой';await app.event('compose-form','submit');await app.idle();
+ assert.equal(app.el('compose-output').hidden,true);assert.equal(app.el('output-link').value,'');assert.equal(app.el('output-message').value,'');assert.equal(app.el('output-preview').href,'#');assert.equal(app.el('compose-surname').value,'');assert.equal(app.el('copy-composed').disabled,true);assert.equal(legacyCalls,0);assert.equal(service.records.size,1);assert.ok(!JSON.stringify(service.requests).includes('Тестов'));assert.ok(!JSON.stringify(service.requests).includes('Другой'));
+});
+
+test('team notification consent includes approved sender roles but no other group recipient',async()=>{
+ const stores=await Promise.all(Array.from({length:5},()=>persistentDevice())),service=await teamFixture(stores,['admin','neurologist','bot','cardiologist','intensivist']),push=await notificationService({enabled:true});
+ const app=await harness(stores[3],'',{...service.options,standalone:true,pushEndpoint:'https://push.example/api',pushFetch:push.fetch,notificationPermission:'granted',pushSubscription:true});
+ await waitUntil(()=>!app.el('push-test').hidden&&!app.el('push-test').disabled,'team notification consent ready');
+ const registered=push.requests.filter(r=>r.envelope?.op==='register').at(-1);assert.ok(registered);
+ assert.deepEqual(registered.envelope.data.senders,service.members.slice(0,4).map(m=>m.id).sort());assert.equal(stores[3].contacts.size,0);
+ assert.deepEqual(app.pushCounts(),{permission:0,subscribe:0,unsubscribe:0});
 });

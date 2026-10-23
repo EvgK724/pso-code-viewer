@@ -2,3 +2,4 @@
 // This is a public endpoint, never a service-role key, password or bot token.
 export const SHORTLINK_ENDPOINT = 'https://spugfikalpihorcwcdqc.supabase.co/functions/v1/pso-shortlinks';
 export const PUSH_ENDPOINT = 'https://spugfikalpihorcwcdqc.supabase.co/functions/v1/pso-push';
+export const TEAM_ENDPOINT = 'https://spugfikalpihorcwcdqc.supabase.co/functions/v1/pso-team';

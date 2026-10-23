@@ -3,18 +3,21 @@ import {exportPublicCard, importPublicCard, deviceIdentity, sealSurname, openSur
 import {readDevice, loadContacts, saveContact, deleteContact, getMyName, setMyName} from './storage.mjs';
 import {cardLinkFor, cardFromInput, compactLinkContents, copyRenderedLink} from './sharing.mjs';
 import {ShortLinkClient, shortIDFromInput} from './shortlinks.mjs';
-import {SHORTLINK_ENDPOINT, PUSH_ENDPOINT} from './shortlink-config.mjs';
+import {SHORTLINK_ENDPOINT, PUSH_ENDPOINT, TEAM_ENDPOINT} from './shortlink-config.mjs';
 import {PushClient, pushKeyBytes} from './push.mjs';
+import {TeamClient, joinIDFromInput} from './team.mjs';
 
 const appBase = new URL('./', import.meta.url).href;
 const shortLinks = SHORTLINK_ENDPOINT ? new ShortLinkClient(SHORTLINK_ENDPOINT) : null;
 const pushClient = PUSH_ENDPOINT ? new PushClient(PUSH_ENDPOINT) : null;
+const teamClient = TEAM_ENDPOINT ? new TeamClient(TEAM_ENDPOINT) : null;
 const $ = id => document.getElementById(id);
 let device, selfContact, contacts = [], candidate = null;
 let ready = false, busy = false, generation = 0, timer, endsAt = 0, demoLink = '';
 let queuedIncoming = location.hash, activeIncoming = null;
 let workerReady = null, pushBusy = false, pushEnabled = false, pushSupported = false, pushRefreshPending = false;
 let pushPublicKey = '', pushSubscription = null;
+let teamState={state:'unregistered',role:null,name:null}, teamMembers=[], teamBusy=false, joinID='', inviteLink='';
 const standalone = navigator.standalone === true || globalThis.matchMedia?.('(display-mode: standalone)').matches === true;
 
 if (queuedIncoming) history.replaceState(null, '', location.pathname);
@@ -44,10 +47,11 @@ function tick() {
 function setBusy(value) {
   busy = value;
   updatePushButtons();
+  updateTeamButtons();
   for (const id of ['token','compose-surname','recipient','compose-orit','message-caption','expiry','my-name','contact-input','confirm-fingerprint']) $(id).disabled = value || !ready;
   for (const id of ['demo','open','paste-open','export-card','inspect-contact']) $(id).disabled = value || !ready;
   $('copy-handoff').disabled = value || !$('handoff-link').value;
-  $('encrypt').disabled = value || !ready || !$('recipient').value;
+  $('encrypt').disabled = value || !ready || !$('recipient').value || (teamClient && (!canReview() || teamBusy));
   $('copy-link').disabled = value || !demoLink;
   $('copy-demo-compact').disabled = value || !demoLink;
   $('copy-composed').disabled = value || !$('output-link').value;
@@ -77,11 +81,12 @@ function suspendSensitive() {
   clearSensitive();
 }
 function showMode(mode) {
-  clearSensitive(); const read = mode === 'read';
+  clearSensitive(); const read = mode === 'read' || !!(teamClient && !canReview());
   $('read-panel').hidden = !read; $('write-panel').hidden = read;
   $('show-read').setAttribute('aria-pressed', String(read)); $('show-write').setAttribute('aria-pressed', String(!read)); if (ready) say('');
 }
 function messageCaption() {
+  if (teamClient) return 'Проверочная история';
   return $('message-caption').value === 'test' ? 'Проверочная история' :
     $('compose-orit').checked ? 'Новый пациент ОРИТ' : 'Новый пациент';
 }
@@ -105,6 +110,7 @@ function inputKind(input) {
   if (/^[0-9a-f\s-]+$/i.test(value) && value.replace(/[\s-]/g, '').length === 64) throw new Error('Это контрольный код карточки врача. По нему фамилия не открывается. Попросите отправителя создать ссылку для вас через «Создать ссылку» и скопировать её целиком.');
   if (/^[0-9\s-]+$/.test(value)) throw new Error('Вставлен только набор цифр. Нужна полная ссылка из «Скопировать адрес для Пачки» или зашифрованный код, начинающийся с PSO1.');
   if (!value) throw new Error('Сначала вставьте ссылку в поле или нажмите «Вставить и открыть».');
+  if (joinIDFromInput(value,appBase)) return 'join';
   let card = value.startsWith('PSO-CARD1.');
   try { card ||= new URL(value).hash.startsWith('#card='); } catch {}
   if (card) { cardFromInput(value, appBase); return 'card'; }
@@ -119,6 +125,7 @@ async function openInput(input, fromIncoming = false) {
   hideResult();
   if (!fromIncoming) clearHandoff();
   try {
+    if (inputKind(input) === 'join') { prepareJoin(input); return; }
     if (inputKind(input) === 'card') { $('token').value = ''; await inspectCard(input, fromIncoming); }
     else await reveal(input, fromIncoming);
   } catch (error) { say(error.message || 'Скопируйте ссылку из сообщения.', true); }
@@ -170,12 +177,12 @@ function renderContacts() {
   const selected = $('recipient').value, selector = $('recipient');
   selector.replaceChildren();
   const placeholder = document.createElement('option'); placeholder.value = ''; placeholder.textContent = 'Выберите получателя'; selector.append(placeholder);
-  if (selfContact) {
+  if (selfContact && !teamClient) {
     const own = document.createElement('option'); own.value = selfContact.id; own.textContent = 'Себе — проверить на этом телефоне'; selector.append(own);
   }
   $('contacts-list').replaceChildren();
   for (const contact of contacts) {
-    const option = document.createElement('option'); option.value = contact.id; option.textContent = contact.name; selector.append(option);
+    if (!teamClient) { const option = document.createElement('option'); option.value = contact.id; option.textContent = contact.name; selector.append(option); }
     const row = document.createElement('div'); row.className = 'contact-item';
     const details = document.createElement('div');
     const name = document.createElement('strong'); name.className = 'contact-name'; name.textContent = contact.name;
@@ -194,6 +201,9 @@ function renderContacts() {
     row.append(details, remove); $('contacts-list').append(row);
   }
   if (!contacts.length) { const empty = document.createElement('p'); empty.textContent = 'Пока нет коллег. Обменяйтесь карточками и добавьте врача ниже.'; $('contacts-list').append(empty); }
+  if (teamClient) {
+    for (const [value,label] of [['cardiology','ПСО · Кардиолог'],['orit','ПСО · ОРИТ']]) {const option=document.createElement('option');option.value=value;option.textContent=label;selector.append(option);}
+  }
   if ([...selector.options].some(option => option.value === selected)) selector.value = selected;
   setBusy(busy);
 }
@@ -204,12 +214,16 @@ async function reveal(input, fromIncoming = false) {
   try {
     const shortID = shortIDFromInput(input, appBase);
     if (shortID && !shortLinks) throw new Error('Для короткой ссылки нужна обновлённая версия просмотрщика. Откройте приложение с интернетом и затем перезапустите его.');
-    const token = shortID ? await shortLinks.resolve(input, appBase) : parseInput(input);
+    let trustedSender=null, token;
+    if (shortID && teamClient && teamState.state==='active') {
+      try { const record=await teamClient.resolve(device,shortID);token=record.token;trustedSender=record.sender; }
+      catch(error) {if(error.status!==404)throw error;token=await shortLinks.resolve(input,appBase);}
+    } else token=shortID?await shortLinks.resolve(input,appBase):parseInput(input);
     if (current !== generation || document.hidden) return;
     $('token').value = shortID ? input : token;
     const isDemo = token.startsWith('PSO-DEMO1.'); let data;
     if (isDemo) data = await openDemo(device, token);
-    else { contacts = await loadContacts(); renderContacts(); data = await openSurname(device, token, contacts); }
+    else { contacts = await loadContacts(); renderContacts(); data = await openSurname(device, token, trustedSender?[trustedSender,...contacts.filter(c=>c.id!==trustedSender.id)]:contacts); }
     if (current !== generation || document.hidden) return;
     if (fromIncoming && activeIncoming) activeIncoming.pending = false;
     $('result-label').textContent = isDemo ? 'Вымышленный пример' : 'Фамилия из сообщения';
@@ -217,7 +231,7 @@ async function reveal(input, fromIncoming = false) {
     $('case-code').textContent = isDemo ? data.code : 'Отправитель: ' + data.senderName;
     $('result').hidden = false; $('token').value = ''; endsAt = performance.now() + 30000;
     tick(); timer = setInterval(tick, 250);
-    say(isDemo ? 'Расшифрован вымышленный пример.' : 'Подпись отправителя проверена по сохранённой карточке.');
+    say(isDemo ? 'Расшифрован вымышленный пример.' : 'Отправитель проверен.');
     $('result').scrollIntoView({block:'center', behavior:'auto'}); $('surname').focus({preventScroll:true});
   } catch (error) { if (current === generation) say(error.message || 'Не удалось открыть ссылку.', true); }
   finally { setBusy(false); }
@@ -250,7 +264,7 @@ async function refreshNotifications(checkStatus = false) {
     pushSubscription = await registration.pushManager.getSubscription();
     if (!pushSubscription) { pushEnabled = false; pushStatus('Уведомления выключены. Нажмите «Включить уведомления».'); return; }
     if (checkStatus && await pushClient.status(device) !== 'enabled') { pushEnabled = false; pushStatus('Уведомления выключены. Нажмите «Включить уведомления».'); return; }
-    const status = await pushClient.register(device,pushSubscription,await loadContacts());
+    const status = await pushClient.register(device,pushSubscription,await notificationContacts());
     pushEnabled = status === 'enabled';
     pushStatus(pushEnabled ? 'Уведомления включены на этом телефоне.' : 'Сервис не включил уведомления. Повторите подключение.');
   } catch { pushEnabled = false; pushStatus('Не удалось подтвердить уведомления. Проверьте интернет и нажмите «Включить уведомления».'); }
@@ -279,7 +293,7 @@ $('push-enable').addEventListener('click', async () => {
     if (!pushPublicKey) pushPublicKey = await pushClient.config();
     pushSubscription = await registration.pushManager.getSubscription();
     if (!pushSubscription) pushSubscription = await registration.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:pushKeyBytes(pushPublicKey)});
-    const status = await pushClient.register(device,pushSubscription,await loadContacts());
+    const status = await pushClient.register(device,pushSubscription,await notificationContacts());
     pushEnabled = status === 'enabled';
     pushStatus(pushEnabled ? 'Уведомления включены. Нажмите «Проверить уведомление», затем коснитесь пришедшего уведомления.' : 'Не удалось включить уведомления. Повторите подключение.');
   } catch { pushEnabled = false; pushStatus('Не удалось включить уведомления. Проверьте интернет и разрешение на уведомления, затем повторите.'); }
@@ -335,6 +349,7 @@ $('message-caption').addEventListener('change', () => {
 });
 $('compose-form').addEventListener('submit', async event => {
   event.preventDefault(); if (busy || !ready) return;
+  if (teamClient) return composeTeamReview();
   hideResult(); const current = generation, selectedID = $('recipient').value;
   let name = $('compose-surname').value;
   const department = $('compose-orit').checked ? 'ОРИТ' : '', ttlMinutes = Number($('expiry').value);
@@ -365,7 +380,7 @@ $('compose-form').addEventListener('submit', async event => {
   finally { name = ''; setBusy(false); }
 });
 $('copy-composed').addEventListener('click', () => {
-  if (shortLinks) {
+  if (shortLinks || teamClient) {
     updateCaptionPreview();
     return copyText($('output-message').value, 'output-message', 'Скопированы подпись и короткая ссылка. Вставьте в Пачку.');
   }
@@ -380,7 +395,7 @@ $('copy-composed-compact').addEventListener('click', () => {
   }
   return copyCompactLink($('output-link').value, messageCaption(), 'output-link', 'compose-full-link', true);
 });
-$('copy-composed-address').addEventListener('click', () => copyText($('output-link').value, 'output-link', 'Полный адрес скопирован. Он откроется только у выбранного получателя.', 'compose-full-link'));
+$('copy-composed-address').addEventListener('click', () => copyText($('output-link').value, 'output-link', 'Ссылка скопирована. Вставьте её в выбранный чат.', 'compose-full-link'));
 $('demo').addEventListener('click', async () => {
   if (busy || !ready) return;
   clearSensitive(); const current = generation; setBusy(true); say('Создаём вымышленный пример…');
@@ -440,6 +455,7 @@ async function handleIncoming(hash) {
   clearHandoff();
   const link = appBase + hash;
   try {
+    if (hash.startsWith('#join=')) { prepareJoin(link);request.pending=false;return; }
     if (!hash.startsWith('#pso=') && !hash.startsWith('#card=') && !hash.startsWith('#r=')) throw new Error('Неизвестный формат ссылки.');
     inputKind(link);
     $('handoff-link').value = link;
@@ -462,6 +478,107 @@ addEventListener('hashchange', () => {
 document.addEventListener('visibilitychange', () => { if (document.hidden) suspendSensitive(); else { tick(); flushIncoming(); } });
 addEventListener('pagehide', suspendSensitive);
 
+
+const roleLabels={admin:'Администратор',neurologist:'Невролог',intensivist:'Реаниматолог',cardiologist:'Кардиолог',bot:'Бот поступлений'};
+function canReview(){return teamState.state==='active'&&['admin','neurologist'].includes(teamState.role);}
+function updateTeamButtons(){
+  if(!teamClient)return;
+  const blocked=busy||teamBusy||!ready;
+  for(const id of ['team-refresh','team-claim','invite-create'])$(id).disabled=blocked;
+  $('team-claim').disabled=blocked||!joinID||!standalone;
+  $('copy-invite').disabled=blocked||!inviteLink;
+  for(const button of $('team-pending').querySelectorAll('button'))button.disabled=blocked||(button.teamConfirmation&&!button.teamConfirmation.checked);
+}
+function renderTeam(){
+  if(!teamClient){$('team-panel').hidden=true;$('team-admin').hidden=true;return;}
+  $('team-panel').hidden=false;
+  $('team-state').textContent=teamState.state==='active'?(teamState.name+' · '+roleLabels[teamState.role]):({pending:'Подключение ожидает подтверждения администратора.',revoked:'Доступ этого телефона отключён.',unregistered:'Откройте приглашение от администратора.',unavailable:'Нет связи с командой. Повторите подключение.'})[teamState.state];
+  $('show-write').hidden=!canReview();
+  if(!canReview())showMode('read');
+  $('team-admin').hidden=teamState.state!=='active'||teamState.role!=='admin';
+  $('team-my-code').textContent=selfContact?.fingerprint||'';
+  $('team-code-box').hidden=!['pending','active'].includes(teamState.state);
+  updateTeamButtons();
+}
+async function refreshTeam(){
+  if(!teamClient||!device||teamBusy)return;
+  teamBusy=true;updateTeamButtons();
+  try{teamState=await teamClient.status(device);teamMembers=teamState.state==='active'?await teamClient.directory(device):[];}
+  catch{teamState={state:'unavailable',role:null,name:null};teamMembers=[];}
+  finally{teamBusy=false;renderTeam();}
+  if(teamState.state==='active'&&teamState.role==='admin')await renderTeamAdmin();
+  if(pushEnabled)void refreshNotifications();
+}
+async function notificationContacts(){
+  const local=await loadContacts(),seen=new Set(local.map(c=>c.id));
+  if(teamState.state==='active')for(const member of teamMembers){if(['admin','neurologist','bot'].includes(member.role)&&!seen.has(member.id)){local.push(member);seen.add(member.id);}}
+  return local;
+}
+function prepareJoin(input){
+  const id=joinIDFromInput(input,appBase);if(!id)throw new Error('Приглашение неполное.');
+  joinID=id;$('join-panel').hidden=false;$('join-link').value=appBase+'#join='+id;
+  $('join-hint').textContent=standalone?'Нажмите «Подключить этот телефон». Администратор подтвердит вашу роль.':'Скопируйте приглашение, откройте синий значок и нажмите «Вставить и открыть».';
+  $('team-panel').hidden=false;$('token').value='';updateTeamButtons();
+  $('team-panel').scrollIntoView({block:'start',behavior:'auto'});
+}
+async function renderTeamAdmin(){
+  if(!teamClient||teamState.state!=='active'||teamState.role!=='admin')return;
+  $('team-pending').replaceChildren();
+  try{
+    const pending=await teamClient.pending(device);
+    for(const member of pending){
+      const row=document.createElement('div');row.className='contact-item';
+      const name=document.createElement('strong');name.textContent=member.name+' · '+roleLabels[member.role];
+      const code=document.createElement('p');code.className='device-id fingerprint';code.textContent=member.fingerprint;
+      const label=document.createElement('label');label.className='check-label';const check=document.createElement('input');check.type='checkbox';const wording=document.createElement('span');wording.textContent='Сверил этот код с врачом лично или по известному номеру';label.append(check,wording);
+      const approve=document.createElement('button');approve.type='button';approve.className='button button-secondary';approve.textContent='Подтвердить';approve.disabled=true;approve.teamConfirmation=check;
+      check.addEventListener('change',()=>{approve.disabled=!check.checked||busy||teamBusy;});
+      approve.addEventListener('click',async()=>{if(!check.checked||busy||teamBusy)return;teamBusy=true;updateTeamButtons();try{await teamClient.change(device,'approve',member.id);say('Подключение подтверждено.');}catch(e){say(e.message,true);}finally{teamBusy=false;await refreshTeam();}});
+      row.append(name,code,label,approve);$('team-pending').append(row);
+    }
+    if(!pending.length){const empty=document.createElement('p');empty.textContent='Новых заявок нет.';$('team-pending').append(empty);}
+    $('team-members').replaceChildren();
+    for(const member of teamMembers){
+      const row=document.createElement('div');row.className='contact-item';const name=document.createElement('strong');name.textContent=member.name+' · '+roleLabels[member.role];row.append(name);
+      if(member.id!==selfContact.id){const remove=document.createElement('button');remove.type='button';remove.className='button button-secondary';remove.textContent='Отключить';let confirm=false;remove.addEventListener('click',async()=>{if(busy||teamBusy)return;if(!confirm){confirm=true;remove.textContent='Подтвердить отключение';return;}teamBusy=true;updateTeamButtons();try{await teamClient.change(device,'revoke',member.id);say('Доступ отключён.');}catch(e){say(e.message,true);}finally{teamBusy=false;await refreshTeam();}});row.append(remove);}
+      $('team-members').append(row);
+    }
+  }catch(e){const message=document.createElement('p');message.textContent=e.message;$('team-pending').append(message);}
+}
+async function composeTeamReview(){
+  if(!canReview()||teamBusy){say('Проверочные истории отправляют подключённые неврологи.',true);return;}
+  hideResult();const current=generation,group=$('recipient').value,ttlMinutes=Number($('expiry').value);let name=$('compose-surname').value;
+  invalidateComposed();setBusy(true);say('Создаём проверочную ссылку…');
+  try{
+    const directory=await teamClient.directory(device);teamMembers=directory;
+    const role=group==='cardiology'?'cardiologist':group==='orit'?'intensivist':null;
+    if(!role)throw new Error('Выберите чат.');
+    const recipients=directory.filter(m=>m.role===role);if(!recipients.length)throw new Error('В этом чате пока нет подключённых получателей.');
+    if(current!==generation||document.hidden)return;
+    const entries=await Promise.all(recipients.map(async recipient=>({recipientId:recipient.id,token:await sealSurname(device,recipient,name,{department:$('compose-orit').checked?'ОРИТ':'',ttlMinutes})})));
+    name='';$('compose-surname').value='';
+    if(current!==generation||document.hidden)return;
+    const output=await teamClient.create(device,{group,ttlMinutes,entries},appBase);
+    if(current!==generation||document.hidden)return;
+    $('output-link').value=output.link;$('output-preview').href=output.link;updateCaptionPreview();
+    $('output-recipient').textContent=group==='cardiology'?'ПСО · Кардиолог':'ПСО · ОРИТ';$('compose-output').hidden=false;
+    say(output.push==='accepted'?'Ссылка готова, уведомления приняты. Скопируйте её в выбранный чат.':output.push==='partial'?'Ссылка готова. Не все уведомления подтверждены — передайте ссылку в чат.':'Ссылка готова. Передайте её в выбранный чат.');
+    $('compose-output').scrollIntoView({block:'nearest',behavior:'auto'});
+  }catch(e){if(current===generation)say(e.message||'Не удалось создать ссылку.',true);}finally{name='';$('compose-surname').value='';setBusy(false);}
+}
+$('team-refresh').addEventListener('click',()=>refreshTeam());
+$('copy-join').addEventListener('click',()=>copyText($('join-link').value,'join-link','Приглашение скопировано. Откройте синий значок → «Вставить и открыть».'));
+$('team-claim').addEventListener('click',async()=>{
+  if(!teamClient||!joinID||!standalone||busy||teamBusy)return;teamBusy=true;updateTeamButtons();
+  try{await teamClient.claim(device,joinID);joinID='';$('join-panel').hidden=true;$('join-link').value='';say('Заявка отправлена. Сообщите администратору контрольный код ниже.');}
+  catch(e){say(e.message,true);}finally{teamBusy=false;await refreshTeam();}
+});
+$('invite-form').addEventListener('submit',async event=>{
+  event.preventDefault();if(!teamClient||busy||teamBusy||teamState.role!=='admin'||teamState.state!=='active')return;
+  teamBusy=true;updateTeamButtons();try{const result=await teamClient.invite(device,$('invite-name').value.trim(),$('invite-role').value);inviteLink=appBase+'#join='+result.id;$('invite-link').value=inviteLink;$('invite-output').hidden=false;say('Приглашение готово. Передайте его только этому врачу.');}catch(e){say(e.message,true);}finally{teamBusy=false;updateTeamButtons();}
+});
+$('copy-invite').addEventListener('click',()=>copyText(inviteLink,'invite-link','Приглашение скопировано.'));
+
 async function init() {
   setBusy(true);
   if ('serviceWorker' in navigator) {
@@ -469,7 +586,7 @@ async function init() {
     // Keep registration failures separate from existing key/decryption operations.
     workerReady.catch(() => {});
   }
-  if (shortLinks) {
+  if (shortLinks || teamClient) {
     $('copy-composed').textContent = 'Скопировать ссылку';
     if (pushClient) { $('encrypt').textContent = 'Создать ссылку и уведомить'; $('push-compose-help').hidden = false; }
     $('short-output').hidden = false;
@@ -482,8 +599,11 @@ async function init() {
     selfContact = {...await importPublicCard(await exportPublicCard(device, 'Этот телефон')), verified:true};
     contacts = await loadContacts(); $('my-name').value = await getMyName();
     $('device-id').textContent = identity.fingerprint; $('status').textContent = 'Ключ этого просмотрщика готов';
-    ready = true; renderContacts(); setBusy(false);
+    ready = true;
+    if(teamClient) await refreshTeam();
+    renderContacts(); setBusy(false);
   } catch (error) { ready = false; $('status').textContent = 'Не удалось подготовить просмотрщик'; say(error.message, true); setBusy(false); }
+  if(teamClient) { $('message-caption').value='test';$('encrypt').textContent='Создать проверочную ссылку';$('push-compose-help').hidden=false; }
   void initNotifications();
 }
 init();
