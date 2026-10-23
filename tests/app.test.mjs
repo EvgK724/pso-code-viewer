@@ -75,7 +75,8 @@ async function persistentDevice() {
 
 async function harness(persistent, initialHash = '', {
   richClipboard = false, rejectRich = false, rejectText = false,
-  readText = '', rejectRead = false, deferRead = false, standalone = false, legacyStandalone = false
+  readText = '', rejectRead = false, deferRead = false, standalone = false, legacyStandalone = false,
+  nativeCopy = undefined
 } = {}) {
   const elements = new Map();
   for (const match of html.matchAll(/<([a-z][a-z0-9-]*)\b([^>]*)>/gi)) {
@@ -88,9 +89,17 @@ async function harness(persistent, initialHash = '', {
     return found;
   };
   el('expiry').value = '1440';
+  el('message-caption').value = 'patient';
   const docListeners = new Map(), globalListeners = new Map(), intervals = new Map();
   let nextTimer = 1, clipboard = '', clock = 0, richItems = [], richAttempts = 0, plainAttempts = 0;
-  let readAttempts = 0, nextReadText = readText;
+  let readAttempts = 0, nextReadText = readText, nativeAttempts = 0, nativePayload = null;
+  const selectedRanges = [];
+  const selection = {
+    get rangeCount() { return selectedRanges.length; },
+    getRangeAt(index) { return selectedRanges[index]; },
+    removeAllRanges() { selectedRanges.length = 0; },
+    addRange(range) { selectedRanges.push(range); }
+  };
   const pendingReads = [];
   const document = {
     hidden:false,
@@ -98,6 +107,20 @@ async function harness(persistent, initialHash = '', {
     createElement:tag => new Element(tag),
     addEventListener(type, fn) { docListeners.set(type, fn); }
   };
+  if (nativeCopy !== undefined) {
+    document.createRange = () => ({selectNode(node) { this.node = node; }});
+    document.execCommand = command => {
+      nativeAttempts++;
+      assert.equal(command, 'copy');
+      if (nativeCopy === 'throw') throw new Error('Native copy unavailable');
+      if (!nativeCopy) return false;
+      const anchor = selectedRanges[0]?.node;
+      assert.ok(anchor, 'Native copy selects the actual rendered anchor');
+      nativePayload = {url:anchor.href, label:anchor.textContent};
+      clipboard = anchor.textContent;
+      return true;
+    };
+  }
   const location = {origin, pathname:appPath, hash:initialHash};
   const storage = {
     async readDevice() { return persistent.device; },
@@ -145,7 +168,7 @@ async function harness(persistent, initialHash = '', {
     clipboard = await (await items[0].getType('text/plain')).text();
   };
   const context = vm.createContext({
-    document, location,
+    document, location, getSelection:() => selection,
     history:{replaceState() { location.hash = ''; }},
     navigator:{clipboard:clipboardAPI, standalone:legacyStandalone},
     matchMedia(query) { return {matches:query === '(display-mode: standalone)' && standalone}; },
@@ -174,6 +197,8 @@ async function harness(persistent, initialHash = '', {
     clipboard:() => clipboard,
     richItems:() => richItems,
     clipboardAttempts:() => ({rich:richAttempts, plain:plainAttempts}),
+    nativeCopyAttempts:() => nativeAttempts,
+    nativePayload:() => nativePayload,
     clipboardReadAttempts:() => readAttempts,
     setReadText(value) { nextReadText = value; },
     resolveClipboardRead(value) {
@@ -335,8 +360,8 @@ test('compact copy supplies labeled HTML and the complete plain URL, retaining o
   assert.equal(app.el('output-preview').href, messageURL);
   await app.event('copy-composed-compact');
   await assertCompactPayload(app, messageURL);
-  await app.event('copy-composed');
-  assert.equal(app.clipboard(), messageURL, 'Legacy full-link copy remains available');
+  await app.event('copy-composed-address');
+  assert.equal(app.clipboard(), messageURL, 'Explicit full-link copy remains available');
   app.el('token').value = messageURL;
   await app.event('open-form', 'submit'); await app.idle();
   assert.equal(app.el('surname').textContent, 'Петрова', 'Presentation changes must preserve decryption');
@@ -621,5 +646,96 @@ test('numeric and fingerprint input produce a visible focused explanation instea
     assert.equal(notice.attributes.get('role'), 'alert');
     assert.equal(notice.attributes.get('aria-live'), 'assertive');
     assert.equal(app.el('open').disabled, false, 'The user can correct the input and try again');
+  }
+});
+
+test('all three captions copy the exact labeled target while retaining decryption and ORIT', async () => {
+  const store = await persistentDevice();
+  for (const [value, label, department] of [
+    ['patient', 'Новый пациент', ''],
+    ['orit', 'Новый пациент ОРИТ', 'ОРИТ'],
+    ['test', 'Проверочная история', '']
+  ]) {
+    const app = await harness(store, '', {richClipboard:true});
+    app.el('message-caption').value = value;
+    await app.event('message-caption', 'change');
+    assert.equal(app.el('compose-orit').checked, department === 'ОРИТ');
+    const url = await composeForSelf(app);
+    assert.equal(app.el('output-preview').textContent, label);
+    for (const button of ['copy-composed', 'copy-composed-compact']) {
+      await app.event(button);
+      await assertCompactPayload(app, url);
+      const rich = await (await app.richItems()[0].getType('text/html')).text();
+      assert.equal(rich.replace(/<[^>]*>/g, ''), label);
+    }
+    await app.event('copy-composed-address');
+    assert.equal(app.clipboard(), url, 'A complete URL remains available independently of rich paste support');
+    app.el('token').value = url;
+    await app.event('open-form', 'submit'); await app.idle();
+    assert.equal(app.el('surname').textContent, 'Петрова');
+    assert.equal(app.el('department').textContent, department);
+  }
+});
+
+test('caption-only changes reuse the link, but department changes invalidate it and stay coherent', async () => {
+  const app = await harness(await persistentDevice());
+  const firstURL = await composeForSelf(app);
+  app.el('message-caption').value = 'test';
+  await app.event('message-caption', 'change');
+  assert.equal(app.el('output-link').value, firstURL);
+  assert.equal(app.el('output-preview').textContent, 'Проверочная история');
+  assert.equal(app.el('compose-output').hidden, false);
+  assert.equal(app.el('compose-orit').checked, false);
+
+  app.el('message-caption').value = 'orit';
+  await app.event('message-caption', 'change');
+  assert.equal(app.el('compose-orit').checked, true);
+  assert.equal(app.el('output-link').value, '');
+  assert.equal(app.el('compose-output').hidden, true);
+  const oritURL = await composeForSelf(app);
+  assert.notEqual(oritURL, firstURL);
+  assert.equal(app.el('output-preview').textContent, 'Новый пациент ОРИТ');
+
+  app.el('compose-orit').checked = false;
+  await app.event('compose-orit', 'input');
+  assert.equal(app.el('message-caption').value, 'patient');
+  assert.equal(app.el('output-link').value, '');
+  app.el('compose-orit').checked = true;
+  await app.event('compose-orit', 'input');
+  assert.equal(app.el('message-caption').value, 'orit');
+  app.el('message-caption').value = 'test';
+  await app.event('message-caption', 'change');
+  assert.equal(app.el('compose-orit').checked, true, 'Test caption alone must not change encrypted department');
+  await composeForSelf(app);
+  app.el('compose-orit').checked = false;
+  await app.event('compose-orit', 'input');
+  assert.equal(app.el('message-caption').value, 'test');
+  assert.equal(app.el('output-link').value, '', 'Even test links are invalidated when department changes');
+});
+
+test('successful native copy keeps the selected link without overwriting its platform clipboard formats', async () => {
+  const app = await harness(await persistentDevice(), '', {nativeCopy:true, richClipboard:true});
+  app.el('message-caption').value = 'test';
+  await app.event('message-caption', 'change');
+  const url = await composeForSelf(app);
+  const before = app.clipboardAttempts();
+  await app.event('copy-composed');
+  assert.equal(app.nativeCopyAttempts(), 1);
+  assert.deepEqual(app.nativePayload(), {url, label:'Проверочная история'});
+  assert.deepEqual(app.clipboardAttempts(), before, 'Do not overwrite a native copy with async or plain clipboard');
+  assert.equal(app.clipboard(), 'Проверочная история', 'Native plain text may be only the label');
+  assert.ok(!JSON.stringify(app.nativePayload()).includes('Петрова'));
+});
+
+test('native copy rejection falls back to labeled HTML and finally the complete address', async () => {
+  const store = await persistentDevice();
+  for (const [nativeCopy, richClipboard] of [[false, true], ['throw', false]]) {
+    const app = await harness(store, '', {nativeCopy, richClipboard});
+    const url = await composeForSelf(app);
+    await app.event('copy-composed');
+    assert.equal(app.nativeCopyAttempts(), 1);
+    assert.equal(app.clipboard(), url);
+    if (richClipboard) await assertCompactPayload(app, url);
+    else assert.ok(app.clipboardAttempts().plain > 0);
   }
 });

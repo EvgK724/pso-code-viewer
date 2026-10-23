@@ -1,5 +1,5 @@
 const PREFIX = 'pso-viewer-' + encodeURIComponent(new URL('./', self.location).pathname) + '-shell-';
-const CACHE = PREFIX + 'github-v4-open-feedback';
+const CACHE = PREFIX + 'github-v5-message-captions';
 const SHELL = ['./','./index.html','./styles.css','./app.mjs','./crypto.mjs','./exchange.mjs','./storage.mjs','./sharing.mjs','./manifest.webmanifest','./icon-pso-v2-192.png','./icon-pso-v2-512.png','./apple-touch-icon-pso-v2.png','./favicon-pso-v2.png','./icon-192.png','./icon-512.png','./apple-touch-icon.png'];
 self.addEventListener('install', event => event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(SHELL))));
 self.addEventListener('activate', event => event.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(k => k.startsWith(PREFIX) && k !== CACHE).map(k => caches.delete(k))))));

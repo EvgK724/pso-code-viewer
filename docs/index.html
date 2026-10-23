@@ -96,6 +96,13 @@
             </select>
             <p class="field-help">Ссылку сможет открыть только выбранный получатель. Для другого врача создайте отдельную ссылку.</p>
             <label class="check-label" for="compose-orit"><input id="compose-orit" type="checkbox"><span>Пациент в ОРИТ</span></label>
+            <label for="message-caption">Подпись ссылки в чате</label>
+            <select id="message-caption" name="message-caption">
+              <option value="patient" selected>Новый пациент</option>
+              <option value="orit">Новый пациент ОРИТ</option>
+              <option value="test">Проверочная история</option>
+            </select>
+            <p class="field-help">Подпись будет видна в чате. «Проверочная история» меняет только подпись — вымышленную фамилию введите сами.</p>
             <label for="expiry">Срок открытия ссылки</label>
             <select id="expiry" name="expiry">
               <option value="60">1 час</option>
@@ -107,16 +114,17 @@
           <div id="compose-output" class="output-block" hidden>
             <p class="eyebrow">Ссылка готова</p>
             <p id="output-recipient" class="output-recipient"></p>
-            <p class="compact-preview"><a id="output-preview" class="text-link" href="#">Открыть фамилию</a></p>
-            <button id="copy-composed" type="button" class="button button-primary">Скопировать адрес для Пачки</button>
-            <p class="field-help compact-help">В Пачке напишите <strong>Открыть фамилию</strong>, выделите эти слова → «Аа» → 🔗 → вставьте скопированный адрес. В сообщении останется короткая надпись.</p>
+            <p class="compact-preview"><a id="output-preview" class="text-link" href="#">Новый пациент</a></p>
+            <button id="copy-composed" type="button" class="button button-primary">Скопировать готовую надпись</button>
+            <p class="field-help compact-help">Подпись уже связана с адресом. Вставьте её в Пачку. При первой проверке убедитесь, что вставилась именно ссылка: приложение может убрать оформление.</p>
             <details id="compose-full-link" class="sharing-details">
               <summary>Другие способы копирования</summary>
               <div class="details-body">
                 <label for="output-link">Адрес для копирования</label>
                 <textarea id="output-link" rows="3" readonly spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off"></textarea>
-                <button id="copy-composed-compact" type="button" class="button button-secondary">Копировать с оформлением</button>
-                <p class="fine-print">Некоторые приложения принимают только полный адрес. Тогда используйте меню ссылки внутри Пачки.</p>
+                <button id="copy-composed-compact" type="button" class="button button-secondary">Другой способ с оформлением</button>
+                <button id="copy-composed-address" type="button" class="button button-secondary">Скопировать адрес для Пачки</button>
+                <p class="fine-print">Если Пачка вставила обычные слова без ссылки, попробуйте другой способ. Полный адрес остаётся доступен для копирования.</p>
               </div>
             </details>
           </div>

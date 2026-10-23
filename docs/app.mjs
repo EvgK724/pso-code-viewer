@@ -1,7 +1,7 @@
 import {sealDemo, openDemo, tokenFromInput, linkForToken} from './crypto.mjs';
 import {exportPublicCard, importPublicCard, deviceIdentity, sealSurname, openSurname} from './exchange.mjs';
 import {readDevice, loadContacts, saveContact, deleteContact, getMyName, setMyName} from './storage.mjs';
-import {cardLinkFor, cardFromInput, compactLinkContents} from './sharing.mjs';
+import {cardLinkFor, cardFromInput, compactLinkContents, copyRenderedLink} from './sharing.mjs';
 
 const appBase = new URL('./', import.meta.url).href;
 const $ = id => document.getElementById(id);
@@ -35,7 +35,7 @@ function tick() {
 }
 function setBusy(value) {
   busy = value;
-  for (const id of ['token','compose-surname','recipient','compose-orit','expiry','my-name','contact-input','confirm-fingerprint']) $(id).disabled = value || !ready;
+  for (const id of ['token','compose-surname','recipient','compose-orit','message-caption','expiry','my-name','contact-input','confirm-fingerprint']) $(id).disabled = value || !ready;
   for (const id of ['demo','open','paste-open','export-card','inspect-contact']) $(id).disabled = value || !ready;
   $('copy-handoff').disabled = value || !$('handoff-link').value;
   $('encrypt').disabled = value || !ready || !$('recipient').value;
@@ -43,6 +43,7 @@ function setBusy(value) {
   $('copy-demo-compact').disabled = value || !demoLink;
   $('copy-composed').disabled = value || !$('output-link').value;
   $('copy-composed-compact').disabled = value || !$('output-link').value;
+  $('copy-composed-address').disabled = value || !$('output-link').value;
   $('copy-card').disabled = value || !$('my-card').value;
   $('copy-card-compact').disabled = value || !$('my-card-link').value;
   $('copy-card-link').disabled = value || !$('my-card-link').value;
@@ -57,6 +58,15 @@ function showMode(mode) {
   clearSensitive(); const read = mode === 'read';
   $('read-panel').hidden = !read; $('write-panel').hidden = read;
   $('show-read').setAttribute('aria-pressed', String(read)); $('show-write').setAttribute('aria-pressed', String(!read)); if (ready) say('');
+}
+function messageCaption() {
+  return $('message-caption').value === 'test' ? 'Проверочная история' :
+    $('compose-orit').checked ? 'Новый пациент ОРИТ' : 'Новый пациент';
+}
+function updateCaptionPreview() { $('output-preview').textContent = messageCaption(); }
+function invalidateComposed() {
+  $('compose-output').hidden = true; $('output-link').value = '';
+  $('output-preview').href = '#'; setBusy(busy);
 }
 function parseInput(input) {
   const value = String(input).trim();
@@ -186,8 +196,25 @@ $('token').addEventListener('input', clearHandoff);
 $('paste-open').addEventListener('click', pasteAndOpen);
 $('copy-handoff').addEventListener('click', () => copyText($('handoff-link').value, 'handoff-link', 'Ссылка скопирована. Откройте синий значок «ПСО Код» на экране «Домой» и нажмите «Вставить и открыть».', 'handoff-full-link'));
 $('hide').addEventListener('click', () => hideResult('Фамилия скрыта.'));
-$('recipient').addEventListener('change', () => { $('compose-output').hidden = true; $('output-link').value = ''; setBusy(busy); });
-for (const id of ['compose-surname','compose-orit','expiry']) $(id).addEventListener('input', () => { $('compose-output').hidden = true; $('output-link').value = ''; setBusy(busy); });
+$('recipient').addEventListener('change', invalidateComposed);
+for (const id of ['compose-surname','expiry']) $(id).addEventListener('input', invalidateComposed);
+$('compose-orit').addEventListener('input', () => {
+  if ($('message-caption').value !== 'test') $('message-caption').value = $('compose-orit').checked ? 'orit' : 'patient';
+  updateCaptionPreview(); invalidateComposed();
+});
+$('message-caption').addEventListener('change', () => {
+  const selected = $('message-caption').value;
+  if (selected !== 'test') {
+    const orit = selected === 'orit';
+    if ($('compose-orit').checked !== orit) {
+      $('compose-orit').checked = orit;
+      const hadLink = !!$('output-link').value;
+      invalidateComposed();
+      if (hadLink) say('Отделение изменено. Введите фамилию и создайте новую ссылку.');
+    }
+  }
+  updateCaptionPreview();
+});
 $('compose-form').addEventListener('submit', async event => {
   event.preventDefault(); if (busy || !ready) return;
   hideResult(); const current = generation, selectedID = $('recipient').value;
@@ -203,14 +230,24 @@ $('compose-form').addEventListener('submit', async event => {
     if (current !== generation || document.hidden) return;
     $('output-link').value = linkForToken(token, appBase);
     $('output-preview').href = $('output-link').value;
+    updateCaptionPreview();
     $('output-recipient').textContent = selectedID === selfContact.id ? 'Получатель: только этот просмотрщик — проверка' : 'Получатель: ' + recipient.name;
-    $('compose-output').hidden = false; say('Ссылка готова. Скопируйте её и добавьте комментарий в Пачке.');
+    $('compose-output').hidden = false; say('Подпись со ссылкой готова. Нажмите «Скопировать готовую надпись» и вставьте в Пачку.');
     $('compose-output').scrollIntoView({block:'nearest', behavior:'auto'});
   } catch (error) { if (current === generation) say(error.message || 'Не удалось создать ссылку.', true); }
   finally { name = ''; setBusy(false); }
 });
-$('copy-composed').addEventListener('click', () => copyText($('output-link').value, 'output-link', 'Адрес скопирован. В Пачке напишите «Открыть фамилию», выделите эти слова → «Аа» → 🔗 → вставьте адрес. Ссылка предназначена только выбранному получателю.', 'compose-full-link'));
-$('copy-composed-compact').addEventListener('click', () => copyCompactLink($('output-link').value, 'Открыть фамилию', 'output-link', 'compose-full-link'));
+$('copy-composed').addEventListener('click', () => {
+  if (busy || !$('output-link').value) return;
+  updateCaptionPreview();
+  if (copyRenderedLink($('output-preview'), document, globalThis.getSelection?.())) {
+    say('Скопирована готовая надпись «' + messageCaption() + '». Вставьте в Пачку. Если вставились слова без ссылки, используйте «Другой способ с оформлением».');
+    return;
+  }
+  return copyCompactLink($('output-link').value, messageCaption(), 'output-link', 'compose-full-link');
+});
+$('copy-composed-compact').addEventListener('click', () => copyCompactLink($('output-link').value, messageCaption(), 'output-link', 'compose-full-link'));
+$('copy-composed-address').addEventListener('click', () => copyText($('output-link').value, 'output-link', 'Полный адрес скопирован. Он откроется только у выбранного получателя.', 'compose-full-link'));
 $('demo').addEventListener('click', async () => {
   if (busy || !ready) return;
   clearSensitive(); const current = generation; setBusy(true); say('Создаём вымышленный пример…');

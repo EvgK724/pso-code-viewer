@@ -50,3 +50,25 @@ export function compactLinkContents(input, label, base) {
   // Plain-text editors receive the full working link, never a label without its target.
   return {plain:url.href, html:'<a href="' + escapeHTML(url.href) + '">' + escapeHTML(label) + '</a>'};
 }
+
+// Copy the rendered anchor using the platform's own rich selection formats.
+// Some native editors handle this differently from ClipboardItem HTML. A true
+// result confirms copying, not that the receiving app preserves the hyperlink.
+export function copyRenderedLink(anchor, doc = globalThis.document, selection = globalThis.getSelection?.()) {
+  if (!anchor || !selection || !doc?.createRange || !doc?.execCommand) return false;
+  const ranges = [], active = doc.activeElement;
+  try {
+    for (let i = 0; i < selection.rangeCount; i++) ranges.push(selection.getRangeAt(i).cloneRange());
+    const range = doc.createRange();
+    range.selectNode(anchor);
+    selection.removeAllRanges(); selection.addRange(range);
+    return doc.execCommand('copy') === true;
+  } catch { return false; }
+  finally {
+    try {
+      selection.removeAllRanges();
+      for (const range of ranges) selection.addRange(range);
+      active?.focus?.({preventScroll:true});
+    } catch { /* Copying must not fail because a prior selection disappeared. */ }
+  }
+}
