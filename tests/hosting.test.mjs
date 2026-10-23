@@ -129,18 +129,18 @@ test('enabled broker uses one HTTPS endpoint permitted by exact CSP origin witho
 test('service worker serves its own offline shell and leaves sibling app requests/caches alone', async () => {
   const source = await readFile(new URL('../docs/sw.js', import.meta.url), 'utf8');
   for (const path of ['/', '/pso-code-viewer/']) {
-    const handlers = new Map(), deleted = [], installed = [];
+    const handlers = new Map(), deleted = [], installed = [], lifecycle = [];
     const prefix = 'pso-viewer-' + encodeURIComponent(path) + '-shell-';
-    const current = prefix + 'github-v8-team-roles';
+    const current = prefix + 'github-v9-update';
     const unrelated = 'pso-viewer-%2Fanother-app%2F-shell-github-v1';
     const cached = {status:200, body:'offline-shell'};
     const cache = {
-      async addAll(files) { installed.push(...files); },
+      async addAll(files) { assert.ok(files.every(file => file.cache === 'reload')); installed.push(...files.map(file => './' + new URL(file.url).pathname.slice(path.length))); lifecycle.push('cached'); },
       async match() { return cached; }
     };
     vm.runInNewContext(source, {
-      URL,
-      self:{location:new URL(origin + path + 'sw.js'), addEventListener(name, fn) { handlers.set(name, fn); }},
+      URL, Request,
+      self:{location:new URL(origin + path + 'sw.js'), addEventListener(name, fn) { handlers.set(name, fn); }, async skipWaiting(){lifecycle.push('skipWaiting');}, clients:{async claim(){lifecycle.push('claim');}}},
       caches:{
         async open(name) { assert.equal(name, current); return cache; },
         async keys() { return [current, prefix + 'old', unrelated]; },
@@ -151,15 +151,18 @@ test('service worker serves its own offline shell and leaves sibling app request
     let installation;
     handlers.get('install')({waitUntil(promise) { installation = promise; }});
     await installation;
+    assert.deepEqual(lifecycle, ['cached','skipWaiting']);
     assert.ok(installed.includes('./') && installed.includes('./index.html'));
     assert.ok(installed.includes('./sharing.mjs'), 'Compact-sharing logic must be available offline');
     assert.ok(installed.includes('./shortlinks.mjs') && installed.includes('./shortlink-config.mjs'), 'Client and configuration must update with the same offline shell');
     assert.ok(installed.includes('./team.mjs'), 'Team client updates with the shell');
+    assert.ok(installed.includes('./updates.mjs'), 'Update controls are part of the same shell');
     assert.ok(installed.includes('./push.mjs'), 'Notification client must update with its shell');
     assert.ok(installed.every(file => new URL(file, origin + path + 'sw.js').pathname.startsWith(path)));
     let activation;
     handlers.get('activate')({waitUntil(promise) { activation = promise; }});
     await activation;
+    assert.deepEqual(lifecycle, ['cached','skipWaiting','claim']);
     assert.deepEqual(deleted, [prefix + 'old']);
 
     let response;
@@ -173,4 +176,16 @@ test('service worker serves its own offline shell and leaves sibling app request
       handlers.get('fetch')({request:{method, url:PUSH_ENDPOINT}, respondWith() { assert.fail('Notification requests must never be intercepted or cached'); }});
     }
   }
+});
+
+test('an incomplete update never replaces the working service worker', async () => {
+  const source = await readFile(new URL('../docs/sw.js', import.meta.url), 'utf8');
+  const handlers = new Map();
+  vm.runInNewContext(source, {
+    URL, Request,
+    self:{location:new URL(origin+'/pso-code-viewer/sw.js'),addEventListener(name,fn){handlers.set(name,fn);},skipWaiting(){assert.fail('Failed shell must not activate');}},
+    caches:{async open(){return {async addAll(){throw new Error('offline');}};}}
+  });
+  let pending; handlers.get('install')({waitUntil(p){pending=p;}});
+  await assert.rejects(pending,/offline/);
 });

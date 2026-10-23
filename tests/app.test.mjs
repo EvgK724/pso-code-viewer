@@ -202,7 +202,8 @@ async function harness(persistent, initialHash = '', {
     './shortlinks.mjs':{...shortlinks, ShortLinkClient:InjectedShortLinkClient},
     './shortlink-config.mjs':{SHORTLINK_ENDPOINT:shortlinkEndpoint,PUSH_ENDPOINT:pushEndpoint,TEAM_ENDPOINT:teamEndpoint},
     './push.mjs':{...push,PushClient:InjectedPushClient},
-    './team.mjs':{...team,TeamClient:InjectedTeamClient}
+    './team.mjs':{...team,TeamClient:InjectedTeamClient},
+    './updates.mjs':{installAppUpdates(){return {ready:Promise.resolve(registration),check:async()=>{}};}}
   };
   const module = new vm.SourceTextModule(appSource, {context, identifier:origin + appPath + 'app.mjs', initializeImportMeta(meta) { meta.url = origin + appPath + 'app.mjs'; }});
   await module.link(specifier => {

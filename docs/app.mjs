@@ -6,6 +6,7 @@ import {ShortLinkClient, shortIDFromInput} from './shortlinks.mjs';
 import {SHORTLINK_ENDPOINT, PUSH_ENDPOINT, TEAM_ENDPOINT} from './shortlink-config.mjs';
 import {PushClient, pushKeyBytes} from './push.mjs';
 import {TeamClient, joinIDFromInput} from './team.mjs';
+import {installAppUpdates} from './updates.mjs';
 
 const appBase = new URL('./', import.meta.url).href;
 const shortLinks = SHORTLINK_ENDPOINT ? new ShortLinkClient(SHORTLINK_ENDPOINT) : null;
@@ -18,6 +19,7 @@ let queuedIncoming = location.hash, activeIncoming = null;
 let workerReady = null, pushBusy = false, pushEnabled = false, pushSupported = false, pushRefreshPending = false;
 let pushPublicKey = '', pushSubscription = null;
 let teamState={state:'unregistered',role:null,name:null}, teamMembers=[], teamBusy=false, joinID='', inviteLink='';
+let appUpdates=null, appUpdateAvailable=false;
 const standalone = navigator.standalone === true || globalThis.matchMedia?.('(display-mode: standalone)').matches === true;
 
 if (queuedIncoming) history.replaceState(null, '', location.pathname);
@@ -582,7 +584,13 @@ $('copy-invite').addEventListener('click',()=>copyText(inviteLink,'invite-link',
 async function init() {
   setBusy(true);
   if ('serviceWorker' in navigator) {
-    workerReady = navigator.serviceWorker.register('./sw.js').then(() => navigator.serviceWorker.ready);
+    appUpdates = installAppUpdates({navigator,document,
+      onReady(){appUpdateAvailable=true;$('app-update').textContent='Открыть новую версию';},
+      onStatus(state){$('app-update-status').textContent=appUpdateAvailable?
+        'Обновление загружено. Скопируйте готовые ссылки и нажмите кнопку.':
+        ({checking:'Проверяем обновление…',offline:'Не удалось проверить обновление. Проверьте интернет и повторите.',current:'Установлена актуальная версия.',ready:'Обновление загружено.',unavailable:'Проверка обновлений недоступна в этом браузере.'})[state]||'';}
+    });
+    workerReady = appUpdates.ready;
     // Keep registration failures separate from existing key/decryption operations.
     workerReady.catch(() => {});
   }
@@ -606,4 +614,11 @@ async function init() {
   if(teamClient) { $('message-caption').value='test';$('encrypt').textContent='Создать проверочную ссылку';$('push-compose-help').hidden=false; }
   void initNotifications();
 }
+$('app-update').addEventListener('click',async()=>{
+  if(busy||teamBusy||pushBusy){$('app-update-status').textContent='Дождитесь завершения текущей операции.';return;}
+  if(appUpdateAvailable){clearSensitive();location.reload();return;}
+  if(!appUpdates){$('app-update-status').textContent='Проверка обновлений недоступна в этом браузере.';return;}
+  $('app-update').disabled=true;
+  try{await appUpdates.check();}finally{$('app-update').disabled=false;}
+});
 init();
