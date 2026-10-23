@@ -8,7 +8,7 @@ key stores. This status does not itself assert frontend publication.
 
 ## Verification status
 
-- [x] Local client, crypto, UI, hosting and generic handler suite: 74 tests passed,
+- [x] Local client, crypto, UI, hosting and generic handler suite: 134 tests passed,
   including a receiver-sensitive browser-fetch regression test.
 - [x] Live HTTP create/resolve and recipient decryption using synthetic devices;
   `ShortLinkClient` produced a 67-character URL. Wrong-recipient decryption failed.
@@ -22,9 +22,9 @@ key stores. This status does not itself assert frontend publication.
 - [x] An expired saved record returned 404. The cleanup job subsequently removed
   it, and successful Cron runs were confirmed. The synthetic HTTP test writer
   was disabled after the checks.
-- [ ] Enrol intended doctors' existing verified public cards. No real doctor
-  devices have been added yet. Until enrolled, a doctor's creation request is
-  denied; recipient-only decryption needs no writer entry.
+- Enrol each intended sender’s existing verified public card through the admin
+  procedure below. Until enrolled, a device’s creation request is denied;
+  recipient-only decryption needs no writer entry. Do not publish real enrolments.
 - [ ] After frontend publication and enrolment, verify a fictitious message in
   native Pachca and between the intended phones. HTTP and simulated-UI tests do
   not establish native clipboard/PWA behaviour.
@@ -139,3 +139,67 @@ Documentation checked:
 - https://supabase.com/docs/guides/api/securing-your-api
 - https://supabase.com/docs/guides/cron
 - https://www.postgresql.org/docs/current/explicit-locking.html
+
+
+## Web Push deployment
+
+The dedicated `pso-push` function uses the same project and exact browser origin.
+It does not replace `pso-shortlinks` or change the Linux bot. Apply the reviewed
+`push-schema.sql` once; the applied migration is `pso_private_web_push`. Keep
+`pso_push_private` outside exposed API schemas. Its tables have RLS with no browser
+policies or grants; service-role-only RPCs are the only server entry points. The
+INFO advisor `rls_enabled_no_policy` is intentional for these private tables:
+https://supabase.com/docs/guides/database/database-linter?lint=0008_rls_enabled_no_policy
+New cleanup indexes can initially report `unused_index`; retain them for expiry
+queries rather than weakening the design to silence a fresh-install advisory.
+
+Deploy these four files preserving their paths, with entrypoint
+`server/push-edge.ts`, function name `pso-push`, and `verify_jwt=false`:
+
+- `server/push-edge.ts`
+- `server/push-handler.mjs`
+- `server/web-push.mjs`
+- `docs/exchange.mjs`
+
+Disabling gateway JWT verification is specific to this function: the handler
+verifies each device's ECDSA signature, nonce, timestamp and operation data.
+The only unsigned operation returns the public VAPID key. A P-256 VAPID pair is
+created lazily and atomically stored once in the private database. Never return,
+log, export or commit its private part. No new browser API key is required.
+
+A device can register/unregister only its own subscription. Notifications require
+an existing enabled short-link writer, a live link owned by that writer, and
+recipient consent to that sender. The recipient comes from the stored signed
+ciphertext, never a caller-supplied recipient field. Only Apple, FCM and Mozilla
+HTTPS push endpoints are accepted; redirects are refused. Registration itself
+sends nothing. A test sends only to the caller's own subscription.
+
+One delivery claim per short link prevents repeat notifications. Failed sends do
+not delete or modify the encrypted link, and are not automatically retried.
+A provider 404/410 removes only the exact stale subscription, not a replacement.
+HTTP acceptance is not a delivery/read receipt. Neither notification title/body
+nor encrypted push payload contains a patient name, department or comment.
+The payload contains only a version, opaque lookup ID and expiry.
+
+`pso-push-cleanup` runs once per minute. It removes old replay entries, quotas,
+claims and subscriptions not refreshed for 90 days. Check Cron run status. This
+is not a promise of erasure from provider backups.
+
+Verification:
+
+1. Run the full Node test command from README. Transport tests include the RFC
+   8291 vector and independent ciphertext/VAPID validation.
+2. Run `push-verify.sql` in its rollback transaction. It checks actual SQL roles,
+   ownership, consent, replay protection, rate limits, capacity, expiry and cleanup.
+3. Review Supabase security and performance advisors. Do not grant browser roles
+   access to private tables just to remove an informational RLS finding.
+4. Check live config plus signed register/status/unregister with a fresh synthetic
+   identity and subscription, without calling test or sending to a real endpoint.
+   Confirm replay rejection and that an unknown writer/link cannot notify.
+5. On the intended iPhone, open the existing Home Screen icon, enable notifications
+   by explicit button tap, and use the self-test. Then check a fictitious link for
+   a consenting second phone. Check closed/background app launch, expired link,
+   and fallback copy/paste. Automated browser tests do not establish APNs delivery.
+
+No doctor key store, IndexedDB name, origin, manifest identity or scope changes.
+Do not clear site data or reinstall the PWA to update it.

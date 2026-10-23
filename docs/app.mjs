@@ -3,16 +3,21 @@ import {exportPublicCard, importPublicCard, deviceIdentity, sealSurname, openSur
 import {readDevice, loadContacts, saveContact, deleteContact, getMyName, setMyName} from './storage.mjs';
 import {cardLinkFor, cardFromInput, compactLinkContents, copyRenderedLink} from './sharing.mjs';
 import {ShortLinkClient, shortIDFromInput} from './shortlinks.mjs';
-import {SHORTLINK_ENDPOINT} from './shortlink-config.mjs';
+import {SHORTLINK_ENDPOINT, PUSH_ENDPOINT} from './shortlink-config.mjs';
+import {PushClient, pushKeyBytes} from './push.mjs';
 
 const appBase = new URL('./', import.meta.url).href;
 const shortLinks = SHORTLINK_ENDPOINT ? new ShortLinkClient(SHORTLINK_ENDPOINT) : null;
+const pushClient = PUSH_ENDPOINT ? new PushClient(PUSH_ENDPOINT) : null;
 const $ = id => document.getElementById(id);
 let device, selfContact, contacts = [], candidate = null;
 let ready = false, busy = false, generation = 0, timer, endsAt = 0, demoLink = '';
-let queuedIncoming = '';
-const incomingHash = location.hash;
-if (incomingHash) history.replaceState(null, '', location.pathname);
+let queuedIncoming = location.hash, activeIncoming = null;
+let workerReady = null, pushBusy = false, pushEnabled = false, pushSupported = false, pushRefreshPending = false;
+let pushPublicKey = '', pushSubscription = null;
+const standalone = navigator.standalone === true || globalThis.matchMedia?.('(display-mode: standalone)').matches === true;
+
+if (queuedIncoming) history.replaceState(null, '', location.pathname);
 
 function say(text, error = false) {
   const notice = $('notice');
@@ -38,6 +43,7 @@ function tick() {
 }
 function setBusy(value) {
   busy = value;
+  updatePushButtons();
   for (const id of ['token','compose-surname','recipient','compose-orit','message-caption','expiry','my-name','contact-input','confirm-fingerprint']) $(id).disabled = value || !ready;
   for (const id of ['demo','open','paste-open','export-card','inspect-contact']) $(id).disabled = value || !ready;
   $('copy-handoff').disabled = value || !$('handoff-link').value;
@@ -52,10 +58,23 @@ function setBusy(value) {
   $('copy-card-link').disabled = value || !$('my-card-link').value;
   $('save-contact').disabled = value || !ready || !candidate || !$('confirm-fingerprint').checked;
   for (const button of $('contacts-list').querySelectorAll('button')) button.disabled = value;
-  if (!value && ready && queuedIncoming) {
+  flushIncoming();
+}
+function flushIncoming() {
+  if (busy || !ready || document.hidden || activeIncoming || !queuedIncoming) return;
+  // Recheck after the current operation has finished updating the UI.
+  Promise.resolve().then(() => {
+    if (busy || !ready || document.hidden || activeIncoming || !queuedIncoming) return;
     const hash = queuedIncoming; queuedIncoming = '';
-    Promise.resolve().then(() => handleIncoming(hash));
-  }
+    void handleIncoming(hash);
+  });
+}
+function suspendSensitive() {
+  // A notification can navigate an existing hidden window before focusing it.
+  // Retry only an incoming link that has not yet shown its result. Once a name
+  // was displayed, returning to the app must never make it reappear.
+  if (activeIncoming?.pending && activeIncoming.generation === generation && !queuedIncoming) queuedIncoming = activeIncoming.hash;
+  clearSensitive();
 }
 function showMode(mode) {
   clearSensitive(); const read = mode === 'read';
@@ -100,8 +119,8 @@ async function openInput(input, fromIncoming = false) {
   hideResult();
   if (!fromIncoming) clearHandoff();
   try {
-    if (inputKind(input) === 'card') { $('token').value = ''; await inspectCard(input); }
-    else await reveal(input);
+    if (inputKind(input) === 'card') { $('token').value = ''; await inspectCard(input, fromIncoming); }
+    else await reveal(input, fromIncoming);
   } catch (error) { say(error.message || 'Скопируйте ссылку из сообщения.', true); }
 }
 async function pasteAndOpen() {
@@ -167,6 +186,7 @@ function renderContacts() {
       if (busy) return; setBusy(true);
       try {
         await deleteContact(contact.id); contacts = await loadContacts(); renderContacts();
+        void refreshNotifications();
         $('compose-output').hidden = true; $('output-link').value = '';
         say('Контакт убран с этого телефона. Уже отправленные ссылки это не отзывает.');
       } catch (error) { say(error.message, true); } finally { setBusy(false); }
@@ -177,9 +197,10 @@ function renderContacts() {
   if ([...selector.options].some(option => option.value === selected)) selector.value = selected;
   setBusy(busy);
 }
-async function reveal(input) {
+async function reveal(input, fromIncoming = false) {
   if (busy || !ready) return;
   showMode('read'); const current = generation; setBusy(true); say('Проверяем ссылку…');
+  if (fromIncoming && activeIncoming) activeIncoming.generation = current;
   try {
     const shortID = shortIDFromInput(input, appBase);
     if (shortID && !shortLinks) throw new Error('Для короткой ссылки нужна обновлённая версия просмотрщика. Откройте приложение с интернетом и затем перезапустите его.');
@@ -190,6 +211,7 @@ async function reveal(input) {
     if (isDemo) data = await openDemo(device, token);
     else { contacts = await loadContacts(); renderContacts(); data = await openSurname(device, token, contacts); }
     if (current !== generation || document.hidden) return;
+    if (fromIncoming && activeIncoming) activeIncoming.pending = false;
     $('result-label').textContent = isDemo ? 'Вымышленный пример' : 'Фамилия из сообщения';
     $('surname').textContent = data.surname; $('department').textContent = data.department;
     $('case-code').textContent = isDemo ? data.code : 'Отправитель: ' + data.senderName;
@@ -200,6 +222,90 @@ async function reveal(input) {
   } catch (error) { if (current === generation) say(error.message || 'Не удалось открыть ссылку.', true); }
   finally { setBusy(false); }
 }
+
+function pushStatus(message) { $('push-status').textContent = message; }
+function updatePushButtons() {
+  const blocked = busy || pushBusy || !ready || !pushSupported;
+  $('push-enable').disabled = blocked;
+  $('push-enable').hidden = pushEnabled;
+  $('push-test').disabled = blocked || !pushEnabled;
+  $('push-test').hidden = !pushEnabled;
+  $('push-disable').disabled = busy || pushBusy || !ready || !pushSubscription;
+  $('push-disable').hidden = !pushSubscription;
+}
+function notificationMessage(status) {
+  return ({accepted:'Сервис принял уведомление для получателя; доставка зависит от его телефона.',already:'Уведомление уже обрабатывалось.',unavailable:'У получателя нет доступных уведомлений. Передайте ссылку через Пачку.',gone:'Подписка получателя недействительна. Передайте ссылку через Пачку.',failed:'Уведомление не отправлено. Передайте ссылку через Пачку.'})[status] || 'Уведомление не подтверждено. Передайте ссылку через Пачку.';
+}
+async function finishPushAction() {
+  pushBusy = false; updatePushButtons();
+  if (pushRefreshPending) { pushRefreshPending = false; await refreshNotifications(); }
+}
+async function refreshNotifications(checkStatus = false) {
+  if (!pushClient || !pushSupported || !ready || !workerReady || globalThis.Notification.permission !== 'granted') return;
+  if (pushBusy) { pushRefreshPending = true; return; }
+  if (!checkStatus && !pushEnabled) return;
+  pushBusy = true; updatePushButtons();
+  try {
+    const registration = await workerReady;
+    pushSubscription = await registration.pushManager.getSubscription();
+    if (!pushSubscription) { pushEnabled = false; pushStatus('Уведомления выключены. Нажмите «Включить уведомления».'); return; }
+    if (checkStatus && await pushClient.status(device) !== 'enabled') { pushEnabled = false; pushStatus('Уведомления выключены. Нажмите «Включить уведомления».'); return; }
+    const status = await pushClient.register(device,pushSubscription,await loadContacts());
+    pushEnabled = status === 'enabled';
+    pushStatus(pushEnabled ? 'Уведомления включены на этом телефоне.' : 'Сервис не включил уведомления. Повторите подключение.');
+  } catch { pushEnabled = false; pushStatus('Не удалось подтвердить уведомления. Проверьте интернет и нажмите «Включить уведомления».'); }
+  finally { await finishPushAction(); }
+}
+async function initNotifications() {
+  if (!pushClient) { $('push-panel').hidden = true; return; }
+  if (!standalone) { pushStatus('Для уведомлений откройте просмотрщик через синий значок на экране «Домой».'); updatePushButtons(); return; }
+  pushSupported = !!workerReady && typeof globalThis.Notification !== 'undefined' && typeof globalThis.PushManager !== 'undefined';
+  if (!pushSupported) { pushStatus('Уведомления недоступны на этом устройстве. На iPhone нужны iOS 16.4 или новее и установка на экран «Домой».'); updatePushButtons(); return; }
+  pushStatus(globalThis.Notification.permission === 'denied' ? 'Уведомления запрещены. Разрешите их для «ПСО» в настройках уведомлений iPhone.' : 'Нажмите «Включить уведомления» и разрешите их на телефоне.');
+  updatePushButtons();
+  // Preload only a public application-server key; never request permission here.
+  try { pushPublicKey = await pushClient.config(); } catch {}
+  await refreshNotifications(true);
+}
+$('push-enable').addEventListener('click', async () => {
+  if (busy || pushBusy || !ready || !pushSupported) return;
+  pushBusy = true; updatePushButtons();
+  try {
+    // Must be the first asynchronous browser operation in the user click.
+    const permissionPromise = globalThis.Notification.requestPermission();
+    const permission = await permissionPromise;
+    if (permission !== 'granted') { pushEnabled = false; pushStatus('Уведомления не разрешены. Разрешить их можно в настройках уведомлений iPhone.'); return; }
+    const registration = await workerReady;
+    if (!pushPublicKey) pushPublicKey = await pushClient.config();
+    pushSubscription = await registration.pushManager.getSubscription();
+    if (!pushSubscription) pushSubscription = await registration.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:pushKeyBytes(pushPublicKey)});
+    const status = await pushClient.register(device,pushSubscription,await loadContacts());
+    pushEnabled = status === 'enabled';
+    pushStatus(pushEnabled ? 'Уведомления включены. Нажмите «Проверить уведомление», затем коснитесь пришедшего уведомления.' : 'Не удалось включить уведомления. Повторите подключение.');
+  } catch { pushEnabled = false; pushStatus('Не удалось включить уведомления. Проверьте интернет и разрешение на уведомления, затем повторите.'); }
+  finally { await finishPushAction(); }
+});
+$('push-disable').addEventListener('click', async () => {
+  if (busy || pushBusy || !ready || !pushSubscription) return;
+  pushBusy = true; pushRefreshPending = false; updatePushButtons();
+  try {
+    const status = await pushClient.unregister(device);
+    if (status !== 'disabled') throw new Error('Not disabled');
+    // Server stops first, even if the browser cannot remove its old subscription.
+    pushEnabled = false;
+    const removed = await pushSubscription.unsubscribe();
+    if (removed) pushSubscription = null;
+    pushStatus('Уведомления отключены. Включить их снова можно этой кнопкой.');
+  } catch { pushStatus('Не удалось полностью отключить уведомления. Повторите или запретите их в настройках iPhone.'); }
+  finally { await finishPushAction(); }
+});
+$('push-test').addEventListener('click', async () => {
+  if (busy || pushBusy || !ready || !pushEnabled) return;
+  pushBusy = true; updatePushButtons();
+  try { pushStatus(notificationMessage(await pushClient.test(device)) + ' Проверочное уведомление открывает главную страницу.'); }
+  catch { pushStatus('Проверочное уведомление не подтверждено. Проверьте интернет и повторите.'); }
+  finally { await finishPushAction(); }
+});
 
 $('show-read').addEventListener('click', () => showMode('read'));
 $('show-write').addEventListener('click', () => showMode('write'));
@@ -247,7 +353,13 @@ $('compose-form').addEventListener('submit', async event => {
     updateCaptionPreview();
     $('output-recipient').textContent = selectedID === selfContact.id ? 'Получатель: только этот просмотрщик — проверка' : 'Получатель: ' + recipient.name;
     $('compose-output').hidden = false;
-    say(shortLinks ? 'Короткая ссылка готова. Нажмите «Скопировать ссылку» и вставьте в Пачку.' : 'Подпись со ссылкой готова. Нажмите «Скопировать готовую надпись» и вставьте в Пачку.');
+    let pushMessage = '';
+    if (shortLinks && pushClient) {
+      try { pushMessage = notificationMessage(await pushClient.notify(device,shortIDFromInput(output,appBase))); }
+      catch { pushMessage = 'Уведомление не подтверждено. Передайте ссылку через Пачку.'; }
+      if (current !== generation || document.hidden) return;
+    }
+    say(shortLinks ? 'Короткая ссылка готова. ' + pushMessage + ' Нажмите «Скопировать ссылку» и вставьте в Пачку.' : 'Подпись со ссылкой готова. Нажмите «Скопировать готовую надпись» и вставьте в Пачку.');
     $('compose-output').scrollIntoView({block:'nearest', behavior:'auto'});
   } catch (error) { if (current === generation) say(error.message || 'Не удалось создать ссылку.', true); }
   finally { name = ''; setBusy(false); }
@@ -294,15 +406,17 @@ $('copy-card').addEventListener('click', () => copyText($('my-card').value, 'my-
 $('copy-card-link').addEventListener('click', () => copyText($('my-card-link').value, 'my-card-link', 'Адрес скопирован. В Пачке напишите «Карточка врача», выделите эти слова → «Аа» → 🔗 → вставьте адрес.', 'my-card-full'));
 $('copy-card-compact').addEventListener('click', () => copyCompactLink($('my-card-link').value, 'Карточка врача', 'my-card-link', 'my-card-full'));
 $('contact-input').addEventListener('input', () => setCandidate(null));
-async function inspectCard(input) {
+async function inspectCard(input, fromIncoming = false) {
   if (busy || !ready) return;
   clearSensitive(); $('contacts-details').open = true; $('contact-input').value = input;
   const current = generation;
+  if (fromIncoming && activeIncoming) activeIncoming.generation = current;
   setCandidate(null); setBusy(true);
   try {
     const contact = await importPublicCard(cardFromInput(input, appBase));
     if (current !== generation || document.hidden) return;
     if (contact.id === selfContact.id) throw new Error('Это карточка этого телефона. Для проверки выберите «Себе» в списке получателей.');
+    if (fromIncoming && activeIncoming) activeIncoming.pending = false;
     setCandidate(contact); say('Сверьте весь отпечаток с коллегой лично или по известному номеру телефона.');
     $('contact-confirm').scrollIntoView({block:'center', behavior:'auto'});
   } catch (error) { if (current === generation && !document.hidden) say(error.message, true); } finally { setBusy(false); }
@@ -313,36 +427,51 @@ $('save-contact').addEventListener('click', async () => {
   if (busy || !ready || !candidate || !$('confirm-fingerprint').checked) return; setBusy(true);
   try {
     await saveContact({...candidate, verified:true}); contacts = await loadContacts(); renderContacts();
+    void refreshNotifications();
     $('contact-input').value = ''; setCandidate(null); say('Врач добавлен. Чтобы принимать ваши ссылки, ему также нужно добавить вашу карточку.');
   } catch (error) { say(error.message, true); } finally { setBusy(false); }
 });
 async function handleIncoming(hash) {
   if (!hash) return;
+  if (busy || !ready || document.hidden || activeIncoming) { queuedIncoming = hash; return; }
+  const request = {hash, pending:true, generation};
+  activeIncoming = request;
   clearSensitive(); setCandidate(null);
-  if (busy) { queuedIncoming = hash; return; }
   clearHandoff();
-  if (!hash.startsWith('#pso=') && !hash.startsWith('#card=') && !hash.startsWith('#r=')) { say('Неизвестный формат ссылки.', true); return; }
   const link = appBase + hash;
   try {
+    if (!hash.startsWith('#pso=') && !hash.startsWith('#card=') && !hash.startsWith('#r=')) throw new Error('Неизвестный формат ссылки.');
     inputKind(link);
     $('handoff-link').value = link;
-    const standalone = navigator.standalone === true || globalThis.matchMedia?.('(display-mode: standalone)').matches === true;
     $('handoff-panel').hidden = standalone;
     setBusy(busy);
     await openInput(link, true);
   } catch (error) { say(error.message, true); }
+  finally {
+    if (activeIncoming === request) activeIncoming = null;
+    flushIncoming();
+  }
 }
 addEventListener('hashchange', () => {
   const hash = location.hash; history.replaceState(null, '', location.pathname);
-  return handleIncoming(hash);
+  if (!hash) return;
+  queuedIncoming = hash;
+  clearSensitive(); setCandidate(null);
+  flushIncoming();
 });
-document.addEventListener('visibilitychange', () => { if (document.hidden) clearSensitive(); else tick(); });
-addEventListener('pagehide', clearSensitive);
+document.addEventListener('visibilitychange', () => { if (document.hidden) suspendSensitive(); else { tick(); flushIncoming(); } });
+addEventListener('pagehide', suspendSensitive);
 
 async function init() {
   setBusy(true);
+  if ('serviceWorker' in navigator) {
+    workerReady = navigator.serviceWorker.register('./sw.js').then(() => navigator.serviceWorker.ready);
+    // Keep registration failures separate from existing key/decryption operations.
+    workerReady.catch(() => {});
+  }
   if (shortLinks) {
     $('copy-composed').textContent = 'Скопировать ссылку';
+    if (pushClient) { $('encrypt').textContent = 'Создать ссылку и уведомить'; $('push-compose-help').hidden = false; }
     $('short-output').hidden = false;
     $('copy-output-help').textContent = 'В Пачку вставятся подпись и короткий адрес https://. Адрес можно нажать, даже если оформление текста не сохранится.';
     $('compose-full-link').hidden = true;
@@ -354,8 +483,7 @@ async function init() {
     contacts = await loadContacts(); $('my-name').value = await getMyName();
     $('device-id').textContent = identity.fingerprint; $('status').textContent = 'Ключ этого просмотрщика готов';
     ready = true; renderContacts(); setBusy(false);
-    await handleIncoming(incomingHash);
   } catch (error) { ready = false; $('status').textContent = 'Не удалось подготовить просмотрщик'; say(error.message, true); setBusy(false); }
-  if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => {});
+  void initNotifications();
 }
 init();

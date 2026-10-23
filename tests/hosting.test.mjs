@@ -4,7 +4,7 @@ import vm from 'node:vm';
 import {readFile, access} from 'node:fs/promises';
 import {linkForToken, tokenFromInput} from '../docs/crypto.mjs';
 import {cardLinkFor, cardFromInput, compactLinkContents} from '../docs/sharing.mjs';
-import {SHORTLINK_ENDPOINT} from '../docs/shortlink-config.mjs';
+import {SHORTLINK_ENDPOINT, PUSH_ENDPOINT} from '../docs/shortlink-config.mjs';
 
 const token = 'PSO1.recipient.sender.cipher.signature';
 const origin = 'https://viewer.example';
@@ -109,6 +109,10 @@ test('enabled broker uses one HTTPS endpoint permitted by exact CSP origin witho
   assert.equal(endpoint.protocol, 'https:');
   assert.equal(endpoint.pathname, '/functions/v1/pso-shortlinks');
   for (const field of ['username', 'password', 'search', 'hash']) assert.equal(endpoint[field], '');
+  const pushEndpoint = new URL(PUSH_ENDPOINT);
+  assert.equal(pushEndpoint.origin, endpoint.origin, 'Push uses the same explicitly permitted service origin');
+  assert.equal(pushEndpoint.pathname, '/functions/v1/pso-push');
+  for (const field of ['username', 'password', 'search', 'hash']) assert.equal(pushEndpoint[field], '');
   const html = await readFile(new URL('../docs/index.html', import.meta.url), 'utf8');
   const policy = html.match(/http-equiv="Content-Security-Policy" content="([^"]+)"/)?.[1];
   assert.ok(policy, 'Document has an explicit CSP');
@@ -124,7 +128,7 @@ test('service worker serves its own offline shell and leaves sibling app request
   for (const path of ['/', '/pso-code-viewer/']) {
     const handlers = new Map(), deleted = [], installed = [];
     const prefix = 'pso-viewer-' + encodeURIComponent(path) + '-shell-';
-    const current = prefix + 'github-v6b-fetch-binding';
+    const current = prefix + 'github-v7-web-push';
     const unrelated = 'pso-viewer-%2Fanother-app%2F-shell-github-v1';
     const cached = {status:200, body:'offline-shell'};
     const cache = {
@@ -147,6 +151,7 @@ test('service worker serves its own offline shell and leaves sibling app request
     assert.ok(installed.includes('./') && installed.includes('./index.html'));
     assert.ok(installed.includes('./sharing.mjs'), 'Compact-sharing logic must be available offline');
     assert.ok(installed.includes('./shortlinks.mjs') && installed.includes('./shortlink-config.mjs'), 'Client and configuration must update with the same offline shell');
+    assert.ok(installed.includes('./push.mjs'), 'Notification client must update with its shell');
     assert.ok(installed.every(file => new URL(file, origin + path + 'sw.js').pathname.startsWith(path)));
     let activation;
     handlers.get('activate')({waitUntil(promise) { activation = promise; }});
@@ -161,6 +166,7 @@ test('service worker serves its own offline shell and leaves sibling app request
     }
     for (const method of ['GET', 'POST']) {
       handlers.get('fetch')({request:{method, url:SHORTLINK_ENDPOINT}, respondWith() { assert.fail('Broker traffic must never be intercepted or cached'); }});
+      handlers.get('fetch')({request:{method, url:PUSH_ENDPOINT}, respondWith() { assert.fail('Notification requests must never be intercepted or cached'); }});
     }
   }
 });

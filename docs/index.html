@@ -111,6 +111,7 @@
               <option value="1440" selected>24 часа</option>
             </select>
             <button id="encrypt" type="submit" class="button button-primary">Создать ссылку</button>
+            <p id="push-compose-help" class="fine-print" hidden>При создании ссылки выбранному врачу сразу отправится уведомление, если он включил их и добавил вашу карточку.</p>
           </form>
           <div id="compose-output" class="output-block" hidden>
             <p class="eyebrow">Ссылка готова</p>
@@ -137,6 +138,18 @@
         </section>
         <p id="notice" class="notice" role="status" aria-live="polite" tabindex="-1"></p>
       </div>
+
+      <section id="push-panel" class="push-panel" aria-labelledby="push-heading">
+        <h2 id="push-heading">Уведомления</h2>
+        <p>Нажмите уведомление «Новое сообщение ПСО» — откроется нужная запись в просмотрщике. Фамилии в уведомлении нет.</p>
+        <p id="push-status" class="push-status" role="status" aria-live="polite">Подготовка уведомлений…</p>
+        <div class="push-actions">
+          <button id="push-enable" type="button" class="button button-primary" disabled>Включить уведомления</button>
+          <button id="push-test" type="button" class="button button-secondary" disabled hidden>Проверить уведомление</button>
+          <button id="push-disable" type="button" class="button button-secondary" disabled hidden>Отключить уведомления</button>
+        </div>
+        <p class="fine-print">Принимать уведомления можно от добавленных вами врачей. Ссылку в Пачке можно использовать по-прежнему.</p>
+      </section>
 
       <div class="details-group">
         <details id="contacts-details">

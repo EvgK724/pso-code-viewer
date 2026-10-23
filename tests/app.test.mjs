@@ -11,6 +11,7 @@ import * as cryptography from '../docs/crypto.mjs';
 import * as exchange from '../docs/exchange.mjs';
 import * as sharing from '../docs/sharing.mjs';
 import * as shortlinks from '../docs/shortlinks.mjs';
+import * as push from '../docs/push.mjs';
 import {createShortlinkHandler} from '../server/shortlink-handler.mjs';
 
 if (!globalThis.crypto) globalThis.crypto = webcrypto;
@@ -77,8 +78,9 @@ async function persistentDevice() {
 
 async function harness(persistent, initialHash = '', {
   richClipboard = false, rejectRich = false, rejectText = false,
-  readText = '', rejectRead = false, deferRead = false, standalone = false, legacyStandalone = false,
-  nativeCopy = undefined, shortlinkEndpoint = '', shortlinkFetch = undefined
+  readText = '', rejectRead = false, deferRead = false, standalone = false, legacyStandalone = false, initialHidden = false,
+  nativeCopy = undefined, shortlinkEndpoint = '', shortlinkFetch = undefined,
+  pushEndpoint = '', pushFetch = undefined, notificationPermission = 'default', pushSubscription = null, permissionResult = 'granted', rejectSubscribe = false, rejectUnsubscribe = false
 } = {}) {
   const elements = new Map();
   for (const match of html.matchAll(/<([a-z][a-z0-9-]*)\b([^>]*)>/gi)) {
@@ -103,8 +105,14 @@ async function harness(persistent, initialHash = '', {
     addRange(range) { selectedRanges.push(range); }
   };
   const pendingReads = [];
+  let permissionCalls=0,subscribeCalls=0,unsubscribeCalls=0,currentSubscription=pushSubscription;
+  const subscription = {toJSON(){return {endpoint:'https://web.push.apple.com/test-device',keys:{p256dh:'test-key',auth:'test-auth'}};},async unsubscribe(){unsubscribeCalls++;if(rejectUnsubscribe)throw new Error('unsubscribe failed');currentSubscription=null;return true;}};
+  const registration = {pushManager:{async getSubscription(){return currentSubscription;},async subscribe(options){subscribeCalls++;assert.equal(options.userVisibleOnly,true);assert.equal(options.applicationServerKey.length,65);if(rejectSubscribe)throw new Error('Subscribe failed');currentSubscription=subscription;return subscription;}}};
+  if(pushSubscription===true)currentSubscription=subscription;
+  const notification = {permission:notificationPermission,requestPermission(){permissionCalls++;notification.permission=permissionResult;return Promise.resolve(permissionResult);}};
+
   const document = {
-    hidden:false,
+    hidden:initialHidden,
     getElementById:el,
     createElement:tag => new Element(tag),
     addEventListener(type, fn) { docListeners.set(type, fn); }
@@ -172,7 +180,8 @@ async function harness(persistent, initialHash = '', {
   const context = vm.createContext({
     document, location, getSelection:() => selection,
     history:{replaceState() { location.hash = ''; }},
-    navigator:{clipboard:clipboardAPI, standalone:legacyStandalone},
+    navigator:{clipboard:clipboardAPI, standalone:legacyStandalone,...(pushEndpoint?{serviceWorker:{register:async()=>registration,ready:Promise.resolve(registration)}}:{})},
+    ...(pushEndpoint?{Notification:notification,PushManager:class {}}:{}),
     matchMedia(query) { return {matches:query === '(display-mode: standalone)' && standalone}; },
     crypto:webcrypto, URL, console, Blob,
     ClipboardItem:richClipboard ? FakeClipboardItem : undefined,
@@ -185,10 +194,12 @@ async function harness(persistent, initialHash = '', {
   class InjectedShortLinkClient extends shortlinks.ShortLinkClient {
     constructor(endpoint) { super(endpoint, {fetch:shortlinkFetch}); }
   }
+  class InjectedPushClient extends push.PushClient { constructor(endpoint){super(endpoint,{fetch:pushFetch});} }
   const exportsFor = {
     './crypto.mjs':cryptography, './exchange.mjs':exchange, './storage.mjs':storage, './sharing.mjs':sharing,
     './shortlinks.mjs':{...shortlinks, ShortLinkClient:InjectedShortLinkClient},
-    './shortlink-config.mjs':{SHORTLINK_ENDPOINT:shortlinkEndpoint}
+    './shortlink-config.mjs':{SHORTLINK_ENDPOINT:shortlinkEndpoint,PUSH_ENDPOINT:pushEndpoint},
+    './push.mjs':{...push,PushClient:InjectedPushClient}
   };
   const module = new vm.SourceTextModule(appSource, {context, identifier:origin + appPath + 'app.mjs', initializeImportMeta(meta) { meta.url = origin + appPath + 'app.mjs'; }});
   await module.link(specifier => {
@@ -210,6 +221,8 @@ async function harness(persistent, initialHash = '', {
     nativeCopyAttempts:() => nativeAttempts,
     nativePayload:() => nativePayload,
     clipboardReadAttempts:() => readAttempts,
+    pushCounts:()=>({permission:permissionCalls,subscribe:subscribeCalls,unsubscribe:unsubscribeCalls}),
+    async pushIdle(){await waitUntil(()=>!el('push-enable').disabled || el('push-test').disabled===false || /выключены|запрещены|значок|Не удалось/.test(el('push-status').textContent),'push completion');},
     setReadText(value) { nextReadText = value; },
     resolveClipboardRead(value) {
       const read = pendingReads.shift();
@@ -905,4 +918,194 @@ test('a short-link resolve finishing after the app enters background cannot reve
   assert.equal(b.el('result').hidden, true, 'Returning to the foreground must not reveal automatically');
   await b.event('paste-open'); await b.idle();
   assert.equal(b.el('surname').textContent, 'Тестов', 'An explicit new request can still open the same valid link');
+});
+
+test('notification launch queues its incoming link until the installed app becomes visible, without redisplaying it later', async () => {
+  const persistent = await persistentDevice(), broker = await shortlinkBroker(persistent.device);
+  const creator = await harness(persistent, '', broker.options);
+  const url = await composeShortMessage(creator, (await exchange.deviceIdentity(persistent.device)).id);
+  const resolveCount = () => broker.requests.filter(request => request.op === 'resolve').length;
+  const before = resolveCount();
+  const app = await harness(persistent, new URL(url).hash, {...broker.options, standalone:true, initialHidden:true});
+  assert.equal(app.location.hash, '', 'Capability is removed from the address bar even while hidden');
+  assert.equal(resolveCount(), before, 'Hidden startup does not resolve or decrypt');
+  assert.equal(app.el('surname').textContent, '');
+  await app.show(); await app.idle();
+  assert.equal(app.el('surname').textContent, 'Тестов');
+  assert.equal(resolveCount(), before + 1);
+  await app.hide(); await app.show(); await app.idle();
+  assert.equal(app.el('surname').textContent, '', 'A previously shown surname never reappears on foreground');
+  assert.equal(app.el('result').hidden, true);
+  assert.equal(resolveCount(), before + 1, 'A completed incoming link is not retried');
+});
+
+test('an incoming hash delivered to a hidden app opens only the newest pending link on foreground', async () => {
+  const persistent = await persistentDevice(), broker = await shortlinkBroker(persistent.device);
+  const creator = await harness(persistent, '', broker.options);
+  const identity = await exchange.deviceIdentity(persistent.device);
+  const first = await composeShortMessage(creator, identity.id);
+  const second = await composeShortMessage(creator, identity.id, 'orit');
+  const app = await harness(persistent, '', {...broker.options, standalone:true});
+  await app.hide();
+  const before = broker.requests.length;
+  await app.hashchange(new URL(first).hash);
+  await app.hashchange(new URL(second).hash);
+  assert.equal(broker.requests.length, before);
+  assert.equal(app.el('surname').textContent, '');
+  await app.show(); await app.idle();
+  assert.equal(app.el('surname').textContent, 'Тестов');
+  assert.equal(app.el('department').textContent, 'ОРИТ');
+  assert.equal(broker.requests.length, before + 1);
+  assert.equal(broker.requests.at(-1).id, new URL(second).hash.slice(3));
+});
+
+test('an unprocessed incoming link interrupted by backgrounding is retried once when visible', async () => {
+  const persistent = await persistentDevice(), broker = await shortlinkBroker(persistent.device);
+  const creator = await harness(persistent, '', broker.options);
+  const url = await composeShortMessage(creator, (await exchange.deviceIdentity(persistent.device)).id);
+  const app = await harness(persistent, '', {...broker.options, standalone:true});
+  const gate = broker.deferNextResolve();
+  await app.hashchange(new URL(url).hash);
+  await gate.started; await app.hide();
+  gate.release(); await app.idle();
+  assert.equal(app.el('surname').textContent, '');
+  await app.show(); await app.idle();
+  assert.equal(app.el('surname').textContent, 'Тестов');
+  await app.pagehide(); await app.show(); await app.idle();
+  assert.equal(app.el('surname').textContent, '', 'Page lifecycle cannot redisplay a completed name');
+});
+
+async function notificationService({enabled=false,notifyStatus='accepted',failNotify=false}={}) {
+  const pair=await crypto.subtle.generateKey({name:'ECDSA',namedCurve:'P-256'},true,['sign','verify']);
+  const publicKey=Buffer.from(await crypto.subtle.exportKey('raw',pair.publicKey)).toString('base64url');
+  const requests=[];
+  return {requests,fetch:async(url,options)=>{
+    const body=JSON.parse(options.body);requests.push(body);
+    if(body.op==='config')return new Response(JSON.stringify({v:1,publicKey}),{headers:{'Content-Type':'application/json'}});
+    const op=body.envelope.op;
+    if(op==='notify'&&failNotify)throw new TypeError('Network down');
+    if(op==='register')enabled=true;
+    if(op==='unregister')enabled=false;
+    const status=['register','unregister','status'].includes(op)?(enabled?'enabled':'disabled'):notifyStatus;
+    return new Response(JSON.stringify({status}),{headers:{'Content-Type':'application/json'}});
+  }};
+}
+
+test('notifications request permission only on explicit Home Screen click and preserve existing keys',async()=>{
+ const persistent=await persistentDevice(),key=persistent.device.encryption.privateKey;
+ const service=await notificationService();
+ const app=await harness(persistent,'',{standalone:true,pushEndpoint:'https://push.example/api',pushFetch:service.fetch});
+ await waitUntil(()=>!app.el('push-enable').disabled,'push button available');
+ assert.deepEqual(app.pushCounts(),{permission:0,subscribe:0,unsubscribe:0});
+ const enable=app.event('push-enable');
+ assert.equal(app.pushCounts().permission,1,'Permission starts synchronously in click');
+ await enable;
+ assert.equal(app.pushCounts().subscribe,1);assert.equal(app.el('push-test').hidden,false);
+ assert.equal(persistent.device.encryption.privateKey,key);
+ const registered=service.requests.find(r=>r.envelope?.op==='register');
+ assert.ok(registered);assert.equal(registered.envelope.data.senders.length,1);
+ assert.ok(!service.requests.some(r=>r.envelope?.op==='test'),'Enabling never sends a notification itself');
+ await app.event('push-test');assert.equal(service.requests.filter(r=>r.envelope?.op==='test').length,1);
+ await app.event('push-disable');assert.equal(app.el('push-test').hidden,true);assert.equal(app.pushCounts().unsubscribe,1);
+});
+
+test('ordinary browser launch never asks for notification permission or subscribes',async()=>{
+ const service=await notificationService();
+ const app=await harness(await persistentDevice(),'',{pushEndpoint:'https://push.example/api',pushFetch:service.fetch});
+ await app.event('push-enable');assert.equal(app.pushCounts().permission,0);assert.equal(app.pushCounts().subscribe,0);
+ assert.match(app.el('push-status').textContent,/синий значок/);
+ assert.equal(service.requests.length,0);
+});
+
+test('notification denial and failed subscription leave decryption keys and main features intact',async t=>{
+ for(const options of [{permissionResult:'denied'},{rejectSubscribe:true}])await t.test(JSON.stringify(options),async()=>{
+  const persistent=await persistentDevice(),key=persistent.device.signing.privateKey,service=await notificationService();
+  const app=await harness(persistent,'',{standalone:true,pushEndpoint:'https://push.example/api',pushFetch:service.fetch,...options});
+  await app.event('push-enable');assert.equal(app.el('push-test').hidden,true);
+  assert.equal(persistent.device.signing.privateKey,key);assert.equal(app.el('open').disabled,false);
+  assert.ok(!service.requests.some(r=>r.envelope?.op==='register'));
+ });
+});
+
+test('refresh retains consent: an existing but server-disabled subscription is not silently enabled',async()=>{
+ const service=await notificationService({enabled:false});
+ const app=await harness(await persistentDevice(),'',{standalone:true,pushEndpoint:'https://push.example/api',pushFetch:service.fetch,notificationPermission:'granted',pushSubscription:true});
+ await waitUntil(()=>service.requests.some(r=>r.envelope?.op==='status'),'server status checked');
+ await waitUntil(()=>/выключены/.test(app.el('push-status').textContent),'disabled state shown');
+ assert.equal(app.pushCounts().permission,0);assert.equal(app.pushCounts().subscribe,0);
+ assert.ok(!service.requests.some(r=>r.envelope?.op==='register'));
+});
+
+test('enabled startup refreshes verified senders without requesting permission; adding and removing contacts updates consent', async () => {
+  const persistent = await persistentDevice(), colleague = await persistentDevice();
+  const selfID = (await exchange.deviceIdentity(persistent.device)).id;
+  const card = await exchange.exportPublicCard(colleague.device, 'Коллега');
+  const contact = await exchange.importPublicCard(card);
+  const service = await notificationService({enabled:true});
+  const app = await harness(persistent, '', {standalone:true, pushEndpoint:'https://push.example/api', pushFetch:service.fetch, notificationPermission:'granted', pushSubscription:true});
+  const registrations = () => service.requests.filter(request => request.envelope?.op === 'register');
+  await waitUntil(() => !app.el('push-test').hidden && !app.el('push-test').disabled, 'existing subscription refreshed');
+  assert.deepEqual(app.pushCounts(), {permission:0, subscribe:0, unsubscribe:0});
+  assert.deepEqual(registrations().at(-1).envelope.data.senders, [selfID]);
+  await addCard(app, card);
+  await waitUntil(() => registrations().length === 2 && !app.el('push-test').disabled, 'added contact registered');
+  assert.deepEqual(registrations().at(-1).envelope.data.senders, [selfID, contact.id].sort());
+  await app.el('contacts-list').querySelectorAll('button')[0].fire('click');
+  await waitUntil(() => registrations().length === 3 && !app.el('push-test').disabled, 'removed contact revoked');
+  assert.deepEqual(registrations().at(-1).envelope.data.senders, [selfID]);
+  await app.event('push-disable');
+  await addCard(app, card);
+  assert.equal(registrations().length, 3, 'Contact edits never reactivate notifications after disabling');
+});
+
+test('a contact saved while notification enablement is in flight refreshes the final consent list', async () => {
+  const persistent = await persistentDevice(), colleague = await persistentDevice();
+  const card = await exchange.exportPublicCard(colleague.device, 'Коллега');
+  const contact = await exchange.importPublicCard(card);
+  const service = await notificationService();
+  let enter, release, held = false;
+  const started = new Promise(resolve => { enter = resolve; });
+  const wait = new Promise(resolve => { release = resolve; });
+  const fetcher = async (url, options) => {
+    const response = await service.fetch(url, options);
+    if (JSON.parse(options.body).envelope?.op === 'register' && !held) { held = true; enter(); await wait; }
+    return response;
+  };
+  const app = await harness(persistent, '', {standalone:true, pushEndpoint:'https://push.example/api', pushFetch:fetcher});
+  const enabling = app.event('push-enable');
+  await started;
+  await addCard(app, card);
+  release(); await enabling;
+  const registrations = service.requests.filter(request => request.envelope?.op === 'register');
+  assert.equal(registrations.length, 2);
+  assert.ok(!registrations[0].envelope.data.senders.includes(contact.id));
+  assert.ok(registrations[1].envelope.data.senders.includes(contact.id));
+});
+
+test('composition notifies only the created short-link capability; push failure leaves the selected recipient link copyable', async t => {
+  for (const failNotify of [false, true]) await t.test(failNotify ? 'push unavailable' : 'push accepted', async () => {
+    const sender = await persistentDevice(), recipient = await persistentDevice();
+    const recipientCard = await exchange.exportPublicCard(recipient.device, 'Получатель');
+    const contact = await exchange.importPublicCard(recipientCard);
+    const broker = await shortlinkBroker(sender.device), service = await notificationService({failNotify});
+    const fetcher = async (url, options) => {
+      if (JSON.parse(options.body).envelope?.op === 'notify') assert.equal(broker.rows.size, 1, 'Short link is stored before notification');
+      return service.fetch(url, options);
+    };
+    const app = await harness(sender, '', {...broker.options, pushEndpoint:'https://push.example/api', pushFetch:fetcher});
+    await addCard(app, recipientCard);
+    const url = await composeShortMessage(app, contact.id, 'orit');
+    const requests = service.requests.filter(request => request.envelope?.op === 'notify');
+    assert.equal(requests.length, 1);
+    assert.deepEqual(requests[0].envelope.data, {id:new URL(url).hash.slice(3)}, 'Caller cannot override recipient or add plaintext to notification');
+    assert.ok(!JSON.stringify(requests).includes('Тестов'));
+    assert.match(app.el('notice').textContent, failNotify ? /не подтверждено/ : /Сервис принял уведомление/);
+    await app.event('copy-composed');
+    assert.equal(app.clipboard(), 'Новый пациент ОРИТ\n' + url);
+    const client = new shortlinks.ShortLinkClient(broker.options.shortlinkEndpoint, {fetch:broker.options.shortlinkFetch});
+    const token = await client.resolve(url, origin + appPath);
+    const senderContact = {...await exchange.importPublicCard(await exchange.exportPublicCard(sender.device, 'Отправитель')), verified:true};
+    assert.equal((await exchange.openSurname(recipient.device, token, [senderContact])).surname, 'Тестов');
+    await assert.rejects(exchange.openSurname(sender.device, token, [senderContact]), /получател|браузер/);
+  });
 });
