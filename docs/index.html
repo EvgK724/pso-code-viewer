@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#111113">
+  <meta name="referrer" content="no-referrer">
+  <meta name="robots" content="noindex, nofollow, noarchive">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; worker-src 'self'; connect-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'">
+  <meta name="description" content="ПСО Код: создание и просмотр зашифрованных ссылок для выбранного врача.">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="ПСО Просмотр">
+  <title>ПСО — просмотрщик кода</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="apple-touch-icon" sizes="180x180" href="./apple-touch-icon-pso-v2.png">
+  <link rel="icon" type="image/png" sizes="32x32" href="./favicon-pso-v2.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="brand" aria-label="ПСО, просмотрщик">
+      <img class="brand-mark" src="icon-pso-v2-192.png" width="40" height="40" alt="">
+      <span><strong>ПСО</strong><span class="brand-divider" aria-hidden="true">/</span>Просмотрщик</span>
+    </header>
+
+    <main>
+      <section class="intro" aria-labelledby="page-title">
+        <p class="prototype-badge">Пилот · ручной обмен</p>
+        <h1 id="page-title">Пациент<br>по коду</h1>
+        <p class="lead">Откройте фамилию по ссылке или создайте ссылку для&nbsp;коллеги.</p>
+        <p class="fine-print">Вход без учётной записи. Для подключения телефона добавьте приложение на экран «Домой» и создайте свою карточку.</p>
+      </section>
+
+      <section id="result" class="result-card" aria-labelledby="surname" hidden>
+        <div class="result-topline">
+          <span id="result-label" class="eyebrow">Фамилия пациента</span>
+          <span id="department" class="department"></span>
+        </div>
+        <h2 id="surname" tabindex="-1"></h2>
+        <p id="case-code" class="case-code"></p>
+        <div class="timer-line">
+          <svg width="19" height="19" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.7"/><path d="M12 7v5l3 2" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+          <span id="countdown"></span>
+        </div>
+        <button id="hide" type="button" class="button button-secondary">Скрыть сейчас</button>
+        <p class="fine-print">Скрытие с экрана не запрещает сделать скриншот.</p>
+      </section>
+
+      <nav class="mode-switch" aria-label="Действие с кодом">
+        <button id="show-read" type="button" aria-pressed="true" aria-controls="read-panel">Открыть</button>
+        <button id="show-write" type="button" aria-pressed="false" aria-controls="write-panel">Создать ссылку</button>
+      </nav>
+
+      <div class="input-card">
+        <p id="status" class="device-status" role="status">Подготовка…</p>
+        <section id="read-panel" aria-labelledby="input-label">
+          <form id="open-form" autocomplete="off">
+            <label id="input-label" for="token">Зашифрованный код или ссылка</label>
+            <textarea id="token" name="token" rows="4" maxlength="2500" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" placeholder="Вставьте сюда код или ссылку"></textarea>
+            <button id="open" type="submit" class="button button-primary">Открыть на 30 секунд</button>
+          </form>
+          <div class="demo-action">
+            <span class="demo-caption">Первая проверка — на вымышленной фамилии</span>
+            <button id="demo" type="button" class="button button-secondary">Создать тестовый код</button>
+          </div>
+          <div id="link-tools" class="link-tools" hidden>
+            <button id="copy-link" type="button" class="button button-secondary">Скопировать ссылку</button>
+            <a id="open-link" class="text-link" href="#">Открыть тестовую ссылку <span aria-hidden="true">↗</span></a>
+          </div>
+        </section>
+
+        <section id="write-panel" aria-labelledby="compose-label" hidden>
+          <form id="compose-form" autocomplete="off">
+            <label id="compose-label" for="compose-surname">Фамилия пациента</label>
+            <input id="compose-surname" name="surname" type="text" maxlength="80" spellcheck="false" autocapitalize="words" autocomplete="off" autocorrect="off" placeholder="Сначала проверьте на вымышленной фамилии" required>
+            <label for="recipient">Кому открыть фамилию</label>
+            <select id="recipient" name="recipient" required>
+              <option value="">Сначала добавьте врача в контакты</option>
+            </select>
+            <p class="field-help">Ссылку сможет открыть только выбранный получатель. Для другого врача создайте отдельную ссылку.</p>
+            <label class="check-label" for="compose-orit"><input id="compose-orit" type="checkbox"><span>Пациент в ОРИТ</span></label>
+            <label for="expiry">Срок открытия ссылки</label>
+            <select id="expiry" name="expiry">
+              <option value="60">1 час</option>
+              <option value="240">4 часа</option>
+              <option value="1440" selected>24 часа</option>
+            </select>
+            <button id="encrypt" type="submit" class="button button-primary">Создать ссылку</button>
+          </form>
+          <div id="compose-output" class="output-block" hidden>
+            <p class="eyebrow">Ссылка готова</p>
+            <p id="output-recipient" class="output-recipient"></p>
+            <label for="output-link">Ссылка для сообщения</label>
+            <textarea id="output-link" rows="3" readonly spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off"></textarea>
+            <button id="copy-composed" type="button" class="button button-secondary">Скопировать ссылку</button>
+          </div>
+          <p class="fine-print">Вставьте ссылку в нужный чат Пачки и допишите комментарий. Комментарий в чате этим просмотрщиком не шифруется.</p>
+        </section>
+        <p id="notice" class="notice" role="status" aria-live="polite"></p>
+      </div>
+
+      <div class="details-group">
+        <details id="contacts-details">
+          <summary>Контакты врачей</summary>
+          <div class="details-body">
+            <p>Один раз обменяйтесь карточками с коллегой и добавьте друг друга в контакты. Карточка содержит открытые ключи, без фамилий пациентов и секретного ключа.</p>
+            <p>Добавляйте только врачей из ваших чатов. Сверьте контрольный код лично или по известному номеру телефона.</p>
+
+            <section class="contact-section" aria-labelledby="my-card-heading">
+              <h2 id="my-card-heading">Моя карточка</h2>
+              <label for="my-name">Ваше имя для коллеги</label>
+              <input id="my-name" name="doctor-name" type="text" maxlength="60" autocomplete="off" spellcheck="false" autocorrect="off" placeholder="Ваше имя — ПСО">
+              <button id="export-card" type="button" class="button button-secondary">Моя карточка для коллеги</button>
+              <div id="my-card-box" class="output-block" hidden>
+                <label for="my-card">Карточка для копирования</label>
+                <textarea id="my-card" rows="3" readonly spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off"></textarea>
+                <p class="device-label">Мой контрольный код</p>
+                <p id="my-fingerprint" class="device-id fingerprint"></p>
+                <button id="copy-card" type="button" class="button button-secondary">Скопировать карточку</button>
+              </div>
+            </section>
+
+            <section class="contact-section" aria-labelledby="add-contact-heading">
+              <h2 id="add-contact-heading">Добавить коллегу</h2>
+              <form id="contact-form" autocomplete="off">
+                <label for="contact-input">Карточка от врача</label>
+                <textarea id="contact-input" rows="3" maxlength="5000" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" placeholder="Вставьте карточку, которую прислал коллега" required></textarea>
+                <button id="inspect-contact" type="submit" class="button button-secondary">Проверить карточку</button>
+              </form>
+              <div id="contact-confirm" class="contact-confirm" hidden>
+                <p class="device-label">Врач</p>
+                <p id="candidate-name" class="contact-name"></p>
+                <p class="device-label">Контрольный код коллеги</p>
+                <p id="candidate-fingerprint" class="device-id fingerprint"></p>
+                <label class="check-label" for="confirm-fingerprint"><input id="confirm-fingerprint" type="checkbox"><span>Сверили код лично или по известному номеру телефона — он совпал</span></label>
+                <button id="save-contact" type="button" class="button button-primary" disabled>Добавить врача</button>
+              </div>
+            </section>
+
+            <section class="contact-section" aria-labelledby="saved-contacts-heading">
+              <h2 id="saved-contacts-heading">Добавленные врачи</h2>
+              <div id="contacts-list" class="contacts-list"><p>Контактов пока нет.</p></div>
+              <p class="fine-print">Если врач больше не участвует в вашем чате, удалите его и из контактов просмотрщика. Уже полученные ссылки этим не отзываются.</p>
+            </section>
+          </div>
+        </details>
+        <details id="device-details">
+          <summary>Этот телефон</summary>
+          <div class="details-body">
+            <p>Ключ расшифровки хранится в этом просмотрщике на вашем устройстве. Он не входит в карточку или ссылку.</p>
+            <p class="device-label">Идентификатор ключа</p>
+            <p id="device-id" class="device-id">Подготовка…</p>
+            <p>Удаление приложения или его данных может удалить ключ. Тогда потребуется новая карточка и повторное добавление у коллег.</p>
+          </div>
+        </details>
+        <details id="install-details">
+          <summary>Добавить на экран «Домой»</summary>
+          <div class="details-body">
+            <p>Приложение открывается по публичной ссылке. Установка не требует ChatGPT, GitHub или пароля.</p>
+            <ol>
+              <li>Откройте эту страницу в <strong>Safari</strong>.</li>
+              <li>Нажмите <strong>«Поделиться» → «На экран “Домой”»</strong> и добавьте значок.</li>
+              <li>Откройте просмотрщик через новый значок. Создайте тестовый код и карточку для коллег уже в нём.</li>
+            </ol>
+            <p>Если раньше вы пользовались просмотрщиком на другом адресе, создайте здесь новую карточку и обменяйтесь ею с коллегами. Старые ключи автоматически не переносятся; старые ссылки открывайте в прежнем просмотрщике.</p>
+            <p>На Android откройте страницу в Chrome и выберите в меню «Установить приложение» или «Добавить на главный экран».</p>
+            <p>Браузер и приложение с домашнего экрана могут хранить разные ключи. Если ссылка открылась не там, скопируйте её и вставьте в тот просмотрщик, где создавали свою карточку.</p>
+          </div>
+        </details>
+      </div>
+      <footer>
+        <p>Бот и больничные отчёты пока не подключены. Состав чатов Пачки автоматически не проверяется.</p>
+        <p class="footer-note">Сначала проверьте обмен между телефонами на вымышленных фамилиях.</p>
+      </footer>
+    </main>
+  </div>
+  <script type="module" src="app.mjs"></script>
+</body>
+</html>
