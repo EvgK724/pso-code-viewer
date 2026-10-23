@@ -5,8 +5,10 @@
 The approved dedicated Supabase project is `spugfikalpihorcwcdqc`. The current
 role-controlled service is `pso-team`, at
 `https://spugfikalpihorcwcdqc.supabase.co/functions/v1/pso-team`.
-The applied migrations are `pso_team_roles_and_group_links` and
-`pso_team_inviter_index`; the Edge Function is deployed and ACTIVE, version 1.
+The applied migrations are `pso_team_roles_and_group_links`,
+`pso_team_inviter_index` and `pso_require_team_roles_for_new_links`; the Edge
+Function is deployed and ACTIVE, version 1. Legacy creation is denied; the old
+resolver and its existing records remain available.
 One administrator was bootstrapped from the previously verified, enabled writer.
 No actual administrator identifier, public card, name or enrolment row belongs in
 this public repository.
@@ -28,13 +30,20 @@ use a separate claim path and leave the earlier push pipeline intact.
   returned `200`/`unregistered`, a repeated nonce returned `409`, an unregistered
   directory request returned `403`, a foreign origin returned `403`, and the
   allowed-origin preflight returned `204` with the exact origin.
+- A deployed HTTP/SQL integration run passed 29 checks with five synthetic
+  devices and a fictitious surname. Two intensivists independently decrypted
+  different recipient ciphertexts from the same ORIT link; cross-key decryption
+  and wrong-group access failed. Bot-only admissions, neurologist reviews,
+  idempotent retry and rejection of incomplete/extra recipient sets passed.
+  No push subscriptions were provisioned and no Pachca messages were sent.
 - Security advisors reported only the expected INFO findings for private tables
   with RLS and no browser policies. The missing inviter foreign-key index was
   added. Fresh unused-index INFO findings are intentional; retain those indexes.
 
-This status does not assert frontend publication, bot installation, real doctor
-activation, live group-message decryption, or native iPhone notification delivery.
-Those are separate cutover and device checks below.
+The team frontend is published on the existing GitHub Pages origin. An existing
+browser device key and local demo decryption survived the update. The bot archive
+is prepared, but installation on the hospital PC, real doctor activation and
+native iPhone notification delivery remain device checks below.
 
 ### Roles and encrypted records
 
