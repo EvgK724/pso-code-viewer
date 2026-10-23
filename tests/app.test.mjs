@@ -71,7 +71,10 @@ async function persistentDevice() {
   return {device:await cryptography.makeDevice(), contacts:new Map(), name:''};
 }
 
-async function harness(persistent, initialHash = '', {richClipboard = false, rejectRich = false, rejectText = false} = {}) {
+async function harness(persistent, initialHash = '', {
+  richClipboard = false, rejectRich = false, rejectText = false,
+  readText = '', rejectRead = false, deferRead = false, standalone = false, legacyStandalone = false
+} = {}) {
   const elements = new Map();
   for (const match of html.matchAll(/<([a-z][a-z0-9-]*)\b([^>]*)>/gi)) {
     const id = match[2].match(/\bid="([^"]+)"/);
@@ -85,6 +88,8 @@ async function harness(persistent, initialHash = '', {richClipboard = false, rej
   el('expiry').value = '1440';
   const docListeners = new Map(), globalListeners = new Map(), intervals = new Map();
   let nextTimer = 1, clipboard = '', clock = 0, richItems = [], richAttempts = 0, plainAttempts = 0;
+  let readAttempts = 0, nextReadText = readText;
+  const pendingReads = [];
   const document = {
     hidden:false,
     getElementById:el,
@@ -119,6 +124,12 @@ async function harness(persistent, initialHash = '', {richClipboard = false, rej
     }
   }
   const clipboardAPI = {
+    readText() {
+      readAttempts++;
+      if (rejectRead) return Promise.reject(new Error('Clipboard read permission denied'));
+      if (deferRead) return new Promise((resolve, reject) => pendingReads.push({resolve, reject}));
+      return Promise.resolve(nextReadText);
+    },
     async writeText(value) {
       plainAttempts++;
       if (rejectText) throw new Error('Plain clipboard permission denied');
@@ -134,7 +145,8 @@ async function harness(persistent, initialHash = '', {richClipboard = false, rej
   const context = vm.createContext({
     document, location,
     history:{replaceState() { location.hash = ''; }},
-    navigator:{clipboard:clipboardAPI},
+    navigator:{clipboard:clipboardAPI, standalone:legacyStandalone},
+    matchMedia(query) { return {matches:query === '(display-mode: standalone)' && standalone}; },
     crypto:webcrypto, URL, console, Blob,
     ClipboardItem:richClipboard ? FakeClipboardItem : undefined,
     performance:{now:() => clock},
@@ -160,6 +172,13 @@ async function harness(persistent, initialHash = '', {richClipboard = false, rej
     clipboard:() => clipboard,
     richItems:() => richItems,
     clipboardAttempts:() => ({rich:richAttempts, plain:plainAttempts}),
+    clipboardReadAttempts:() => readAttempts,
+    setReadText(value) { nextReadText = value; },
+    resolveClipboardRead(value) {
+      const read = pendingReads.shift();
+      assert.ok(read, 'A clipboard read is awaiting resolution');
+      read.resolve(value);
+    },
     async event(id, type = 'click') { await el(id).fire(type); },
     async idle() { await waitUntil(() => !el('open').disabled, 'async operation completion'); },
     async hide() { document.hidden = true; await docListeners.get('visibilitychange')(); },
@@ -412,4 +431,166 @@ test('pasted card URL uses the same verification flow and stores an old-format c
   await addCard(app, sharing.cardLinkFor(card, origin + appPath));
   const imported = await exchange.importPublicCard(card);
   assert.equal(recipient.contacts.get(imported.id).card, card);
+});
+
+async function selfMessageURL(store, surname = 'Петрова') {
+  const card = await exchange.exportPublicCard(store.device, 'Этот телефон');
+  const recipient = {...await exchange.importPublicCard(card), verified:true};
+  return cryptography.linkForToken(await exchange.sealSurname(store.device, recipient, surname), origin + appPath);
+}
+
+test('clipboard is read only after the paste button click and a complete message then decrypts', async () => {
+  const store = await persistentDevice();
+  const link = await selfMessageURL(store);
+  const app = await harness(store, '', {readText:link, standalone:true});
+  assert.equal(app.clipboardReadAttempts(), 0, 'Initialization must not inspect the clipboard');
+  await app.hide(); await app.show();
+  assert.equal(app.clipboardReadAttempts(), 0, 'Returning to the app must not inspect the clipboard');
+  const paste = app.event('paste-open');
+  assert.equal(app.clipboardReadAttempts(), 1, 'Clipboard read starts synchronously inside the click gesture');
+  await paste; await app.idle();
+  assert.equal(app.el('result').hidden, false, app.el('notice').textContent);
+  assert.equal(app.el('surname').textContent, 'Петрова');
+  assert.equal(app.el('token').value, '');
+});
+
+test('paste and ordinary open accept a card without bypassing fingerprint verification', async () => {
+  const sender = await persistentDevice(), recipient = await persistentDevice();
+  const card = await exchange.exportPublicCard(sender.device, 'Доктор А');
+  const identity = await exchange.importPublicCard(card);
+  const link = sharing.cardLinkFor(card, origin + appPath);
+  const app = await harness(recipient, '', {readText:link, standalone:true});
+  await app.event('paste-open'); await app.idle();
+  await assertUnverifiedPreview(app, 'Доктор А', identity.fingerprint);
+
+  app.el('confirm-fingerprint').checked = true;
+  app.el('token').value = card;
+  await app.event('open-form', 'submit'); await app.idle();
+  await assertUnverifiedPreview(app, 'Доктор А', identity.fingerprint);
+  assert.equal(recipient.contacts.size, 0);
+});
+
+test('clipboard denial and unrelated clipboard content preserve the existing manually typed value', async t => {
+  for (const options of [
+    {rejectRead:true},
+    {readText:'https://other.example/pso-code-viewer/#pso=PSO1.a.b.c.d'},
+    {readText:origin + appPath + '#pso=<script>'},
+    {readText:'Это обычный текст из другого приложения'},
+    {readText:''}
+  ]) await t.test(options.rejectRead ? 'permission denied' : 'unrecognized clipboard ' + options.readText.slice(0, 25), async () => {
+    const app = await harness(await persistentDevice(), '', options);
+    const typed = 'Сохранившийся текст ручного ввода';
+    app.el('token').value = typed;
+    await app.event('paste-open'); await app.idle();
+    assert.equal(app.el('token').value, typed);
+    assert.equal(app.el('result').hidden, true);
+    assert.equal(app.persistent.contacts.size, 0);
+    assert.ok(app.el('notice').textContent, 'The failed paste must explain the manual fallback');
+  });
+});
+
+test('a pending clipboard result cannot reveal a surname after the app was backgrounded', async () => {
+  const store = await persistentDevice(), link = await selfMessageURL(store);
+  const app = await harness(store, '', {deferRead:true, standalone:true});
+  const typed = 'Ранее введённый текст';
+  app.el('token').value = typed;
+  const paste = app.event('paste-open');
+  assert.equal(app.clipboardReadAttempts(), 1);
+  await app.hide(); await app.show();
+  app.resolveClipboardRead(link);
+  await paste; await app.idle();
+  assert.equal(app.el('result').hidden, true);
+  assert.equal(app.el('surname').textContent, '');
+  assert.equal(app.el('token').value, typed);
+  assert.equal(app.clipboardReadAttempts(), 1, 'Foregrounding must not initiate another read');
+});
+
+test('incoming message handoff retains and copies the full original link despite a different browser key', async () => {
+  const installedStore = await persistentDevice(), browserStore = await persistentDevice();
+  const link = await selfMessageURL(installedStore);
+  const browserKey = browserStore.device.encryption.privateKey;
+  const app = await harness(browserStore, new URL(link).hash);
+  await app.idle();
+  assert.equal(app.location.hash, '');
+  assert.equal(app.el('handoff-panel').hidden, false);
+  assert.equal(app.el('handoff-link').value, link);
+  assert.equal(app.el('result').hidden, true, 'The browser cannot decrypt a link for the installed app');
+  assert.equal(app.clipboardReadAttempts(), 0);
+  await app.event('copy-handoff');
+  assert.equal(app.clipboard(), link);
+  assert.ok(!app.clipboard().includes('Петрова'));
+  assert.equal(browserStore.device.encryption.privateKey, browserKey, 'Handoff must not replace local keys');
+  assert.equal(browserStore.contacts.size, 0);
+});
+
+test('card handoff is lossless and never automatically saves its contact', async () => {
+  const sender = await persistentDevice(), recipient = await persistentDevice();
+  const card = await exchange.exportPublicCard(sender.device, 'Доктор А');
+  const link = sharing.cardLinkFor(card, origin + appPath);
+  const app = await harness(recipient, new URL(link).hash);
+  await app.idle();
+  assert.equal(app.el('handoff-panel').hidden, false);
+  assert.equal(app.el('handoff-link').value, link);
+  await app.event('copy-handoff');
+  assert.equal(app.clipboard(), link);
+  assert.equal(recipient.contacts.size, 0);
+  assert.equal(app.el('confirm-fingerprint').checked, false);
+  assert.equal(app.clipboardReadAttempts(), 0);
+});
+
+test('handoff instructions stay hidden for installed mode detected by either supported signal', async t => {
+  const store = await persistentDevice(), link = await selfMessageURL(store);
+  for (const options of [{standalone:true}, {legacyStandalone:true}]) {
+    await t.test(options.standalone ? 'display-mode media query' : 'navigator.standalone', async () => {
+      const app = await harness(store, new URL(link).hash, options);
+      await app.idle();
+      assert.equal(app.el('handoff-panel').hidden, true);
+      assert.equal(app.el('surname').textContent, 'Петрова');
+      assert.equal(app.clipboardReadAttempts(), 0);
+    });
+  }
+});
+
+test('unrecognized or malformed incoming hashes do not offer a handoff link', async () => {
+  const store = await persistentDevice();
+  for (const hash of ['#unrelated=anything', '#card=%', '#pso=<script>']) {
+    const app = await harness(store, hash);
+    await app.idle();
+    assert.equal(app.el('handoff-panel').hidden, true);
+    assert.equal(app.el('handoff-link').value, '');
+    assert.equal(app.clipboardReadAttempts(), 0);
+  }
+});
+
+test('a failed new manual input or unknown incoming link cannot leave the previous surname visible', async () => {
+  const store = await persistentDevice(), link = await selfMessageURL(store);
+  const app = await harness(store);
+  for (const source of ['manual', 'incoming']) {
+    app.el('token').value = link;
+    await app.event('open-form', 'submit'); await app.idle();
+    assert.equal(app.el('surname').textContent, 'Петрова');
+    if (source === 'manual') {
+      app.el('token').value = 'Неполная ссылка';
+      await app.event('open-form', 'submit');
+    } else await app.hashchange('#unknown=link');
+    await app.idle();
+    assert.equal(app.el('result').hidden, true, source + ' must clear the previous result before reporting the error');
+    assert.equal(app.el('surname').textContent, '');
+  }
+});
+
+test('a newer incoming link cancels a pending older clipboard read and preserves the new handoff', async () => {
+  const store = await persistentDevice();
+  const oldLink = await selfMessageURL(store, 'Петрова'), newLink = await selfMessageURL(store, 'Иванов');
+  const app = await harness(store, '', {deferRead:true});
+  const paste = app.event('paste-open');
+  assert.equal(app.clipboardReadAttempts(), 1);
+  await app.hashchange(new URL(newLink).hash);
+  app.resolveClipboardRead(oldLink);
+  await paste; await app.idle();
+  assert.notEqual(app.el('surname').textContent, 'Петрова', 'The obsolete clipboard result must not display');
+  assert.equal(app.el('handoff-panel').hidden, false);
+  assert.equal(app.el('handoff-link').value, newLink);
+  await app.event('copy-handoff');
+  assert.equal(app.clipboard(), newLink);
 });

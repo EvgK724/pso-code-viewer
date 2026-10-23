@@ -54,11 +54,26 @@
 
       <div class="input-card">
         <p id="status" class="device-status" role="status">Подготовка…</p>
+        <section id="handoff-panel" class="handoff-panel" aria-labelledby="handoff-heading" hidden>
+          <h2 id="handoff-heading">Открыть в установленном просмотрщике</h2>
+          <p id="handoff-hint">Если подключали врачей через синий значок на экране «Домой», откройте ссылку там. Браузер может использовать другой ключ.</p>
+          <button id="copy-handoff" type="button" class="button button-primary">Скопировать для приложения</button>
+          <p class="fine-print">Затем откройте синий значок «ПСО Код» → «Вставить и открыть». Эта страница не может сама переключить iPhone в установленный просмотрщик.</p>
+          <details id="handoff-full-link" class="sharing-details">
+            <summary>Полная ссылка для ручного копирования</summary>
+            <div class="details-body">
+              <label for="handoff-link">Входящая ссылка</label>
+              <textarea id="handoff-link" rows="3" readonly spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off"></textarea>
+            </div>
+          </details>
+        </section>
         <section id="read-panel" aria-labelledby="input-label">
+          <button id="paste-open" type="button" class="button button-primary">Вставить и открыть</button>
+          <p class="field-help compact-help">Сначала скопируйте ссылку из Пачки или браузера. Если iPhone спросит разрешение на вставку, подтвердите его.</p>
           <form id="open-form" autocomplete="off">
             <label id="input-label" for="token">Зашифрованный код или ссылка</label>
-            <textarea id="token" name="token" rows="4" maxlength="2500" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" placeholder="Вставьте сюда код или ссылку"></textarea>
-            <button id="open" type="submit" class="button button-primary">Открыть на 30 секунд</button>
+            <textarea id="token" name="token" rows="3" maxlength="5000" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" placeholder="Или вставьте ссылку вручную сюда"></textarea>
+            <button id="open" type="submit" class="button button-secondary">Открыть на 30 секунд</button>
           </form>
           <div class="demo-action">
             <span class="demo-caption">Первая проверка — на вымышленной фамилии</span>
@@ -93,14 +108,15 @@
             <p class="eyebrow">Ссылка готова</p>
             <p id="output-recipient" class="output-recipient"></p>
             <p class="compact-preview"><a id="output-preview" class="text-link" href="#">Открыть фамилию</a></p>
-            <button id="copy-composed-compact" type="button" class="button button-primary">Копировать для чата</button>
-            <p class="field-help compact-help">В Пачке вставьте как обычно. Если появится длинный адрес, выделите слова «Открыть фамилию» в сообщении и добавьте адрес через кнопку ссылки (🔗).</p>
+            <button id="copy-composed" type="button" class="button button-primary">Скопировать адрес для Пачки</button>
+            <p class="field-help compact-help">В Пачке напишите <strong>Открыть фамилию</strong>, выделите эти слова → «Аа» → 🔗 → вставьте скопированный адрес. В сообщении останется короткая надпись.</p>
             <details id="compose-full-link" class="sharing-details">
-              <summary>Полная ссылка</summary>
+              <summary>Другие способы копирования</summary>
               <div class="details-body">
                 <label for="output-link">Адрес для копирования</label>
                 <textarea id="output-link" rows="3" readonly spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off"></textarea>
-                <button id="copy-composed" type="button" class="button button-secondary">Скопировать ссылку</button>
+                <button id="copy-composed-compact" type="button" class="button button-secondary">Копировать с оформлением</button>
+                <p class="fine-print">Некоторые приложения принимают только полный адрес. Тогда используйте меню ссылки внутри Пачки.</p>
               </div>
             </details>
           </div>
@@ -123,8 +139,8 @@
               <button id="export-card" type="button" class="button button-secondary">Моя карточка для коллеги</button>
               <div id="my-card-box" class="output-block" hidden>
                 <p class="compact-preview"><a id="my-card-preview" class="text-link" href="#">Карточка врача</a></p>
-                <button id="copy-card-compact" type="button" class="button button-primary">Копировать для чата</button>
-                <p class="field-help compact-help">Коллега открывает ссылку и сверяет код ниже. Если Пачка вставляет длинный адрес, добавьте его к словам «Карточка врача» через кнопку ссылки (🔗).</p>
+                <button id="copy-card-link" type="button" class="button button-primary">Скопировать адрес для Пачки</button>
+                <p class="field-help compact-help">В Пачке напишите <strong>Карточка врача</strong>, выделите эти слова → «Аа» → 🔗 → вставьте адрес. Коллега добавляет карточку в просмотрщике с синего значка и сверяет код ниже.</p>
                 <p class="device-label">Мой контрольный код</p>
                 <p id="my-fingerprint" class="device-id fingerprint"></p>
                 <details id="my-card-full" class="sharing-details">
@@ -132,7 +148,7 @@
                   <div class="details-body">
                     <label for="my-card-link">Ссылка на карточку</label>
                     <textarea id="my-card-link" rows="3" readonly spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off"></textarea>
-                    <button id="copy-card-link" type="button" class="button button-secondary">Скопировать ссылку</button>
+                    <button id="copy-card-compact" type="button" class="button button-secondary">Копировать с оформлением</button>
                     <label for="my-card">Карточка в прежнем формате</label>
                     <textarea id="my-card" rows="3" readonly spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off"></textarea>
                     <button id="copy-card" type="button" class="button button-secondary">Скопировать карточку</button>

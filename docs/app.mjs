@@ -7,6 +7,7 @@ const appBase = new URL('./', import.meta.url).href;
 const $ = id => document.getElementById(id);
 let device, selfContact, contacts = [], candidate = null;
 let ready = false, busy = false, generation = 0, timer, endsAt = 0, demoLink = '';
+let queuedIncoming = '';
 const incomingHash = location.hash;
 if (incomingHash) history.replaceState(null, '', location.pathname);
 
@@ -26,7 +27,8 @@ function tick() {
 function setBusy(value) {
   busy = value;
   for (const id of ['token','compose-surname','recipient','compose-orit','expiry','my-name','contact-input','confirm-fingerprint']) $(id).disabled = value || !ready;
-  for (const id of ['demo','open','export-card','inspect-contact']) $(id).disabled = value || !ready;
+  for (const id of ['demo','open','paste-open','export-card','inspect-contact']) $(id).disabled = value || !ready;
+  $('copy-handoff').disabled = value || !$('handoff-link').value;
   $('encrypt').disabled = value || !ready || !$('recipient').value;
   $('copy-link').disabled = value || !demoLink;
   $('copy-demo-compact').disabled = value || !demoLink;
@@ -37,6 +39,10 @@ function setBusy(value) {
   $('copy-card-link').disabled = value || !$('my-card-link').value;
   $('save-contact').disabled = value || !ready || !candidate || !$('confirm-fingerprint').checked;
   for (const button of $('contacts-list').querySelectorAll('button')) button.disabled = value;
+  if (!value && ready && queuedIncoming) {
+    const hash = queuedIncoming; queuedIncoming = '';
+    Promise.resolve().then(() => handleIncoming(hash));
+  }
 }
 function showMode(mode) {
   clearSensitive(); const read = mode === 'read';
@@ -47,6 +53,45 @@ function parseInput(input) {
   const value = String(input).trim();
   if (value.length > 2500) throw new Error('Ссылка слишком длинная. Скопируйте только ссылку без комментария.');
   return value.startsWith('PSO1.') ? value : tokenFromInput(value, appBase);
+}
+function inputKind(input) {
+  const value = String(input).trim();
+  if (value.length > 5000) throw new Error('Ссылка слишком длинная. Скопируйте только ссылку без комментария.');
+  let card = value.startsWith('PSO-CARD1.');
+  try { card ||= new URL(value).hash.startsWith('#card='); } catch {}
+  if (card) { cardFromInput(value, appBase); return 'card'; }
+  const token = parseInput(value);
+  if (!/^(?:PSO1(?:\.[A-Za-z0-9_-]+){4}|PSO-DEMO1\.[A-Za-z0-9_-]+)$/.test(token)) throw new Error('В буфере нет полной ссылки или кода просмотрщика.');
+  return 'message';
+}
+function clearHandoff() { $('handoff-panel').hidden = true; $('handoff-link').value = ''; }
+async function openInput(input, fromIncoming = false) {
+  if (busy || !ready) return;
+  hideResult();
+  if (!fromIncoming) clearHandoff();
+  try {
+    if (inputKind(input) === 'card') { $('token').value = ''; await inspectCard(input); }
+    else await reveal(input);
+  } catch (error) { say(error.message || 'Скопируйте ссылку из сообщения.', true); }
+}
+async function pasteAndOpen() {
+  if (busy || !ready) return;
+  hideResult();
+  const current = generation;
+  let input;
+  setBusy(true); say('Если iPhone спросит разрешение, выберите «Вставить» или «Разрешить вставку».');
+  try {
+    // Must run in the click gesture: no background reads or earlier await.
+    input = await navigator.clipboard.readText();
+    if (current !== generation || document.hidden) return;
+  } catch {
+    if (current === generation && !document.hidden) {
+      say('Вставка не разрешена. Удерживайте поле ниже, выберите «Вставить», затем «Открыть на 30 секунд».', true);
+      $('token').focus();
+    }
+    return;
+  } finally { setBusy(false); }
+  return openInput(input);
 }
 async function copyText(text, fallbackId, success, detailsId = '') {
   if (!text) return;
@@ -125,7 +170,10 @@ async function reveal(input) {
 
 $('show-read').addEventListener('click', () => showMode('read'));
 $('show-write').addEventListener('click', () => showMode('write'));
-$('open-form').addEventListener('submit', event => { event.preventDefault(); reveal($('token').value); });
+$('open-form').addEventListener('submit', event => { event.preventDefault(); return openInput($('token').value); });
+$('token').addEventListener('input', clearHandoff);
+$('paste-open').addEventListener('click', pasteAndOpen);
+$('copy-handoff').addEventListener('click', () => copyText($('handoff-link').value, 'handoff-link', 'Ссылка скопирована. Откройте синий значок «ПСО Код» на экране «Домой» и нажмите «Вставить и открыть».', 'handoff-full-link'));
 $('hide').addEventListener('click', () => hideResult('Фамилия скрыта.'));
 $('recipient').addEventListener('change', () => { $('compose-output').hidden = true; $('output-link').value = ''; setBusy(busy); });
 for (const id of ['compose-surname','compose-orit','expiry']) $(id).addEventListener('input', () => { $('compose-output').hidden = true; $('output-link').value = ''; setBusy(busy); });
@@ -150,7 +198,7 @@ $('compose-form').addEventListener('submit', async event => {
   } catch (error) { if (current === generation) say(error.message || 'Не удалось создать ссылку.', true); }
   finally { name = ''; setBusy(false); }
 });
-$('copy-composed').addEventListener('click', () => copyText($('output-link').value, 'output-link', 'Ссылка скопирована. Она предназначена только выбранному получателю.'));
+$('copy-composed').addEventListener('click', () => copyText($('output-link').value, 'output-link', 'Адрес скопирован. В Пачке напишите «Открыть фамилию», выделите эти слова → «Аа» → 🔗 → вставьте адрес. Ссылка предназначена только выбранному получателю.', 'compose-full-link'));
 $('copy-composed-compact').addEventListener('click', () => copyCompactLink($('output-link').value, 'Открыть фамилию', 'output-link', 'compose-full-link'));
 $('demo').addEventListener('click', async () => {
   if (busy || !ready) return;
@@ -174,19 +222,21 @@ $('export-card').addEventListener('click', async () => {
   } catch (error) { say(error.message, true); } finally { setBusy(false); }
 });
 $('copy-card').addEventListener('click', () => copyText($('my-card').value, 'my-card', 'Открытая карточка скопирована. Фамилий пациентов в ней нет.'));
-$('copy-card-link').addEventListener('click', () => copyText($('my-card-link').value, 'my-card-link', 'Ссылка на карточку скопирована. Коллеге нужно открыть её и сверить контрольный код.'));
+$('copy-card-link').addEventListener('click', () => copyText($('my-card-link').value, 'my-card-link', 'Адрес скопирован. В Пачке напишите «Карточка врача», выделите эти слова → «Аа» → 🔗 → вставьте адрес.', 'my-card-full'));
 $('copy-card-compact').addEventListener('click', () => copyCompactLink($('my-card-link').value, 'Карточка врача', 'my-card-link', 'my-card-full'));
 $('contact-input').addEventListener('input', () => setCandidate(null));
 async function inspectCard(input) {
   if (busy || !ready) return;
   clearSensitive(); $('contacts-details').open = true; $('contact-input').value = input;
+  const current = generation;
   setCandidate(null); setBusy(true);
   try {
     const contact = await importPublicCard(cardFromInput(input, appBase));
+    if (current !== generation || document.hidden) return;
     if (contact.id === selfContact.id) throw new Error('Это карточка этого телефона. Для проверки выберите «Себе» в списке получателей.');
     setCandidate(contact); say('Сверьте весь отпечаток с коллегой лично или по известному номеру телефона.');
     $('contact-confirm').scrollIntoView({block:'center', behavior:'auto'});
-  } catch (error) { say(error.message, true); } finally { setBusy(false); }
+  } catch (error) { if (current === generation && !document.hidden) say(error.message, true); } finally { setBusy(false); }
 }
 $('contact-form').addEventListener('submit', event => { event.preventDefault(); return inspectCard($('contact-input').value); });
 $('confirm-fingerprint').addEventListener('change', () => setBusy(busy));
@@ -198,9 +248,20 @@ $('save-contact').addEventListener('click', async () => {
   } catch (error) { say(error.message, true); } finally { setBusy(false); }
 });
 async function handleIncoming(hash) {
-  if (hash.startsWith('#pso=')) await reveal(appBase + hash);
-  else if (hash.startsWith('#card=')) await inspectCard(appBase + hash);
-  else if (hash) say('Неизвестный формат ссылки.', true);
+  if (!hash) return;
+  clearSensitive(); setCandidate(null);
+  if (busy) { queuedIncoming = hash; return; }
+  clearHandoff();
+  if (!hash.startsWith('#pso=') && !hash.startsWith('#card=')) { say('Неизвестный формат ссылки.', true); return; }
+  const link = appBase + hash;
+  try {
+    inputKind(link);
+    $('handoff-link').value = link;
+    const standalone = navigator.standalone === true || globalThis.matchMedia?.('(display-mode: standalone)').matches === true;
+    $('handoff-panel').hidden = standalone;
+    setBusy(busy);
+    await openInput(link, true);
+  } catch (error) { say(error.message, true); }
 }
 addEventListener('hashchange', () => {
   const hash = location.hash; history.replaceState(null, '', location.pathname);
