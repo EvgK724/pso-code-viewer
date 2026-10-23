@@ -1,8 +1,35 @@
-# Short-link backend — deployment draft
+# Short-link backend — deployment and verification
 
-This directory is a deployment draft. No Supabase project or database was changed
-while preparing these files. Do not point the production viewer at an unverified
-endpoint. Keep the existing GitHub Pages origin/path and browser key stores.
+The approved dedicated Supabase project is `spugfikalpihorcwcdqc`. Its database,
+cleanup job and `pso-shortlinks` Edge Function are deployed. The configured release
+uses `https://spugfikalpihorcwcdqc.supabase.co/functions/v1/pso-shortlinks` and permits
+that exact origin in CSP. Keep the existing GitHub Pages origin/path and browser
+key stores. This status does not itself assert frontend publication.
+
+## Verification status
+
+- [x] Local client, crypto, UI, hosting and generic handler suite: 73 tests passed.
+- [x] Live HTTP create/resolve and recipient decryption using synthetic devices;
+  `ShortLinkClient` produced a 67-character URL. Wrong-recipient decryption failed.
+- [x] Both envelope and enclosed-token signature checks; unknown and disabled
+  writers returned 403; identical retries were idempotent; changed requests for
+  an existing ID returned 409; stale creation time returned 400.
+- [x] Live CORS/preflight; another origin returned 403, GET returned 405 and an
+  oversized request returned 413.
+- [x] Twelve concurrent live creation requests yielded exactly ten successes and
+  two quota rejections. SQL checks also passed.
+- [x] An expired saved record returned 404. The cleanup job subsequently removed
+  it, and successful Cron runs were confirmed. The synthetic HTTP test writer
+  was disabled after the checks.
+- [ ] Enrol intended doctors' existing verified public cards. No real doctor
+  devices have been added yet. Until enrolled, a doctor's creation request is
+  denied; recipient-only decryption needs no writer entry.
+- [ ] After frontend publication and enrolment, verify a fictitious message in
+  native Pachca and between the intended phones. HTTP and simulated-UI tests do
+  not establish native clipboard/PWA behaviour.
+
+The procedure below documents repeatable deployment and checks. It does not
+authorise replacing this project, changing domains, or reusing another project.
 
 ## What is stored
 
@@ -20,9 +47,10 @@ and recipients remain responsible for verifying their public-card fingerprints.
 
 ## Provisioning
 
-1. Select and approve a **new, separate** Supabase project, including organisation,
-   region and any quoted cost. Do not reuse an unrelated project. Inspect existing
-   schema before applying the draft. Review project logging and backup retention.
+1. For a new deployment, select and approve a **new, separate** Supabase project,
+   including organisation, region and any quoted cost. Do not reuse an unrelated
+   project. Inspect existing schema before applying it. Review project logging
+   and backup retention. The current release uses the approved project above.
 2. Apply `supabase-schema.sql` as project administrator. The private schema must
    **not** be added to exposed Data API schemas. Keep `public` available for the
    three RPC functions, whose execution grants are service-role only.
@@ -58,7 +86,7 @@ and recipients remain responsible for verifying their public-card fingerprints.
    adapter update to the documented secret-key API before deployment, not putting
    a secret in the browser.
 
-## Checks required before enabling the client
+## Deployment and regression checks
 
 Use a fresh synthetic test device and fictitious surname, not a doctor's private
 keys or a real patient. Do not infer database correctness from JavaScript tests.
@@ -83,7 +111,8 @@ keys or a real patient. Do not infer database correctness from JavaScript tests.
 - Run Supabase security/performance advisors and review any findings.
 - Only after those checks, put the **public endpoint URL alone** into the client
   configuration. Add only that broker's exact HTTPS origin to the `connect-src`
-  CSP in `docs/index.html` (currently it intentionally permits only `'self'`).
+  CSP in `docs/index.html` (the configured release permits `'self'` and the exact
+  dedicated broker origin).
   Verify the browser's actual fetch/preflight, then publish the frontend. Do not
   replace the CSP with a wildcard. No Supabase browser API key is needed.
 
@@ -100,9 +129,9 @@ of the raw 16-byte random link ID. There is no user-supplied destination URL and
 redirect, listing or overwrite API. JSON responses are no-store, and request IDs
 are sent in POST bodies, not URL paths/query strings.
 
-The SQL file is a reviewed schema draft, not a generated migration history entry.
-After successfully testing against the approved project, generate the migration
-using the project's Supabase workflow; do not silently apply to another project.
+The SQL file is the tested schema definition, not a generated migration history
+entry. Follow the project's Supabase workflow when recording migrations; do not
+silently apply it to another project.
 
 Documentation checked:
 - https://supabase.com/docs/guides/functions/secrets

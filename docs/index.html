@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#111113">
   <meta name="referrer" content="no-referrer">
   <meta name="robots" content="noindex, nofollow, noarchive">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; worker-src 'self'; connect-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; worker-src 'self'; connect-src 'self' https://spugfikalpihorcwcdqc.supabase.co; manifest-src 'self'; base-uri 'none'; form-action 'none'">
   <meta name="description" content="ПСО Код: создание и просмотр зашифрованных ссылок для выбранного врача.">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -87,6 +87,7 @@
         </section>
 
         <section id="write-panel" aria-labelledby="compose-label" hidden>
+          <p class="field-help">Для создания коротких ссылок администратор один раз подключает вашу открытую карточку. Передайте ему карточку из раздела «Контакты врачей». Если она уже есть, используйте прежнюю.</p>
           <form id="compose-form" autocomplete="off">
             <label id="compose-label" for="compose-surname">Фамилия пациента</label>
             <input id="compose-surname" name="surname" type="text" maxlength="80" spellcheck="false" autocapitalize="words" autocomplete="off" autocorrect="off" placeholder="Сначала проверьте на вымышленной фамилии" required>

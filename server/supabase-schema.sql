@@ -18,7 +18,7 @@ create table if not exists pso_shortlink_private.links (
   request_hash text not null check (request_hash ~ '^[0-9a-f]{64}$'),
   sender_id text not null references pso_shortlink_private.writers(sender_id),
   token text not null check (
-    token ~ '^PSO1\.[A-Za-z0-9_-]{43}\.[A-Za-z0-9_-]{43}\.[A-Za-z0-9_-]{512}\.[A-Za-z0-9_-]{86}$'
+    token ~ '^PSO1\.[A-Za-z0-9_-]{43}\.[A-Za-z0-9_-]{43}\.[A-Za-z0-9_-]{128}[A-Za-z0-9_-]{128}[A-Za-z0-9_-]{128}[A-Za-z0-9_-]{128}\.[A-Za-z0-9_-]{86}$'
   ),
   issued bigint not null,
   expires bigint not null,
@@ -27,6 +27,8 @@ create table if not exists pso_shortlink_private.links (
 );
 create index if not exists pso_shortlink_expiry_idx
   on pso_shortlink_private.links (expires);
+create index if not exists pso_shortlink_sender_idx
+  on pso_shortlink_private.links (sender_id);
 
 -- Counters are independent of the ciphertext records, so expiry/deletion cannot
 -- reset quotas. Buckets are UTC minutes and UTC days, calculated by the server.
@@ -70,7 +72,7 @@ begin
   if p_id_hash is null or p_id_hash !~ '^[0-9a-f]{64}$'
     or p_request_hash is null or p_request_hash !~ '^[0-9a-f]{64}$'
     or p_sender_id is null or p_sender_id !~ '^[A-Za-z0-9_-]{43}$'
-    or p_token is null or p_token !~ '^PSO1\.[A-Za-z0-9_-]{43}\.[A-Za-z0-9_-]{43}\.[A-Za-z0-9_-]{512}\.[A-Za-z0-9_-]{86}$'
+    or p_token is null or p_token !~ '^PSO1\.[A-Za-z0-9_-]{43}\.[A-Za-z0-9_-]{43}\.[A-Za-z0-9_-]{128}[A-Za-z0-9_-]{128}[A-Za-z0-9_-]{128}[A-Za-z0-9_-]{128}\.[A-Za-z0-9_-]{86}$'
     or split_part(p_token, '.', 3) <> p_sender_id
     or p_issued is null or p_expires is null
     or p_issued <= 0 or p_expires <= p_issued

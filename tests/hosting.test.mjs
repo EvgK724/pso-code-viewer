@@ -4,6 +4,7 @@ import vm from 'node:vm';
 import {readFile, access} from 'node:fs/promises';
 import {linkForToken, tokenFromInput} from '../docs/crypto.mjs';
 import {cardLinkFor, cardFromInput, compactLinkContents} from '../docs/sharing.mjs';
+import {SHORTLINK_ENDPOINT} from '../docs/shortlink-config.mjs';
 
 const token = 'PSO1.recipient.sender.cipher.signature';
 const origin = 'https://viewer.example';
@@ -103,12 +104,27 @@ test('PWA entry, scope and icon resources resolve inside both deployment locatio
   }
 });
 
+test('enabled broker uses one HTTPS endpoint permitted by exact CSP origin without credentials or wildcard access', async () => {
+  const endpoint = new URL(SHORTLINK_ENDPOINT);
+  assert.equal(endpoint.protocol, 'https:');
+  assert.equal(endpoint.pathname, '/functions/v1/pso-shortlinks');
+  for (const field of ['username', 'password', 'search', 'hash']) assert.equal(endpoint[field], '');
+  const html = await readFile(new URL('../docs/index.html', import.meta.url), 'utf8');
+  const policy = html.match(/http-equiv="Content-Security-Policy" content="([^"]+)"/)?.[1];
+  assert.ok(policy, 'Document has an explicit CSP');
+  const directives = new Map(policy.split(';').map(part => part.trim().split(/\s+/)).map(([name,...values]) => [name,values]));
+  assert.deepEqual(directives.get('connect-src'), ["'self'", endpoint.origin]);
+  assert.deepEqual(directives.get('script-src'), ["'self'"], 'Broker access must not grant external script execution');
+  assert.deepEqual(directives.get('form-action'), ["'none'"]);
+  assert.match(html, /администратор один раз подключает вашу открытую карточку/);
+});
+
 test('service worker serves its own offline shell and leaves sibling app requests/caches alone', async () => {
   const source = await readFile(new URL('../docs/sw.js', import.meta.url), 'utf8');
   for (const path of ['/', '/pso-code-viewer/']) {
     const handlers = new Map(), deleted = [], installed = [];
     const prefix = 'pso-viewer-' + encodeURIComponent(path) + '-shell-';
-    const current = prefix + 'github-v6-short-links-draft';
+    const current = prefix + 'github-v6-short-links';
     const unrelated = 'pso-viewer-%2Fanother-app%2F-shell-github-v1';
     const cached = {status:200, body:'offline-shell'};
     const cache = {
@@ -130,6 +146,7 @@ test('service worker serves its own offline shell and leaves sibling app request
     await installation;
     assert.ok(installed.includes('./') && installed.includes('./index.html'));
     assert.ok(installed.includes('./sharing.mjs'), 'Compact-sharing logic must be available offline');
+    assert.ok(installed.includes('./shortlinks.mjs') && installed.includes('./shortlink-config.mjs'), 'Client and configuration must update with the same offline shell');
     assert.ok(installed.every(file => new URL(file, origin + path + 'sw.js').pathname.startsWith(path)));
     let activation;
     handlers.get('activate')({waitUntil(promise) { activation = promise; }});
@@ -141,6 +158,9 @@ test('service worker serves its own offline shell and leaves sibling app request
     assert.equal(await response, cached);
     for (const url of [origin + '/another-app/', origin + path + '?data=anything', 'https://other.example' + path]) {
       handlers.get('fetch')({request:{method:'GET', url}, respondWith() { assert.fail('Unrelated requests must not be intercepted'); }});
+    }
+    for (const method of ['GET', 'POST']) {
+      handlers.get('fetch')({request:{method, url:SHORTLINK_ENDPOINT}, respondWith() { assert.fail('Broker traffic must never be intercepted or cached'); }});
     }
   }
 });
