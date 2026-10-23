@@ -53,7 +53,7 @@ export async function createEnvelope(device, token, ttlMinutes, now=Date.now()) 
   return {...unsigned,signature};
 }
 export class ShortLinkClient {
-  constructor(endpoint, {fetch:fetcher=globalThis.fetch, timeout=12000, now=Date.now}={}) {
+  constructor(endpoint, {fetch:fetcher=globalThis.fetch.bind(globalThis), timeout=12000, now=Date.now}={}) {
     const url = new URL(endpoint);
     if (url.protocol !== 'https:' || url.username || url.password || url.hash || url.search) throw new Error('Некорректный адрес сервиса коротких ссылок.');
     this.endpoint = url.href; this.fetcher = fetcher; this.timeout = timeout; this.now = now;

@@ -124,7 +124,7 @@ test('service worker serves its own offline shell and leaves sibling app request
   for (const path of ['/', '/pso-code-viewer/']) {
     const handlers = new Map(), deleted = [], installed = [];
     const prefix = 'pso-viewer-' + encodeURIComponent(path) + '-shell-';
-    const current = prefix + 'github-v6-short-links';
+    const current = prefix + 'github-v6b-fetch-binding';
     const unrelated = 'pso-viewer-%2Fanother-app%2F-shell-github-v1';
     const cached = {status:200, body:'offline-shell'};
     const cache = {

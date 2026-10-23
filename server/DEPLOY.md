@@ -8,7 +8,8 @@ key stores. This status does not itself assert frontend publication.
 
 ## Verification status
 
-- [x] Local client, crypto, UI, hosting and generic handler suite: 73 tests passed.
+- [x] Local client, crypto, UI, hosting and generic handler suite: 74 tests passed,
+  including a receiver-sensitive browser-fetch regression test.
 - [x] Live HTTP create/resolve and recipient decryption using synthetic devices;
   `ShortLinkClient` produced a 67-character URL. Wrong-recipient decryption failed.
 - [x] Both envelope and enclosed-token signature checks; unknown and disabled

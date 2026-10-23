@@ -13,6 +13,29 @@ const encrypted=await sealSurname(sender,recipientCard,'Тестов',{ttlMinute
 const id='iR9wA12kxX6NubGJvNR7nQ';
 const json=(body,status=200)=>new Response(JSON.stringify(body),{status,headers:{'Content-Type':'application/json'}});
 
+test('default browser fetch preserves its global receiver for create and resolve',async()=>{
+  const originalFetch=globalThis.fetch;
+  let record, calls=0;
+  // Browser fetch performs a receiver check that permissive Node fetch and the
+  // arrow-function transports in earlier tests do not reproduce.
+  globalThis.fetch=async function(url,options) {
+    if(this!==globalThis) throw new TypeError('Illegal invocation');
+    calls++;
+    assert.equal(url,endpoint);
+    const body=JSON.parse(options.body);
+    if(body.op==='create') { record=body.envelope; return json({id:record.id,expires:record.expires}); }
+    assert.equal(body.id,record.id);
+    return json({token:record.token,expires:record.expires});
+  };
+  try {
+    const client=new ShortLinkClient(endpoint);
+    const url=await client.create(sender,encrypted,60,base);
+    assert.match(new URL(url).hash,/^#r=[A-Za-z0-9_-]{22}$/);
+    assert.equal(await client.resolve(url,base),encrypted);
+    assert.equal(calls,2);
+  } finally { globalThis.fetch=originalFetch; }
+});
+
 test('actual short URL is under 80 characters and accepts full pasted message without losing the URL',()=>{
   const url=shortLinkFor(id,base);
   assert.ok(url.length<80);
