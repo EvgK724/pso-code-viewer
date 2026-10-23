@@ -26,6 +26,8 @@ class Element {
     this.classList = {toggle() {}};
     this.value = '';
     this.textContent = '';
+    this.scrollCalls = [];
+    this.focusCalls = [];
     this.checked = /\bchecked\b/.test(attrs);
     this.disabled = /\bdisabled\b/.test(attrs);
     this.hidden = /\bhidden\b/.test(attrs);
@@ -54,8 +56,8 @@ class Element {
   querySelectorAll(tag) {
     return this.children.flatMap(child => [...(child.tag === tag ? [child] : []), ...child.querySelectorAll(tag)]);
   }
-  scrollIntoView() {}
-  focus() {}
+  scrollIntoView(options) { this.scrollCalls.push(options); }
+  focus(options) { this.focusCalls.push(options); }
   select() {}
 }
 
@@ -277,6 +279,8 @@ test('incoming link from unknown sender remains hidden until the sender card is 
   assert.equal(app.el('result').hidden, true);
   assert.equal(app.el('surname').textContent, '');
   assert.match(app.el('notice').textContent, /Отправитель не подтверждён/);
+  assert.ok(app.el('notice').scrollCalls.length > 0, 'Unknown-sender error must be brought into view');
+  assert.ok(app.el('notice').focusCalls.length > 0, 'Unknown-sender error must receive accessible focus');
 
   await addCard(app, await exchange.exportPublicCard(sender.device, 'Отправитель'));
   await app.event('open-form', 'submit'); await app.idle();
@@ -593,4 +597,29 @@ test('a newer incoming link cancels a pending older clipboard read and preserves
   assert.equal(app.el('handoff-link').value, newLink);
   await app.event('copy-handoff');
   assert.equal(app.clipboard(), newLink);
+});
+
+test('numeric and fingerprint input produce a visible focused explanation instead of appearing unresponsive', async () => {
+  assert.match(html, /<p(?=[^>]*id="notice")(?=[^>]*tabindex="-1")[^>]*>/, 'The notice must be programmatically focusable');
+  const app = await harness(await persistentDevice());
+  for (const [input, explanation] of [
+    ['12345678901234567890', /цифр|контрольн|отпечат/iu],
+    [Array(16).fill('A1B2').join(' '), /контрольн|отпечат/iu],
+    [Array(16).fill('a1b2').join(' '), /контрольн|отпечат/iu]
+  ]) {
+    const notice = app.el('notice');
+    const oldScrolls = notice.scrollCalls.length, oldFocuses = notice.focusCalls.length;
+    app.el('token').value = input;
+    await app.event('open-form', 'submit'); await app.idle();
+    assert.equal(app.el('token').value, input, 'An invalid input remains available for correction');
+    assert.equal(app.el('result').hidden, true);
+    assert.equal(app.el('surname').textContent, '');
+    assert.match(notice.textContent, explanation, 'Explain why this value cannot identify a patient');
+    assert.match(notice.textContent, /ссылк/iu, 'Explain what the user should copy instead');
+    assert.equal(notice.scrollCalls.length, oldScrolls + 1, 'The error scrolls into view');
+    assert.equal(notice.focusCalls.length, oldFocuses + 1, 'The error receives focus instead of leaving focus in the keyboard input');
+    assert.equal(notice.attributes.get('role'), 'alert');
+    assert.equal(notice.attributes.get('aria-live'), 'assertive');
+    assert.equal(app.el('open').disabled, false, 'The user can correct the input and try again');
+  }
 });

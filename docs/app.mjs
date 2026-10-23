@@ -11,7 +11,16 @@ let queuedIncoming = '';
 const incomingHash = location.hash;
 if (incomingHash) history.replaceState(null, '', location.pathname);
 
-function say(text, error = false) { $('notice').textContent = text; $('notice').classList.toggle('error', error); }
+function say(text, error = false) {
+  const notice = $('notice');
+  notice.setAttribute('role', error ? 'alert' : 'status');
+  notice.setAttribute('aria-live', error ? 'assertive' : 'polite');
+  notice.textContent = text; notice.classList.toggle('error', error);
+  if (error && text && !document.hidden) {
+    notice.scrollIntoView({block:'center', behavior:'auto'});
+    notice.focus({preventScroll:true});
+  }
+}
 function hideResult(message = '') {
   generation++; clearInterval(timer); endsAt = 0; $('result').hidden = true;
   for (const id of ['surname','department','case-code','countdown']) $(id).textContent = '';
@@ -57,11 +66,14 @@ function parseInput(input) {
 function inputKind(input) {
   const value = String(input).trim();
   if (value.length > 5000) throw new Error('Ссылка слишком длинная. Скопируйте только ссылку без комментария.');
+  if (/^[0-9a-f\s-]+$/i.test(value) && value.replace(/[\s-]/g, '').length === 64) throw new Error('Это контрольный код карточки врача. По нему фамилия не открывается. Попросите отправителя создать ссылку для вас через «Создать ссылку» и скопировать её целиком.');
+  if (/^[0-9\s-]+$/.test(value)) throw new Error('Вставлен только набор цифр. Нужна полная ссылка из «Скопировать адрес для Пачки» или зашифрованный код, начинающийся с PSO1.');
+  if (!value) throw new Error('Сначала вставьте ссылку в поле или нажмите «Вставить и открыть».');
   let card = value.startsWith('PSO-CARD1.');
   try { card ||= new URL(value).hash.startsWith('#card='); } catch {}
   if (card) { cardFromInput(value, appBase); return 'card'; }
   const token = parseInput(value);
-  if (!/^(?:PSO1(?:\.[A-Za-z0-9_-]+){4}|PSO-DEMO1\.[A-Za-z0-9_-]+)$/.test(token)) throw new Error('В буфере нет полной ссылки или кода просмотрщика.');
+  if (!/^(?:PSO1(?:\.[A-Za-z0-9_-]+){4}|PSO-DEMO1\.[A-Za-z0-9_-]+)$/.test(token)) throw new Error('Код неполный или имеет другой формат. Скопируйте ссылку целиком через «Скопировать адрес для Пачки».');
   return 'message';
 }
 function clearHandoff() { $('handoff-panel').hidden = true; $('handoff-link').value = ''; }
@@ -87,7 +99,6 @@ async function pasteAndOpen() {
   } catch {
     if (current === generation && !document.hidden) {
       say('Вставка не разрешена. Удерживайте поле ниже, выберите «Вставить», затем «Открыть на 30 секунд».', true);
-      $('token').focus();
     }
     return;
   } finally { setBusy(false); }

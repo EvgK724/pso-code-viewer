@@ -50,6 +50,8 @@ textarea::placeholder { font-family: -apple-system, BlinkMacSystemFont, "Segoe U
 .button:hover { filter: brightness(1.08); }
 .notice { margin: 16px 0 0; color: var(--orange); font-size: 15px; line-height: 1.5; overflow-wrap: anywhere; }
 .notice:empty { display: none; }
+.notice.error { border: 1px solid var(--orange); border-radius: 12px; padding: 16px; background: #2b211c; color: #ffd0a4; font-size: 17px; font-weight: 600; scroll-margin-block: 24px; }
+.notice.error:focus { outline: 2px solid var(--orange); outline-offset: 3px; }
 .demo-action { border-top: 1px solid var(--border); margin-top: 24px; padding-top: 21px; }
 .demo-caption { display: block; color: var(--muted); font-size: 14px; margin-bottom: 10px; }
 .link-tools { display: grid; gap: 16px; margin-top: 12px; }
