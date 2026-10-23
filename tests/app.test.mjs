@@ -713,13 +713,16 @@ test('caption-only changes reuse the link, but department changes invalidate it 
   assert.equal(app.el('output-link').value, '', 'Even test links are invalidated when department changes');
 });
 
-test('successful native copy keeps the selected link without overwriting its platform clipboard formats', async () => {
+test('alternative native copy keeps the selected link without overwriting its platform clipboard formats', async () => {
   const app = await harness(await persistentDevice(), '', {nativeCopy:true, richClipboard:true});
   app.el('message-caption').value = 'test';
   await app.event('message-caption', 'change');
   const url = await composeForSelf(app);
-  const before = app.clipboardAttempts();
   await app.event('copy-composed');
+  assert.equal(app.nativeCopyAttempts(), 0, 'Primary action uses the standard clipboard even when native copy exists');
+  await assertCompactPayload(app, url);
+  const before = app.clipboardAttempts();
+  await app.event('copy-composed-compact');
   assert.equal(app.nativeCopyAttempts(), 1);
   assert.deepEqual(app.nativePayload(), {url, label:'Проверочная история'});
   assert.deepEqual(app.clipboardAttempts(), before, 'Do not overwrite a native copy with async or plain clipboard');
@@ -732,7 +735,7 @@ test('native copy rejection falls back to labeled HTML and finally the complete 
   for (const [nativeCopy, richClipboard] of [[false, true], ['throw', false]]) {
     const app = await harness(store, '', {nativeCopy, richClipboard});
     const url = await composeForSelf(app);
-    await app.event('copy-composed');
+    await app.event('copy-composed-compact');
     assert.equal(app.nativeCopyAttempts(), 1);
     assert.equal(app.clipboard(), url);
     if (richClipboard) await assertCompactPayload(app, url);

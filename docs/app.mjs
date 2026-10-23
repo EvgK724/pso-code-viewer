@@ -119,7 +119,7 @@ async function copyText(text, fallbackId, success, detailsId = '') {
   try { await navigator.clipboard.writeText(text); say(success); }
   catch { if (detailsId) $(detailsId).open = true; $(fallbackId).value = text; $(fallbackId).focus(); $(fallbackId).select(); say('Удерживайте выделенный текст и выберите «Скопировать».'); }
 }
-async function copyCompactLink(url, label, fallbackId, detailsId = '') {
+async function copyCompactLink(url, label, fallbackId, detailsId = '', composed = false) {
   if (!url) return;
   let contents;
   try { contents = compactLinkContents(url, label, appBase); }
@@ -129,9 +129,9 @@ async function copyCompactLink(url, label, fallbackId, detailsId = '') {
       'text/html':new Blob([contents.html], {type:'text/html'}),
       'text/plain':new Blob([contents.plain], {type:'text/plain'})
     })]);
-    say('Скопирована ссылка с подписью «' + label + '». Вставьте в Пачку. Если появится длинный адрес, вставьте его через кнопку ссылки (🔗) в Пачке.');
+    say('Скопирована ссылка с подписью «' + label + '». Вставьте в Пачку. ' + (composed ? 'Если появится длинный адрес, попробуйте «Другие способы копирования» → «Другой способ для iPhone».' : 'Если появится длинный адрес, вставьте его через кнопку ссылки (🔗) в Пачке.'));
   } catch {
-    await copyText(contents.plain, fallbackId, 'Браузер скопировал полную ссылку. В Пачке напишите «' + label + '», выделите эти слова и добавьте скопированный адрес через кнопку ссылки (🔗).', detailsId);
+    await copyText(contents.plain, fallbackId, composed ? 'Браузер скопировал полный адрес без оформления. Попробуйте «Другие способы копирования» → «Другой способ для iPhone».' : 'Браузер скопировал полную ссылку. В Пачке напишите «' + label + '», выделите эти слова и добавьте скопированный адрес через кнопку ссылки (🔗).', detailsId);
   }
 }
 function setCandidate(value) {
@@ -237,16 +237,16 @@ $('compose-form').addEventListener('submit', async event => {
   } catch (error) { if (current === generation) say(error.message || 'Не удалось создать ссылку.', true); }
   finally { name = ''; setBusy(false); }
 });
-$('copy-composed').addEventListener('click', () => {
+$('copy-composed').addEventListener('click', () => copyCompactLink($('output-link').value, messageCaption(), 'output-link', 'compose-full-link', true));
+$('copy-composed-compact').addEventListener('click', () => {
   if (busy || !$('output-link').value) return;
   updateCaptionPreview();
   if (copyRenderedLink($('output-preview'), document, globalThis.getSelection?.())) {
-    say('Скопирована готовая надпись «' + messageCaption() + '». Вставьте в Пачку. Если вставились слова без ссылки, используйте «Другой способ с оформлением».');
+    say('Браузер выполнил копирование надписи «' + messageCaption() + '». Проверьте вставку в Пачку: если получились слова без ссылки, этот способ не подходит — используйте полный адрес.');
     return;
   }
-  return copyCompactLink($('output-link').value, messageCaption(), 'output-link', 'compose-full-link');
+  return copyCompactLink($('output-link').value, messageCaption(), 'output-link', 'compose-full-link', true);
 });
-$('copy-composed-compact').addEventListener('click', () => copyCompactLink($('output-link').value, messageCaption(), 'output-link', 'compose-full-link'));
 $('copy-composed-address').addEventListener('click', () => copyText($('output-link').value, 'output-link', 'Полный адрес скопирован. Он откроется только у выбранного получателя.', 'compose-full-link'));
 $('demo').addEventListener('click', async () => {
   if (busy || !ready) return;
