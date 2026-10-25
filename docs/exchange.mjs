@@ -131,5 +131,5 @@ export async function openSurname(device, token, contactsArray, now=Date.now()) 
   if (!exact(data,'d,i,j,n,x') || !['','ПСО','ОРИТ'].includes(data.d) || surnameValue(data.n)!==data.n) throw new Error('Зашифрованная запись имеет неверный формат.');
   try { unb64(data.j,12); } catch { throw new Error('Зашифрованная запись имеет неверный формат.'); }
   if (!Number.isSafeInteger(data.i) || !Number.isSafeInteger(data.x) || data.x <= data.i || data.x-data.i > MAX_TTL || data.x-data.i < 60000 || data.i > now+30000 || data.x <= now) throw new Error('Срок ссылки истёк или время её создания некорректно.');
-  return {surname:data.n,department:data.d,code:'ПСО-'+data.j,senderName,expires:data.x};
+  return {surname:data.n,department:data.d,code:'ПСО-'+data.j,senderName,issued:data.i,expires:data.x};
 }

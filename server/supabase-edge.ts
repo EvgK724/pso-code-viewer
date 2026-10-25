@@ -5,7 +5,7 @@ import {createShortlinkHandler} from './shortlink-handler.mjs';
 
 const projectURL = Deno.env.get('SUPABASE_URL');
 const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
-const allowedOrigin = 'https://evgk724.github.io';
+const allowedOrigin = Deno.env.get('PSO_VIEWER_ORIGIN')||'https://evgk724.github.io';
 if (!projectURL || !serviceRoleKey) throw new Error('Short-link service is not configured.');
 const rpcBase = new URL('/rest/v1/rpc/', projectURL);
 if (rpcBase.protocol !== 'https:') throw new Error('Short-link service requires HTTPS.');

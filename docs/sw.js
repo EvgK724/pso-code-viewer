@@ -1,6 +1,6 @@
 const PREFIX = 'pso-viewer-' + encodeURIComponent(new URL('./', self.location).pathname) + '-shell-';
-const CACHE = PREFIX + 'github-v9-update';
-const SHELL = ['./','./index.html','./styles.css','./app.mjs','./updates.mjs','./crypto.mjs','./exchange.mjs','./storage.mjs','./sharing.mjs','./push.mjs','./team.mjs','./shortlinks.mjs','./shortlink-config.mjs','./manifest.webmanifest','./icon-pso-v2-192.png','./icon-pso-v2-512.png','./apple-touch-icon-pso-v2.png','./favicon-pso-v2.png','./icon-192.png','./icon-512.png','./apple-touch-icon.png'];
+const CACHE = PREFIX + 'github-v10-direct';
+const SHELL = ['./','./index.html','./styles.css','./app.mjs','./updates.mjs','./direct.mjs','./messages.mjs','./photos.mjs','./device-unlock.mjs','./recipient-trust.mjs','./crypto.mjs','./exchange.mjs','./storage.mjs','./sharing.mjs','./push.mjs','./team.mjs','./shortlinks.mjs','./shortlink-config.mjs','./manifest.webmanifest','./icon-pso-v2-192.png','./icon-pso-v2-512.png','./apple-touch-icon-pso-v2.png','./favicon-pso-v2.png','./icon-192.png','./icon-512.png','./apple-touch-icon.png'];
 // Activate only after the complete shell is fetched without stale HTTP cache.
 // Existing pages are never navigated: drafts and in-progress operations survive.
 self.addEventListener('install', event => event.waitUntil((async () => {
@@ -30,11 +30,11 @@ self.addEventListener('fetch', event => {
 const APP = new URL('./', self.location);
 function notificationPayload(value, now = Date.now()) {
   if (!value || typeof value !== 'object' || Array.isArray(value) ||
-      Object.keys(value).sort().join(',') !== 'expires,id,v' || value.v !== 1 ||
+      Object.keys(value).sort().join(',') !== 'expires,id,v' || ![1,2].includes(value.v) ||
       !Number.isSafeInteger(value.expires) || value.expires <= now ||
       value.expires > now + 86430000 ||
       !(value.id === null || (typeof value.id === 'string' && /^[A-Za-z0-9_-]{21}[AQgw]$/.test(value.id)))) return null;
-  return {v:1, id:value.id, expires:value.expires};
+  return {v:value.v, id:value.id, expires:value.expires};
 }
 self.addEventListener('push', event => {
   let payload = null;
@@ -51,7 +51,7 @@ self.addEventListener('push', event => {
 async function openNotification(data) {
   const payload = notificationPayload(data);
   const target = new URL(APP.href);
-  if (payload?.id) target.hash = 'r=' + payload.id;
+  if (payload?.id) target.hash = (payload.v===2?'m=':'r=') + payload.id;
   let windows = [];
   try { windows = await self.clients.matchAll({type:'window',includeUncontrolled:true}); } catch {}
   for (const client of windows) {

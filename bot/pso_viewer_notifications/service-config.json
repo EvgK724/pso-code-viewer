@@ -1,0 +1,5 @@
+{
+  "team_endpoint": "https://spugfikalpihorcwcdqc.supabase.co/functions/v1/pso-team",
+  "direct_endpoint": "https://spugfikalpihorcwcdqc.supabase.co/functions/v1/pso-direct",
+  "viewer_url": "https://evgk724.github.io/pso-code-viewer/"
+}

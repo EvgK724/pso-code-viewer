@@ -1,6 +1,92 @@
-# Team backend — deployment and verification
+# Direct viewer backend — deployment and verification
 
-## Current authoritative deployment
+## v10 direct inbox deployment
+
+The direct viewer uses the same approved project and existing device identities,
+with two additional endpoints: `pso-direct` and `pso-device-auth`. The old
+`pso-team`, `pso-push` and `pso-shortlinks` endpoints remain for compatibility;
+the old Pachca bot and the new direct bot have separate local configuration and
+state. Installing this release does not install or start a bot on a hospital PC.
+
+Apply `device-auth-schema.sql`, then `direct-schema.sql`. If an earlier copy of
+the device-auth schema with bounded regex repetitions above 255 was already
+applied, also apply `direct-regex-fix.sql`; the current source schema includes
+that correction. `device-auth-clock-fix.sql` updates the earlier gate definition
+to use invocation time and fresh SQL state; current source also includes it.
+Run `device-auth-verify.sql` and `direct-verify.sql` in their
+rollback transactions. The latter deliberately refuses to run when real active
+specialists exist: do not disable real members to make a test pass.
+
+Deploy `server/device-auth-edge.ts` as `pso-device-auth` and
+`server/direct-edge.ts` as `pso-direct`, including every recursive relative
+dependency. Both use `verify_jwt=false` because every operation verifies its own
+device signature, timestamp and one-use nonce. Keep service credentials only in
+Edge environment variables. Set `PSO_VIEWER_ORIGIN` to the exact viewer origin;
+the existing default is `https://evgk724.github.io`. A different origin also
+changes the WebAuthn relying-party identity and requires a planned migration.
+
+Direct messages expire within 24 hours. The private database holds encrypted
+payloads, recipient-specific encrypted keys, opaque IDs, delivery/read metadata
+and organizer-signed membership certificates. Surnames, comments, photos and
+private device keys are not stored as plaintext by this backend. Payloads and
+recipient copies are removed by `pso-direct-expiry` every five minutes; access
+is denied immediately at expiry even when cleanup is delayed. Metadata audit
+rows expire after seven days. Provider backups and previously downloaded copies
+are outside these deletion guarantees.
+
+Only bots create admissions; the organizer and neurologists create review
+messages. The server enforces exactly the active intended specialty roster and
+the client verifies its organizer-signed certificates before encryption. One
+cardiologist, up to 25 intensivists and up to 25 separate bot identities are
+allowed. Replacement activates the new approved key and revokes the old device
+atomically; it cannot transfer decryption access to old messages. Revocation
+also removes the old push subscription.
+
+Generic notifications contain only `{v:2,id,expires}` and open `#m=id` in the
+viewer. The new bot's `retry` operation drains notices from both bot admissions
+and doctor reviews. Durable leases and bounded backoff prevent simultaneous
+workers from claiming the same attempt. Provider acceptance is not delivery;
+the separate acknowledgement records opening, never completion of a consult.
+The optional passkey gate checks user verification before releasing ciphertext.
+An enabled device session lasts at most ten minutes and remains bound to its
+active device identity. Actual iPhone Face ID, Home Screen opening and push
+delivery still require device checks.
+
+### v10 validation record
+
+The direct handler's eight automated tests cover real signatures/encryption,
+roles, certificates, recipient isolation, revocation, expiry, unlock gating,
+idempotence, push retries and replacement. The complete local release suite
+passes 231 tests; the separately packaged Python bot suite passes 75 tests.
+
+The following migrations are applied in the approved dedicated project:
+`pso_optional_device_unlock`, `pso_direct_encrypted_inbox`,
+`pso_device_unlock_regex_bounds` and `pso_device_unlock_live_clock`.
+Both `pso-device-auth` and `pso-direct` are ACTIVE at version 1. The final
+`device-auth-verify.sql` and `direct-verify.sql` rollback transactions passed
+against the deployed database. These checks covered actual database privileges,
+nonce replay, role restrictions, recipient isolation, expiry, access revocation,
+phone replacement, acknowledgement counts and durable push leases. Their
+synthetic records were rolled back and no notifications were transmitted.
+Post-migration security advisors reported 21 INFO findings for deliberately
+private tables with RLS and no browser policies, with no WARN or ERROR findings.
+The live Python-to-Edge integration passed 29 checks using synthetic devices and
+three fictitious messages. It verified correct decryption and routing,
+idempotent retries, acknowledgements and denial of another recipient's access.
+Live `pso-device-auth` status and enrollment-option generation also passed with
+the pinned SimpleWebAuthn 14.0.3 package in the deployed runtime. These checks
+did not enroll a real passkey or exercise native Face ID. No push subscriptions
+were provisioned and no notifications or Pachca messages were sent. Fixture
+cleanup completed and confirmed zero remaining synthetic members.
+Photo encryption and metadata stripping were checked by automated tests; this
+does not claim live photo delivery or native phone verification.
+
+This release improves technical confidentiality. It is not a certification of
+medical-system security or a legal anonymisation claim. The current dedicated
+Supabase region is outside Russia; follow `HOSTING-MIGRATION.md` for an approved
+replacement before making any claim about Russian data-localisation compliance.
+
+## Legacy v9 team-link deployment
 
 The approved dedicated Supabase project is `spugfikalpihorcwcdqc`. The current
 role-controlled service is `pso-team`, at
@@ -55,8 +141,8 @@ native iPhone notification delivery remain device checks below.
 | Cardiologist | Nothing | Cardiology group |
 | Intensivist | Nothing | ORIT group |
 
-At most one cardiologist and one bot can be active. The ORIT group supports up to
-25 active intensivists. One random link ID holds a separate existing `PSO1`
+In the current shared roster, at most one cardiologist and 25 bots can be active.
+The ORIT group supports up to 25 active intensivists. One random link ID holds a separate existing `PSO1`
 encrypted token for every active specialist in the chosen group. There is no
 shared group private key. The server checks the complete current recipient set
 under the same transaction lock used for approval/revocation; a stale list cannot

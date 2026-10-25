@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#0c1018">
   <meta name="referrer" content="no-referrer">
   <meta name="robots" content="noindex, nofollow, noarchive">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; worker-src 'self'; connect-src 'self' https://spugfikalpihorcwcdqc.supabase.co; manifest-src 'self'; base-uri 'none'; form-action 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; worker-src 'self'; connect-src 'self' https://spugfikalpihorcwcdqc.supabase.co; manifest-src 'self'; base-uri 'none'; form-action 'none'">
   <meta name="description" content="ПСО: просмотр сообщений и проверочные истории для команды.">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -27,7 +27,7 @@
     <main>
       <section class="intro" aria-labelledby="page-title">
         <h1 id="page-title">Сообщения ПСО</h1>
-        <p class="lead">Фамилия по ссылке — на 30 секунд.</p>
+        <p class="lead">Сообщения вашей команды. Содержимое открывается на этом телефоне.</p>
       </section>
 
       <section id="team-panel" class="team-panel" aria-labelledby="team-heading" hidden>
@@ -39,6 +39,8 @@
           <button id="copy-join" type="button" class="button button-secondary">Скопировать приглашение</button>
           <details><summary>Ссылка приглашения</summary><textarea id="join-link" rows="2" readonly></textarea></details>
         </div>
+        <p id="organizer-missing" class="fine-print" hidden>Для новых сообщений откройте личное приглашение организатора и один раз подтвердите его ключ.</p>
+        <section id="organizer-trust" class="contact-confirm" hidden><h2>Ключ организатора</h2><p id="organizer-code" class="fingerprint device-id"></p><label class="check-label"><input id="organizer-confirm" type="checkbox"><span>Приглашение получил от организатора по известному каналу, код сверили</span></label><button id="organizer-save" type="button" class="button button-primary" disabled>Подтвердить организатора</button></section>
         <details id="team-code-box" hidden><summary>Мой контрольный код</summary><p id="team-my-code" class="device-id fingerprint"></p></details>
       </section>
 
@@ -49,6 +51,8 @@
         </div>
         <h2 id="surname" tabindex="-1"></h2>
         <p id="case-code" class="case-code"></p>
+        <p id="result-comment" class="message-comment"></p>
+        <img id="result-photo" class="message-photo" alt="Фото из зашифрованного сообщения" hidden>
         <div class="timer-line">
           <svg width="19" height="19" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.7"/><path d="M12 7v5l3 2" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
           <span id="countdown"></span>
@@ -77,12 +81,22 @@
             </div>
           </details>
         </section>
+        <section id="direct-panel" class="direct-panel" aria-label="Сообщения" hidden>
+          <div class="inbox-toolbar"><div class="box-switch"><button id="box-inbox" type="button" aria-pressed="true">Входящие <span id="inbox-count" class="count-badge"></span></button><button id="box-outbox" type="button" aria-pressed="false">Исходящие</button></div><button id="inbox-refresh" class="text-button" type="button">Обновить</button></div>
+          <p id="inbox-status" class="field-help compact-help" role="status">Подключитесь по приглашению организатора.</p>
+          <div id="inbox-list" class="message-list"></div>
+          <button id="inbox-more" type="button" class="button button-secondary" hidden>Показать ещё</button>
+          <p id="pending-count" class="field-help compact-help" role="status"></p>
+          <button id="retry-pending" type="button" class="button button-secondary" hidden>Повторить отправку</button>
+          <button id="discard-pending" type="button" class="button button-secondary danger-button" hidden>Удалить очередь с телефона</button>
+        </section>
+        <details id="legacy-open"><summary>Открыть прежнюю ссылку или приглашение</summary>
         <section id="read-panel" aria-labelledby="input-label">
           <button id="paste-open" type="button" class="button button-primary">Вставить и открыть</button>
           <p class="field-help compact-help">Скопируйте ссылку из Пачки и нажмите кнопку.</p>
           <form id="open-form" autocomplete="off">
             <label id="input-label" for="token">Ссылка из сообщения</label>
-            <textarea id="token" name="token" rows="3" maxlength="5000" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" placeholder="Или вставьте ссылку вручную сюда"></textarea>
+            <textarea id="token" name="token" rows="3" maxlength="12000" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" placeholder="Или вставьте ссылку вручную сюда"></textarea>
             <button id="open" type="submit" class="button button-secondary">Открыть на 30 секунд</button>
           </form>
           <div id="link-tools" class="link-tools" hidden>
@@ -92,28 +106,38 @@
           </div>
         </section>
 
+        </details>
         <section id="write-panel" aria-labelledby="compose-label" hidden>
           <p class="field-help">Для уточнения или проверки истории. Поступления сообщает бот.</p>
           <form id="compose-form" autocomplete="off">
             <label id="compose-label" for="compose-surname">Фамилия пациента</label>
             <input id="compose-surname" name="surname" type="text" maxlength="80" spellcheck="false" autocapitalize="words" autocomplete="off" autocorrect="off" placeholder="Введите фамилию" required>
-            <label for="recipient">В какой чат</label>
+            <label for="recipient">Кому отправить</label>
             <select id="recipient" name="recipient" required>
-              <option value="">Выберите чат</option>
+              <option value="">Выберите группу врачей</option>
             </select>
-            <p class="field-help">Ссылку откроют подключённые получатели этого чата.</p>
+            <p class="field-help">Содержимое доступно только подключённым врачам выбранной группы.</p>
             <label class="check-label" for="compose-orit"><input id="compose-orit" type="checkbox"><span>Пациент в ОРИТ</span></label>
+            <div id="direct-fields" hidden>
+              <label for="compose-comment">Комментарий</label>
+              <textarea id="compose-comment" rows="3" maxlength="2000" autocomplete="off" spellcheck="false" autocorrect="off" placeholder="При необходимости — пояснение врачу"></textarea>
+              <label for="compose-photo" class="photo-picker">Добавить фото<input id="compose-photo" type="file" accept="image/jpeg,image/png,image/webp" aria-describedby="photo-help"></label>
+              <p id="photo-help" class="field-help compact-help">Один снимок. Выберите только нужную часть документа. Исходное фото может остаться в галерее и её резервной копии.</p>
+              <img id="photo-preview" class="message-photo" alt="Фото, подготовленное к шифрованию" hidden>
+              <p id="photo-status" class="field-help compact-help" role="status"></p>
+              <button id="photo-remove" class="button button-secondary" type="button" hidden>Убрать фото</button>
+            </div>
             <input id="message-caption" type="hidden" value="test">
-            <label for="expiry">Срок открытия ссылки</label>
+            <label for="expiry">Срок доступа к сообщению</label>
             <select id="expiry" name="expiry">
               <option value="60">1 час</option>
               <option value="240">4 часа</option>
               <option value="1440" selected>24 часа</option>
             </select>
             <button id="encrypt" type="submit" class="button button-primary">Создать ссылку</button>
-            <p id="push-compose-help" class="fine-print" hidden>Получатели с включёнными уведомлениями получат оповещение.</p>
+            <p id="push-compose-help" class="fine-print" hidden>Сообщение появится во «Входящих» получателей. Уведомление не содержит фамилии или фото.</p>
           </form>
-          <div id="compose-output" class="output-block" hidden>
+          <div id="legacy-output"><div id="compose-output" class="output-block" hidden>
             <p class="eyebrow">Ссылка готова</p>
             <p id="output-recipient" class="output-recipient"></p>
             <p class="compact-preview"><a id="output-preview" class="text-link" href="#">Проверочная история</a></p>
@@ -134,7 +158,7 @@
               </div>
             </details>
           </div>
-          <p class="fine-print">Скопируйте ссылку в выбранный чат. Комментарий в Пачке виден участникам чата.</p>
+          <p class="fine-print">Скопируйте ссылку в выбранный чат. Комментарий в Пачке виден участникам чата.</p></div>
         </section>
         <p id="notice" class="notice" role="status" aria-live="polite" tabindex="-1"></p>
       </div>
@@ -171,15 +195,19 @@
             </div>
           </section>
           <section class="contact-section"><h2>Заявки</h2><div id="team-pending"></div></section>
-          <section class="contact-section"><h2>Подключены</h2><div id="team-members"></div></section>
+          <section class="contact-section"><h2>Врачи и устройства</h2><p class="field-help compact-help">При увольнении отключите все устройства врача. Для смены телефона создайте приглашение, затем в новой заявке выберите прежний телефон. Старые сообщения не переносятся.</p><div id="team-members"></div></section>
         </div>
       </details>
       <details class="settings-panel">
         <summary>Настройки и помощь</summary>
         <div class="details-body">
-          <p class="fine-print">Версия 9 · Команда</p>
+          <p class="fine-print">Версия 10 · Сообщения</p>
           <button id="app-update" type="button" class="button button-secondary">Проверить обновление</button>
           <p id="app-update-status" class="field-help" role="status"></p>
+          <section id="device-unlock-settings" class="contact-section" hidden>
+            <h2>Защита открытия</h2><p id="device-unlock-state" class="field-help compact-help"></p>
+            <button id="device-unlock-enable" class="button button-secondary" type="button">Включить Face ID / код телефона</button>
+          </section>
           <div class="demo-action">
             <span class="demo-caption">Вымышленный пример — только для проверки этого телефона.</span>
             <button id="demo" type="button" class="button button-secondary">Проверить этот телефон</button>
@@ -248,7 +276,7 @@
             <p>Ключ расшифровки хранится в этом просмотрщике на вашем устройстве. Он не входит в карточку или ссылку.</p>
             <p class="device-label">Идентификатор ключа</p>
             <p id="device-id" class="device-id">Подготовка…</p>
-            <p>Удаление приложения или его данных может удалить ключ. Тогда потребуется новая карточка и повторное добавление у коллег.</p>
+            <p>Удаление приложения или его данных может удалить ключ. Организатор подключит телефон заново; старые сообщения на новый ключ не переносятся.</p>
           </div>
         </details>
         <details id="install-details">
@@ -258,11 +286,11 @@
             <ol>
               <li>Откройте эту страницу в <strong>Safari</strong>.</li>
               <li>Нажмите <strong>«Поделиться» → «На экран “Домой”»</strong> и добавьте значок.</li>
-              <li>Откройте просмотрщик через новый значок. Создайте тестовый код и карточку для коллег уже в нём.</li>
+              <li>Откройте просмотрщик через новый значок и вставьте личное приглашение организатора.</li>
             </ol>
-            <p>Если раньше вы пользовались просмотрщиком на другом адресе, создайте здесь новую карточку и обменяйтесь ею с коллегами. Старые ключи автоматически не переносятся; старые ссылки открывайте в прежнем просмотрщике.</p>
+            <p>Если раньше вы пользовались другим адресом, попросите организатора подключить этот просмотрщик. Старые ключи автоматически не переносятся.</p>
             <p>На Android откройте страницу в Chrome и выберите в меню «Установить приложение» или «Добавить на главный экран».</p>
-            <p>Браузер и приложение с домашнего экрана могут хранить разные ключи. Если ссылка открылась не там, скопируйте её и вставьте в тот просмотрщик, где создавали свою карточку.</p>
+            <p>Браузер и приложение с домашнего экрана могут хранить разные ключи. Подключайте телефон и открывайте сообщения через один и тот же синий значок.</p>
           </div>
         </details>
       </div>

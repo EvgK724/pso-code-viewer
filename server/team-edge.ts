@@ -30,4 +30,4 @@ const store={
 };
 // Gateway JWT verification is disabled only for this function. Every operation
 // authenticates its existing device key before touching role-controlled RPCs.
-Deno.serve(createTeamHandler({store,allowedOrigin:'https://evgk724.github.io'}));
+Deno.serve(createTeamHandler({store,allowedOrigin:Deno.env.get('PSO_VIEWER_ORIGIN')||'https://evgk724.github.io'}));

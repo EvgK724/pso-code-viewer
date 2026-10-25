@@ -148,3 +148,33 @@ summary:focus-visible { border-radius: 8px; }
 .team-panel details { border: 0; }
 .team-panel summary { min-height: 44px; padding: 12px 0; font-size: 14px; }
 .team-panel .fingerprint { margin-top: 0; }
+
+/* Direct inbox: quiet metadata, large targets; patient content appears only on open. */
+.inbox-toolbar { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:8px; }
+.box-switch { display:flex; gap:4px; flex-wrap:wrap; }
+.box-switch button { border:0; border-bottom:2px solid transparent; padding:10px 4px; min-height:44px; color:var(--muted); background:transparent; font-size:16px; font-weight:650; }
+.box-switch button[aria-pressed="true"] { color:var(--text); border-color:var(--blue); }
+.count-badge:not(:empty) { display:inline-block; margin-left:4px; border-radius:12px; padding:1px 7px; color:var(--text); background:#294c6b; font-size:13px; }
+.message-list { display:grid; gap:0; }
+.message-row { position:relative; padding:20px 0; border-bottom:1px solid var(--border); }
+.message-row:first-child { padding-top:8px; }
+.message-row strong { display:block; font-size:20px; line-height:1.35; font-weight:650; color:var(--text); }
+.message-meta { font-size:14px; color:var(--muted); line-height:1.45; margin:8px 0; overflow-wrap:anywhere; }
+.message-row .button { margin-top:10px; }
+.unread-mark { display:block; color:var(--blue); font-size:13px; margin-top:9px; }
+.delivery-state { color:var(--orange); font-size:15px; line-height:1.5; }
+#inbox-more { margin-top:16px; }
+#legacy-open { margin-top:20px; border-bottom:0; border-top:1px solid var(--border); }
+#legacy-open summary { font-size:15px; }
+#compose-comment { font-family:inherit; font-size:18px; min-height:108px; }
+.message-comment { white-space:pre-wrap; overflow-wrap:anywhere; font-size:18px; line-height:1.6; }
+.message-comment:empty { display:none; }
+.message-photo { display:block; max-width:100%; width:auto; height:auto; margin:16px auto; border-radius:10px; background:#101721; }
+.photo-picker { display:flex; flex-direction:column; align-items:flex-start; gap:10px; padding:14px; border:1px solid var(--control-border); border-radius:12px; min-height:54px; font-size:17px; }
+.photo-picker input { max-width:100%; font-size:14px; color:var(--muted); }
+.photo-picker input::file-selector-button { border:1px solid var(--control-border); border-radius:8px; color:var(--text); background:#1b2736; padding:10px; min-height:44px; margin-right:10px; font:inherit; }
+#photo-remove { margin-bottom:20px; }
+.member-editor input { margin-top:12px; }
+.member-editor .button { margin-top:10px; }
+.danger-button { color:var(--orange); }
+@media(max-width:360px){.inbox-toolbar{display:block}.inbox-toolbar>.text-button{display:block;margin-left:auto}.box-switch{justify-content:space-between}}

@@ -100,7 +100,7 @@ test('subscriptions canonicalize browser expiry and validate provider hosts and 
 test('no patient field or arbitrary payload is accepted; test notification is constrained', async () => {
   const f = captured(201);
   for (const changed of [
-    {...payload,surname:'Тестов'},{...payload,v:2},{...payload,id:'short'},{...payload,id:'AAAAAAAAAAAAAAAAAAAAAB'},
+    {...payload,surname:'Тестов'},{...payload,v:3},{...payload,id:'short'},{...payload,id:'AAAAAAAAAAAAAAAAAAAAAB'},
     {...payload,expires:NOW},{...payload,expires:NOW+86400001},{...payload,id:null}
   ]) assert.deepEqual(await sendWebPush(subscription,vapid,changed,{fetch:f.fetch,now:NOW}),{status:'failed'});
   assert.equal(f.calls.length,0);
@@ -108,6 +108,14 @@ test('no patient field or arbitrary payload is accepted; test notification is co
   assert.deepEqual(await sendWebPush(subscription,vapid,ownTest,{fetch:f.fetch,now:NOW,ttl:60}),{status:'accepted'});
   assert.deepEqual(JSON.parse(decryptBody(f.calls[0].options.body)),ownTest);
   assert.equal(f.calls[0].options.headers.TTL,'60');
+});
+
+test('direct inbox notification preserves its version and contains only opaque routing data', async () => {
+  const f=captured(201), direct={...payload,v:2};
+  assert.deepEqual(await sendWebPush(subscription,vapid,direct,{fetch:f.fetch,now:NOW}),{status:'accepted'});
+  assert.deepEqual(JSON.parse(decryptBody(f.calls[0].options.body)),direct);
+  assert.deepEqual(await sendWebPush(subscription,vapid,{...direct,id:null,expires:NOW+10000},{fetch:f.fetch,now:NOW}),{status:'failed'});
+  assert.equal(f.calls.length,1);
 });
 
 test('each notification gets fresh ephemeral ECDH material and salt', async () => {

@@ -25,4 +25,4 @@ const store={
 };
 // JWT verification is disabled only because requests are authenticated here
 // using the existing device signature. Anonymous clients have no database grants.
-Deno.serve(createPushHandler({store,allowedOrigin:'https://evgk724.github.io'}));
+Deno.serve(createPushHandler({store,allowedOrigin:Deno.env.get('PSO_VIEWER_ORIGIN')||'https://evgk724.github.io'}));

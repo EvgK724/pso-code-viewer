@@ -50,7 +50,7 @@ test('self-test notification opens the app home without a fictitious patient lin
 });
 
 test('malformed and expired pushes still display a generic safe notification',async t=>{
-  const bad=[null,[],{},'text',{...valid(),v:2},{...valid(),expires:now},{...valid(),expires:now+86430001},
+  const bad=[null,[],{},'text',{...valid(),v:3},{...valid(),expires:now},{...valid(),expires:now+86430001},
     {...valid(),expires:'tomorrow'},{...valid(),expires:NaN},{...valid(),id:'https://evil.example/'},
     {...valid(),id:'AAAAAAAAAAAAAAAAAAAAAB'},{...valid(),id:id+'x'},
     {...valid(),surname:'Петров'},{...valid(),url:'https://evil.example/'}];
@@ -99,4 +99,13 @@ test('failed or null window navigation and focus fall back to opening the app',a
 
 test('root deployment also constructs its own internal route',async()=>{
   const h=harness({baseURL:'https://viewer.example/'});await h.click(valid());assert.deepEqual(h.opened,['https://viewer.example/#r='+id]);
+});
+
+
+test('direct push v2 opens only the direct inbox message route without plaintext',async()=>{
+  const h=harness(), payload={...valid(),v:2};await h.push(payload);
+  assert.equal(h.shown[0].body,'Новое сообщение ПСО');
+  assert.deepEqual(JSON.parse(JSON.stringify(h.shown[0].data)),payload);
+  await h.click(h.shown[0].data);assert.deepEqual(h.opened,[base+'#m='+id]);
+  assert.deepEqual(h.cached,[]);
 });

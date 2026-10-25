@@ -13,6 +13,11 @@ import * as sharing from '../docs/sharing.mjs';
 import * as shortlinks from '../docs/shortlinks.mjs';
 import * as push from '../docs/push.mjs';
 import * as team from '../docs/team.mjs';
+import * as direct from '../docs/direct.mjs';
+import * as messages from '../docs/messages.mjs';
+import * as photos from '../docs/photos.mjs';
+import * as recipientTrust from '../docs/recipient-trust.mjs';
+import * as deviceUnlock from '../docs/device-unlock.mjs';
 import {createShortlinkHandler} from '../server/shortlink-handler.mjs';
 
 if (!globalThis.crypto) globalThis.crypto = webcrypto;
@@ -74,13 +79,14 @@ async function waitUntil(condition, description) {
 }
 
 async function persistentDevice() {
-  return {device:await cryptography.makeDevice(), contacts:new Map(), name:''};
+  return {device:await cryptography.makeDevice(), contacts:new Map(), name:'',pending:new Map(),pins:new Map()};
 }
 
 async function harness(persistent, initialHash = '', {
   richClipboard = false, rejectRich = false, rejectText = false,
   readText = '', rejectRead = false, deferRead = false, standalone = false, legacyStandalone = false, initialHidden = false,
   nativeCopy = undefined, shortlinkEndpoint = '', shortlinkFetch = undefined,
+  directEndpoint = '', directFetch = undefined,
   teamEndpoint = '', teamFetch = undefined, pushEndpoint = '', pushFetch = undefined, notificationPermission = 'default', pushSubscription = null, permissionResult = 'granted', rejectSubscribe = false, rejectUnsubscribe = false
 } = {}) {
   const elements = new Map();
@@ -196,13 +202,18 @@ async function harness(persistent, initialHash = '', {
     constructor(endpoint) { super(endpoint, {fetch:shortlinkFetch}); }
   }
   class InjectedPushClient extends push.PushClient { constructor(endpoint){super(endpoint,{fetch:pushFetch});} }
+  class InjectedDirectClient extends direct.DirectClient {constructor(endpoint){super(endpoint,{fetch:directFetch});}}
+  const pinStorage={getItem:key=>persistent.pins.get(key)||null,setItem:(key,value)=>persistent.pins.set(key,value)};
   class InjectedTeamClient extends team.TeamClient {constructor(endpoint){super(endpoint,{fetch:teamFetch});}}
   const exportsFor = {
     './crypto.mjs':cryptography, './exchange.mjs':exchange, './storage.mjs':storage, './sharing.mjs':sharing,
     './shortlinks.mjs':{...shortlinks, ShortLinkClient:InjectedShortLinkClient},
-    './shortlink-config.mjs':{SHORTLINK_ENDPOINT:shortlinkEndpoint,PUSH_ENDPOINT:pushEndpoint,TEAM_ENDPOINT:teamEndpoint},
+    './shortlink-config.mjs':{SHORTLINK_ENDPOINT:shortlinkEndpoint,PUSH_ENDPOINT:pushEndpoint,TEAM_ENDPOINT:teamEndpoint,DIRECT_ENDPOINT:directEndpoint,DEVICE_AUTH_ENDPOINT:''},
     './push.mjs':{...push,PushClient:InjectedPushClient},
     './team.mjs':{...team,TeamClient:InjectedTeamClient},
+    './direct.mjs':{...direct,DirectClient:InjectedDirectClient,savePending:async data=>persistent.pending.set(data.id,data),loadPending:async()=>[...persistent.pending.values()],removePending:async id=>persistent.pending.delete(id)},
+    './messages.mjs':messages,'./photos.mjs':photos,'./device-unlock.mjs':deviceUnlock,
+    './recipient-trust.mjs':{...recipientTrust,loadOrganizerCard:options=>recipientTrust.loadOrganizerCard({...options,storage:pinStorage}),pinOrganizerCard:(card,options)=>recipientTrust.pinOrganizerCard(card,{...options,storage:pinStorage})},
     './updates.mjs':{installAppUpdates(){return {ready:Promise.resolve(registration),check:async()=>{}};}}
   };
   const module = new vm.SourceTextModule(appSource, {context, identifier:origin + appPath + 'app.mjs', initializeImportMeta(meta) { meta.url = origin + appPath + 'app.mjs'; }});
@@ -1201,4 +1212,134 @@ test('team notification consent includes approved sender roles but no other grou
  const registered=push.requests.filter(r=>r.envelope?.op==='register').at(-1);assert.ok(registered);
  assert.deepEqual(registered.envelope.data.senders,service.members.slice(0,4).map(m=>m.id).sort());assert.equal(stores[3].contacts.size,0);
  assert.deepEqual(app.pushCounts(),{permission:0,subscribe:0,unsubscribe:0});
+});
+
+async function directFixture(roles=['admin','neurologist','cardiologist']){
+ const stores=await Promise.all(roles.map(()=>persistentDevice()));
+ const base=await teamFixture(stores,roles);const members=base.members.map(member=>({...member})),root=members[0];
+ for(const member of members)member.approvalProof=await recipientTrust.makeRecipientGrant(stores[0].device,member);
+ for(const store of stores)await recipientTrust.pinOrganizerCard(root.card,{confirmed:true,storage:{getItem:k=>store.pins.get(k)||null,setItem:(k,v)=>store.pins.set(k,v)}});
+ const records=new Map(),requests=[];let failAfterCreate=false,openTransform=x=>x,openGate=null;
+ const respond=(value,status=200)=>new Response(JSON.stringify(value),{status,headers:{'Content-Type':'application/json'}});
+ const fetcher=async(url,options)=>{
+  const envelope=JSON.parse(options.body).envelope,{signature,...unsigned}=envelope;requests.push(envelope);
+  const author=await exchange.importPublicCard(envelope.card),member=members.find(x=>x.id===author.id);
+  assert.equal(await crypto.subtle.verify({name:'ECDSA',hash:'SHA-256'},author.signingPublicKey,Buffer.from(signature,'base64url'),new TextEncoder().encode('PSO-TEAM-v1\0'+JSON.stringify(unsigned))),true);
+  if(envelope.op==='directory')return respond({members:members.filter(m=>!m.state||m.state==='active')});
+  if(envelope.op==='admin_members')return respond({members:members.map(m=>({state:'active',...m}))});
+  if(envelope.op==='admin_update'){
+   const target=members.find(m=>m.id===envelope.data.id);if(envelope.data.state==='active')await recipientTrust.verifyRecipientGrant({...target,...envelope.data},root.card);
+   Object.assign(target,envelope.data);return respond({state:target.state});
+  }
+  if(envelope.op==='admin_replace'){
+   const previous=members.find(m=>m.id===envelope.data.oldId),next=members.find(m=>m.id===envelope.data.newId);
+   assert.equal(next.state,'pending');const updated={...next,name:previous.name,role:previous.role,approvalProof:envelope.data.approvalProof};await recipientTrust.verifyRecipientGrant(updated,root.card);
+   Object.assign(next,updated,{state:'active'});previous.state='revoked';return respond({state:'active'});
+  }
+  if(envelope.op==='create'){
+   if(!records.has(envelope.data.id))records.set(envelope.data.id,{...envelope.data,sender:member,opened:new Set()});
+   else assert.equal(JSON.stringify(envelope.data),JSON.stringify((({sender,opened,...data})=>data)(records.get(envelope.data.id))),'retry retains exact encrypted envelope');
+   if(failAfterCreate)throw new TypeError('response lost');
+   return respond({id:envelope.data.id,expires:envelope.data.expires,push:'accepted'});
+  }
+  if(envelope.op==='inbox'||envelope.op==='outbox'){
+   const own=member.id;const items=[...records.values()].filter(r=>envelope.op==='outbox'?r.sender.id===own:r.entries.some(e=>e.recipientId===own)).map(r=>({id:r.id,group:r.group,kind:r.kind,issued:r.issued,expires:r.expires,senderId:r.sender.id,senderName:r.sender.name,openedAt:r.opened.has(own)?r.issued+1:null,recipientCount:r.entries.length,openedCount:r.opened.size}));
+   return respond({items,next:null});
+  }
+  if(envelope.op==='open'){
+   if(openGate)await openGate;
+   const r=records.get(envelope.data.id);if(!r)return respond({error:'not_found'},404);
+   const entry=r.entries.find(e=>e.recipientId===member.id);if(!entry)return respond({error:'forbidden'},403);
+   return respond(openTransform({token:entry.token,payload:r.payload||null,senderCard:r.sender.card,senderName:r.sender.name,senderRole:r.sender.role,senderApprovalProof:r.sender.approvalProof,meta:{id:r.id,group:r.group,kind:r.kind,issued:r.issued,expires:r.expires}}));
+  }
+  if(envelope.op==='ack'){records.get(envelope.data.id).opened.add(member.id);return respond({openedAt:Date.now()});}
+  return respond({error:'unsupported'},400);
+ };
+ return {stores,members,records,requests,setFailure(v){failAfterCreate=v;},transform(fn){openTransform=fn;},gate(p){openGate=p;},options:{...base.options,directEndpoint:'https://direct.example/api',directFetch:fetcher}};
+}
+async function directSend(app,{surname='Иванов',comment='Проверить историю',group='cardiology'}={}){
+ await app.event('show-write');app.el('recipient').value=group;await app.event('recipient','change');
+ app.el('compose-surname').value=surname;app.el('compose-comment').value=comment;
+ await app.event('compose-form','submit');await app.idle();
+}
+
+test('direct review is encrypted before network/persistence, opens from inbox, acknowledges only verified display and clears on hide',async()=>{
+ const s=await directFixture(),writer=await harness(s.stores[1],'',s.options);
+ await directSend(writer);assert.equal(s.records.size,1,writer.el('notice').textContent);assert.equal(s.stores[1].pending.size,0);
+ const record=[...s.records.values()][0],sent=s.requests.find(r=>r.op==='create');
+ assert.equal(record.kind,'review');assert.deepEqual(record.entries.map(e=>e.recipientId),[s.members[2].id]);
+ assert.ok(!JSON.stringify(sent).includes('Иванов'));assert.ok(!JSON.stringify(sent).includes('Проверить историю'));assert.equal(writer.el('compose-surname').value,'');assert.equal(writer.el('compose-comment').value,'');
+ const reader=await harness(s.stores[2],'',s.options);await waitUntil(()=>reader.el('inbox-list').querySelectorAll('button').length===1,'direct inbox');
+ assert.ok(!reader.el('inbox-list').querySelectorAll('p').some(p=>p.textContent.includes('Иванов')));
+ await reader.el('inbox-list').querySelectorAll('button')[0].fire('click');await reader.idle();
+ assert.equal(reader.el('surname').textContent,'Иванов');assert.equal(reader.el('result-comment').textContent,'Проверить историю');
+ await waitUntil(()=>record.opened.has(s.members[2].id),'successful display acknowledgement');
+ await reader.hide();assert.equal(reader.el('result').hidden,true);assert.equal(reader.el('surname').textContent,'');assert.equal(reader.el('result-comment').textContent,'');await reader.show();assert.equal(reader.el('result').hidden,true);
+ await writer.event('show-read');await writer.event('box-outbox');await waitUntil(()=>writer.el('inbox-list').querySelectorAll('p').some(p=>p.textContent.includes('Открыли: 1')),'outgoing receipt');
+ assert.match(writer.el('inbox-status').textContent,/не выполненную консультацию/);
+});
+
+test('lost send response retries the same durable encrypted message without duplicates after app restart',async()=>{
+ const s=await directFixture(),writer=await harness(s.stores[1],'',s.options);s.setFailure(true);await directSend(writer,{surname:'Петров'});
+ assert.equal(s.records.size,1);assert.equal(s.stores[1].pending.size,1);const queued=[...s.stores[1].pending.values()][0];assert.ok(!JSON.stringify(queued).includes('Петров'));
+ const restarted=await harness(s.stores[1],'',s.options);await waitUntil(()=>!restarted.el('retry-pending').hidden,'persistent retry button');s.setFailure(false);await restarted.event('retry-pending');
+ await waitUntil(()=>s.stores[1].pending.size===0,'pending delivered');assert.equal(s.records.size,1);assert.equal(s.requests.filter(r=>r.op==='create').length,2);assert.equal(s.requests.filter(r=>r.op==='create')[1].data.id,queued.id);
+});
+
+test('direct opening fails closed for invalid sender grant, signed-role mismatch and metadata substitution, without acknowledgement',async t=>{
+ const s=await directFixture(),writer=await harness(s.stores[1],'',s.options);await directSend(writer);const record=[...s.records.values()][0];
+ for(const [name,transform] of [
+  ['grant removed',r=>({...r,senderApprovalProof:null})],
+  ['neurologist presented as bot',r=>({...r,meta:{...r.meta,kind:'admission'}})],
+  ['time changed',r=>({...r,meta:{...r.meta,issued:r.meta.issued-1}})],
+  ['group changed',r=>({...r,meta:{...r.meta,group:'orit'}})]
+ ])await t.test(name,async()=>{
+  s.transform(transform);const reader=await harness(s.stores[2],'',s.options);await reader.hashchange('#m='+record.id);await reader.idle();
+  assert.equal(reader.el('result').hidden,true);assert.equal(reader.el('surname').textContent,'');assert.equal(s.requests.filter(r=>r.op==='ack').length,0);assert.equal(reader.el('notice').attributes.get('role'),'alert');
+ });
+});
+
+test('a delayed direct response cannot reveal or acknowledge after backgrounding',async()=>{
+ const s=await directFixture(),writer=await harness(s.stores[1],'',s.options);await directSend(writer);const record=[...s.records.values()][0];
+ let release;s.gate(new Promise(resolve=>release=resolve));const reader=await harness(s.stores[2],'',s.options);const operation=reader.hashchange('#m='+record.id);
+ await waitUntil(()=>s.requests.some(r=>r.op==='open'),'open requested');await reader.hide();release();await operation;await reader.idle();
+ assert.equal(reader.el('surname').textContent,'');assert.equal(reader.el('result-comment').textContent,'');assert.equal(reader.el('result').hidden,true);assert.equal(s.requests.filter(r=>r.op==='ack').length,0);
+});
+
+test('a missing pinned organizer never trusts a server-supplied directory',async()=>{
+ const s=await directFixture(),writer=await harness(s.stores[1],'',s.options);s.stores[1].pins.clear();const fresh=await harness(s.stores[1],'',s.options);await directSend(fresh);
+ assert.equal(s.requests.filter(r=>r.op==='create').length,0);assert.match(fresh.el('notice').textContent,/ключ организатора/);
+});
+
+test('direct photo is shown via local blob URL and revoked with all plaintext at the 30-second deadline',async()=>{
+ const s=await directFixture(),issued=Date.now(),id=direct.newMessageID(),meta={id,group:'cardiology',kind:'review',issued,expires:issued+60000};
+ const data=(await readFile(new URL('./fixtures/review.jpg',import.meta.url))).toString('base64url'),photo={mime:'image/jpeg',data,width:3,height:2};
+ const recipient={...await exchange.importPublicCard(s.members[2].card),verified:true};
+ const sealed=await messages.sealMessage(s.stores[1].device,[recipient],{surname:'Сидоров',comment:'Комментарий на фото',photo},meta);
+ s.records.set(id,{...meta,...sealed,sender:s.members[1],opened:new Set()});
+ const reader=await harness(s.stores[2],'',s.options);await reader.hashchange('#m='+id);await reader.idle();
+ assert.equal(reader.el('surname').textContent,'Сидоров');assert.equal(reader.el('result-photo').hidden,false);const url=reader.el('result-photo').src;assert.match(url,/^blob:/);
+ assert.equal((await (await fetch(url)).arrayBuffer()).byteLength,Buffer.from(data,'base64url').byteLength);
+ reader.advance(30001);assert.equal(reader.el('surname').textContent,'');assert.equal(reader.el('result-comment').textContent,'');assert.equal(reader.el('result-photo').hidden,true);await assert.rejects(fetch(url));
+ assert.ok(!JSON.stringify(s.requests).includes('Сидоров'));assert.ok(!JSON.stringify(s.requests).includes(photo.data));
+});
+
+test('bot PSO1 admission opens in direct inbox only with matching authenticated timestamps',async()=>{
+ const s=await directFixture(['admin','bot','cardiologist']);
+ const recipient={...await exchange.importPublicCard(s.members[2].card),verified:true},sender={...await exchange.importPublicCard(s.members[1].card),verified:true};
+ const token=await exchange.sealSurname(s.stores[1].device,recipient,'Петров',{department:'ОРИТ',ttlMinutes:60});
+ const opened=await exchange.openSurname(s.stores[2].device,token,[sender]),id=direct.newMessageID();
+ const record={id,group:'cardiology',kind:'admission',issued:opened.issued,expires:opened.expires,entries:[{recipientId:recipient.id,token}],sender:s.members[1],opened:new Set()};s.records.set(id,record);
+ const reader=await harness(s.stores[2],'',s.options);await reader.hashchange('#m='+id);await reader.idle();assert.equal(reader.el('surname').textContent,'Петров');assert.equal(reader.el('department').textContent,'ОРИТ');
+ await waitUntil(()=>record.opened.size===1,'bot admission ack');await reader.hide();await reader.show();record.opened.clear();s.transform(r=>({...r,meta:{...r.meta,issued:r.meta.issued-1}}));await reader.hashchange('#m='+id);await reader.idle();assert.equal(reader.el('result').hidden,true);assert.equal(record.opened.size,0);
+});
+
+test('administrator phone replacement requires fingerprint confirmation and signs the new key for the old role',async()=>{
+ const s=await directFixture(['admin','cardiologist','neurologist']);s.members[2].state='pending';
+ const admin=await harness(s.stores[0],'',s.options);await waitUntil(()=>admin.el('team-pending').querySelectorAll('button').length===1,'replacement approval');
+ const pending=admin.el('team-pending'),button=pending.querySelectorAll('button')[0],checkbox=pending.querySelectorAll('input')[0],selection=pending.querySelectorAll('select')[0];selection.value=s.members[1].id;
+ await button.fire('click');assert.equal(s.requests.filter(r=>r.op==='admin_replace').length,0);checkbox.checked=true;await checkbox.fire('change');await button.fire('click');
+ const request=s.requests.find(r=>r.op==='admin_replace');assert.ok(request);assert.equal(request.data.oldId,s.members[1].id);assert.equal(request.data.newId,s.members[2].id);
+ assert.equal(request.data.approvalProof.grant.subjectId,s.members[2].id);assert.equal(request.data.approvalProof.grant.role,'cardiologist');assert.equal(s.members[1].state,'revoked');assert.equal(s.members[2].state,'active');
+ assert.match(admin.el('notice').textContent,/прежний отключён/);
 });

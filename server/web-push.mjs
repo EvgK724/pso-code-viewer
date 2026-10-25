@@ -120,15 +120,15 @@ export async function sendWebPush(subscription, keys, payload, {
     const at = typeof now === 'function' ? now() : now;
     if (!Number.isSafeInteger(at) || !Number.isInteger(ttl) || ttl < 0 || ttl > MAX_TTL ||
         !Number.isInteger(timeout) || timeout < 1 || timeout > 30000) fail();
-    if (!exact(payload, 'expires,id,v') || payload.v !== 1 || !Number.isSafeInteger(payload.expires) ||
+    if (!exact(payload, 'expires,id,v') || ![1,2].includes(payload.v) || !Number.isSafeInteger(payload.expires) ||
         payload.expires <= at || payload.expires > at + MAX_TTL * 1000) fail();
     if (payload.id === null) {
       // A user's own opt-in test can open the app home without a patient link.
-      if (payload.expires > at + 300000) fail();
+      if (payload.v !== 1 || payload.expires > at + 300000) fail();
     } else bytes(payload.id, 16);
     const normalized = await validateSubscription(subscription, {crypto});
     const url = endpoint(normalized.endpoint);
-    const body = await encryptPushPayload(normalized, encoder.encode(JSON.stringify({v:1,id:payload.id,expires:payload.expires})), {crypto});
+    const body = await encryptPushPayload(normalized, encoder.encode(JSON.stringify({v:payload.v,id:payload.id,expires:payload.expires})), {crypto});
     const authorization = await vapidHeader(keys, url.origin, subject, at, crypto);
     const controller = new AbortController();
     timer = setTimeout(() => controller.abort(), timeout);
