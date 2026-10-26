@@ -1,6 +1,7 @@
 // Direct delivery: signed requests, recipient-only inbox, encrypted local retries.
 import {exportPublicCard, importPublicCard} from './exchange.mjs';
 import {validateMessagePayload,inspectMessageToken} from './messages.mjs';
+import {runApiRequest,readApiError,apiDiagnosticText} from './api-queue.mjs';
 const DOMAIN='PSO-TEAM-v1\0', enc=new TextEncoder();
 const ID=/^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/, LINK=/^[A-Za-z0-9_-]{21}[AQgw]$/;
 const OPS=['create','inbox','outbox','open','ack','retry','admin_members','admin_update','admin_replace','directory','admin_certify'];
@@ -22,24 +23,28 @@ export async function directEnvelope(device,op,data,issued=Date.now()){
 }
 export class DirectError extends Error {constructor(message,status,code=''){super(message);this.status=status;this.code=code;}}
 export class DirectClient {
-  constructor(endpoint,{fetch:fetcher=globalThis.fetch.bind(globalThis),now=Date.now,timeout=25000}={}){
+  constructor(endpoint,{fetch:fetcher=globalThis.fetch.bind(globalThis),now=Date.now,timeout=25000,sleep,random}={}){
     const u=new URL(endpoint);if(u.protocol!=='https:'||u.username||u.password||u.search||u.hash)throw new Error('Неверный адрес сообщений.');
-    this.endpoint=u.href;this.fetcher=fetcher;this.now=now;this.timeout=timeout;
+    this.endpoint=u.href;this.fetcher=fetcher;this.now=now;this.timeout=timeout;this.sleep=sleep;this.random=random;
   }
   async request(device,op,data={}){
+    const snapshot=JSON.parse(JSON.stringify(data));
+    return runApiRequest(()=>this.requestOnce(device,op,snapshot),{retry:op==='admin_certify',sleep:this.sleep,random:this.random});
+  }
+  async requestOnce(device,op,data){
     const envelope=await directEnvelope(device,op,data,this.now()),controller=new AbortController(),timer=setTimeout(()=>controller.abort(),this.timeout);
     try{
       const headers={'Content-Type':'application/json'};
       const r=await this.fetcher(this.endpoint,{method:'POST',headers,body:JSON.stringify({envelope}),credentials:'omit',cache:'no-store',redirect:'error',referrerPolicy:'no-referrer',signal:controller.signal});
-      if(!r.ok){let code='';try{const t=await r.text();if(t.length<2048)code=JSON.parse(t).error||'';}catch{}
-        const messages={401:'Подтвердите доступ на этом телефоне.',428:'Подтвердите Face ID или код телефона.',403:'Доступ отключён или действие недоступно для вашей роли.',404:'Сообщение недоступно или срок его хранения истёк.',409:'Состав получателей изменился. Обновите команду и подготовьте сообщение заново.',413:'Фото слишком большое. Выберите снимок меньшего размера.',429:'Слишком много запросов. Повторите позже.'};
-        throw new DirectError(messages[r.status]||'Нет подтверждения сервиса. Повторите действие позже.',r.status,code);
+      if(!r.ok){const details=await readApiError(r);
+        const messages={400:details.code==='clock_skew'?'Проверьте автоматические дату и время на телефоне и повторите (HTTP 400).':'Запрос отклонён (HTTP 400). Обновите приложение и повторите.',401:'Подтвердите доступ на этом телефоне.',428:'Подтвердите Face ID или код телефона.',403:'Доступ отключён или действие недоступно для вашей роли.',404:'Сообщение недоступно или срок его хранения истёк.',409:'Состав получателей изменился. Обновите команду и подготовьте сообщение заново.',413:'Фото слишком большое. Выберите снимок меньшего размера.',429:'Слишком много запросов. Повторите позже.'};
+        throw new DirectError((messages[r.status]||'Нет подтверждения сервиса (HTTP '+r.status+'). Повторите действие позже.')+apiDiagnosticText(details),r.status,details.code);
       }
       if(!r.headers.get('content-type')?.startsWith('application/json'))throw new Error('Неверный ответ сервиса.');
       const reader=r.body?.getReader();if(!reader)throw new Error('Нет ответа сервиса.');
       let total=0,text='';const decoder=new TextDecoder('utf-8',{fatal:true});
       try{for(;;){const{done,value}=await reader.read();if(done)break;total+=value.byteLength;if(total>3000000){await reader.cancel();throw new Error('Ответ слишком большой.');}text+=decoder.decode(value,{stream:true});}text+=decoder.decode();return JSON.parse(text);}finally{reader.releaseLock();}
-    }catch(e){if(e.name==='AbortError'||e instanceof TypeError||e instanceof SyntaxError)throw new DirectError('Нет связи с сервисом. Повторите после подключения.',0);throw e;}finally{clearTimeout(timer);}
+    }catch(e){if(e.name==='AbortError'||e instanceof TypeError||e instanceof SyntaxError){const error=new DirectError('Нет связи с сервисом. Повторите после подключения.',0);error.networkFailure=e.name==='AbortError'||e instanceof TypeError;throw error;}throw e;}finally{clearTimeout(timer);}
   }
   async list(device,box='inbox',cursor=null){
     if(!['inbox','outbox'].includes(box))throw new Error('Неизвестный список.');

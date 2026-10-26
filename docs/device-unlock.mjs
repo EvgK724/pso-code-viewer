@@ -1,6 +1,7 @@
 // Optional WebAuthn verification. Unlock tokens exist only in this page's memory.
 // The server, not a visual overlay, checks the token before returning ciphertext.
 import {exportPublicCard,deviceIdentity} from './exchange.mjs';
+import {runApiRequest} from './api-queue.mjs';
 const DOMAIN='PSO-TEAM-v1\0', enc=new TextEncoder();
 const OPS=['status','enroll_begin','enroll_finish','unlock_begin','unlock_finish','reset'];
 const b64=x=>btoa(String.fromCharCode(...new Uint8Array(x))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
@@ -26,6 +27,10 @@ export class DeviceUnlockClient{
   clear(){this.session=null;this.epoch++;this.prompt?.abort();this.prompt=null;}
   active(epoch){if(epoch!==this.epoch)throw new Error('Подтверждение прервано. Откройте запись снова.');}
   async request(device,op,data={}){
+    const snapshot=JSON.parse(JSON.stringify(data));
+    return runApiRequest(()=>this.requestOnce(device,op,snapshot));
+  }
+  async requestOnce(device,op,data){
     const envelope=await deviceAuthEnvelope(device,op,data,this.now());const abort=new AbortController(),timer=setTimeout(()=>abort.abort(),this.timeout);
     try{
       const r=await this.fetcher(this.endpoint,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({envelope}),credentials:'omit',cache:'no-store',redirect:'error',referrerPolicy:'no-referrer',signal:abort.signal});

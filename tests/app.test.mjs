@@ -87,6 +87,7 @@ async function harness(persistent, initialHash = '', {
   readText = '', rejectRead = false, deferRead = false, standalone = false, legacyStandalone = false, initialHidden = false,
   nativeCopy = undefined, shortlinkEndpoint = '', shortlinkFetch = undefined,
   directEndpoint = '', directFetch = undefined,
+  deviceAuthEndpoint = '', deviceAuthFetch = undefined,
   teamEndpoint = '', teamFetch = undefined, pushEndpoint = '', pushFetch = undefined, notificationPermission = 'default', pushSubscription = null, permissionResult = 'granted', rejectSubscribe = false, rejectUnsubscribe = false
 } = {}) {
   const elements = new Map();
@@ -205,14 +206,15 @@ async function harness(persistent, initialHash = '', {
   class InjectedDirectClient extends direct.DirectClient {constructor(endpoint){super(endpoint,{fetch:directFetch});}}
   const pinStorage={getItem:key=>persistent.pins.get(key)||null,setItem:(key,value)=>persistent.pins.set(key,value)};
   class InjectedTeamClient extends team.TeamClient {constructor(endpoint){super(endpoint,{fetch:teamFetch});}}
+  class InjectedDeviceUnlockClient extends deviceUnlock.DeviceUnlockClient {constructor(endpoint){super(endpoint,{fetch:deviceAuthFetch});}}
   const exportsFor = {
     './crypto.mjs':cryptography, './exchange.mjs':exchange, './storage.mjs':storage, './sharing.mjs':sharing,
     './shortlinks.mjs':{...shortlinks, ShortLinkClient:InjectedShortLinkClient},
-    './shortlink-config.mjs':{SHORTLINK_ENDPOINT:shortlinkEndpoint,PUSH_ENDPOINT:pushEndpoint,TEAM_ENDPOINT:teamEndpoint,DIRECT_ENDPOINT:directEndpoint,DEVICE_AUTH_ENDPOINT:''},
+    './shortlink-config.mjs':{SHORTLINK_ENDPOINT:shortlinkEndpoint,PUSH_ENDPOINT:pushEndpoint,TEAM_ENDPOINT:teamEndpoint,DIRECT_ENDPOINT:directEndpoint,DEVICE_AUTH_ENDPOINT:deviceAuthEndpoint},
     './push.mjs':{...push,PushClient:InjectedPushClient},
     './team.mjs':{...team,TeamClient:InjectedTeamClient},
     './direct.mjs':{...direct,DirectClient:InjectedDirectClient,savePending:async data=>persistent.pending.set(data.id,data),loadPending:async()=>[...persistent.pending.values()],removePending:async id=>persistent.pending.delete(id)},
-    './messages.mjs':messages,'./photos.mjs':photos,'./device-unlock.mjs':deviceUnlock,
+    './messages.mjs':messages,'./photos.mjs':photos,'./device-unlock.mjs':{...deviceUnlock,DeviceUnlockClient:InjectedDeviceUnlockClient},
     './recipient-trust.mjs':{...recipientTrust,loadOrganizerCard:options=>recipientTrust.loadOrganizerCard({...options,storage:pinStorage}),pinOrganizerCard:(card,options)=>recipientTrust.pinOrganizerCard(card,{...options,storage:pinStorage})},
     './updates.mjs':{installAppUpdates(){return {ready:Promise.resolve(registration),check:async()=>{}};}}
   };
@@ -1227,6 +1229,10 @@ async function directFixture(roles=['admin','neurologist','cardiologist']){
   assert.equal(await crypto.subtle.verify({name:'ECDSA',hash:'SHA-256'},author.signingPublicKey,Buffer.from(signature,'base64url'),new TextEncoder().encode('PSO-TEAM-v1\0'+JSON.stringify(unsigned))),true);
   if(envelope.op==='directory')return respond({members:members.filter(m=>!m.state||m.state==='active')});
   if(envelope.op==='admin_members')return respond({members:members.map(m=>({state:'active',...m}))});
+  if(envelope.op==='admin_certify'){
+   const target=members.find(m=>m.id===envelope.data.id);await recipientTrust.verifyRecipientGrant({...target,approvalProof:envelope.data.approvalProof},root.card);
+   target.approvalProof=envelope.data.approvalProof;return respond({state:'active'});
+  }
   if(envelope.op==='admin_update'){
    const target=members.find(m=>m.id===envelope.data.id);if(envelope.data.state==='active')await recipientTrust.verifyRecipientGrant({...target,...envelope.data},root.card);
    Object.assign(target,envelope.data);return respond({state:target.state});
@@ -1342,4 +1348,142 @@ test('administrator phone replacement requires fingerprint confirmation and sign
  const request=s.requests.find(r=>r.op==='admin_replace');assert.ok(request);assert.equal(request.data.oldId,s.members[1].id);assert.equal(request.data.newId,s.members[2].id);
  assert.equal(request.data.approvalProof.grant.subjectId,s.members[2].id);assert.equal(request.data.approvalProof.grant.role,'cardiologist');assert.equal(s.members[1].state,'revoked');assert.equal(s.members[2].state,'active');
  assert.match(admin.el('notice').textContent,/прежний отключён/);
+});
+
+async function adminUiFixture({withPush=false}={}){
+ const service=await directFixture(),faults={status:0,directory:0,approve:0},events=[];
+ service.members[2].state='pending';
+ let approvalGate=null,failRefreshAfterApprove=false;
+ const response=(value,status=200)=>new Response(JSON.stringify(value),{status,headers:{'Content-Type':'application/json'}});
+ const options={...service.options,standalone:true,
+  teamFetch:async(url,init)=>{
+   const {envelope:e}=JSON.parse(init.body);events.push('team:'+e.op);
+   if(e.op==='approve'){
+    if(approvalGate)await approvalGate;
+    if(failRefreshAfterApprove)faults.status=503;
+   }
+   if(faults[e.op])return response({error:'request_rejected'},faults[e.op]);
+   if(e.op==='approve')service.members.find(m=>m.id===e.data.deviceId).state='active';
+   return service.options.teamFetch(url,init);
+  },
+  directFetch:async(url,init)=>{events.push('direct:'+JSON.parse(init.body).envelope.op);return service.options.directFetch(url,init);},
+  deviceAuthEndpoint:'https://auth.example/api',deviceAuthFetch:async(url,init)=>{events.push('auth:'+JSON.parse(init.body).envelope.op);return response({enabled:false});}
+ };
+ if(withPush){
+  const notifications=await notificationService({enabled:true});
+  Object.assign(options,{pushEndpoint:'https://push.example/api',notificationPermission:'granted',pushSubscription:true,pushFetch:async(url,init)=>{
+   const body=JSON.parse(init.body);events.push('push:'+(body.op||body.envelope.op));return notifications.fetch(url,init);
+  }});
+ }
+ return {...service,options,faults,events,gateApproval(value){approvalGate=value;},failRefreshAfterApprove(value){failRefreshAfterApprove=value;}};
+}
+
+test('transient status or directory errors preserve only the displayed admin identity and block stale actions',async()=>{
+ const s=await adminUiFixture(),app=await harness(s.stores[0],'',s.options);
+ const pending=app.el('team-pending'),approve=pending.querySelectorAll('button')[0],check=pending.querySelectorAll('input')[0];
+ const key=s.stores[0].device;
+ s.faults.directory=503;await app.event('team-refresh');
+ assert.equal(app.el('team-admin').hidden,false);
+ assert.match(app.el('team-state').textContent,/Врач 0 · Администратор/);
+ assert.match(app.el('team-state').textContent,/Не удалось обновить список команды.*HTTP 503.*Действия недоступны/);
+ assert.equal(app.el('invite-create').disabled,true);assert.equal(app.el('show-write').hidden,true);
+ check.checked=true;await check.fire('change');assert.equal(approve.disabled,true);
+ const before=s.events.length;await approve.fire('click');app.el('invite-name').value='Другой';app.el('invite-role').value='neurologist';await app.event('invite-form','submit');
+ await app.hashchange('#m='+direct.newMessageID());await app.idle();
+ assert.equal(s.events.length,before,'Offline identity grants neither management mutations nor message opening');
+ assert.equal(app.el('result').hidden,true);assert.equal(s.stores[0].device,key);
+ s.faults.directory=0;s.faults.status=503;await app.event('team-refresh');
+ assert.equal(app.el('team-admin').hidden,false);assert.match(app.el('team-state').textContent,/Администратор.*HTTP 503/);
+ s.faults.status=0;await app.event('team-refresh');await app.idle();
+ assert.equal(app.el('team-admin').hidden,false);assert.equal(app.el('invite-create').disabled,false);assert.equal(app.el('show-write').hidden,false);
+ assert.equal(app.el('team-state').textContent,'Врач 0 · Администратор');
+});
+
+test('an explicit authorization rejection or revoked status clears the retained admin identity',async()=>{
+ for(const failure of ['status403','directory403','revoked']){
+  const s=await adminUiFixture();let revoked=false;
+  const teamFetch=s.options.teamFetch;
+  const app=await harness(s.stores[0],'',{...s.options,teamFetch:async(url,init)=>{
+   if(revoked&&JSON.parse(init.body).envelope.op==='status')return new Response(JSON.stringify({state:'revoked',role:'admin',name:'Врач 0'}),{headers:{'Content-Type':'application/json'}});
+   return teamFetch(url,init);
+  }});
+  if(failure==='revoked')revoked=true;else s.faults[failure==='status403'?'status':'directory']=403;
+  await app.event('team-refresh');assert.equal(app.el('team-admin').hidden,true,failure);
+  assert.equal(app.el('show-write').hidden,true);assert.equal(app.el('invite-create').disabled,true);
+  assert.match(app.el('team-state').textContent,/Доступ этого телефона отключён/);
+  assert.doesNotMatch(app.el('team-state').textContent,/Администратор/);
+ }
+});
+
+test('approval progress blocks duplicate clicks and periodic work; HTTP stage survives failed refresh and recovery',async()=>{
+ const s=await adminUiFixture(),app=await harness(s.stores[0],'',s.options);
+ const pending=app.el('team-pending'),approve=pending.querySelectorAll('button')[0],check=pending.querySelectorAll('input')[0];
+ check.checked=true;await check.fire('change');
+ let release;s.gateApproval(new Promise(resolve=>release=resolve));s.faults.approve=503;s.failRefreshAfterApprove(true);
+ const start=s.events.length,operation=approve.fire('click');
+ await waitUntil(()=>s.events.slice(start).includes('team:approve'),'approval request started');
+ assert.equal(approve.disabled,true);assert.equal(approve.textContent,'Подтверждаем…');assert.match(app.el('notice').textContent,/Подтверждение телефона/);
+ await approve.fire('click');app.advance(60000);await app.show();await app.event('device-unlock-enable');
+ assert.deepEqual(s.events.slice(start),['team:approve'],'No background inbox/auth work or second approval is started');
+ release();await operation;
+ assert.match(app.el('notice').textContent,/Подтверждение телефона:.*HTTP 503/);
+ assert.equal(app.el('team-admin').hidden,false);assert.equal(approve.disabled,true);assert.equal(s.members[2].state,'pending');
+ s.gateApproval(null);s.failRefreshAfterApprove(false);s.faults.status=0;s.faults.approve=0;
+ await app.event('team-refresh');
+ const next=app.el('team-pending').querySelectorAll('button')[0],nextCheck=app.el('team-pending').querySelectorAll('input')[0];nextCheck.checked=true;await nextCheck.fire('change');await next.fire('click');
+ assert.equal(s.members[2].state,'active');assert.equal(app.el('team-pending').querySelectorAll('button').length,0);
+ assert.equal(s.requests.filter(e=>e.op==='admin_certify').length,1);assert.match(app.el('notice').textContent,/Подключение подтверждено/);
+});
+
+test('initialization avoids duplicate inbox/auth checks and post-refresh background work runs in order',async()=>{
+ const s=await adminUiFixture({withPush:true}),app=await harness(s.stores[0],'',s.options);await app.pushIdle();
+ assert.equal(s.events.filter(e=>e==='direct:inbox').length,1);
+ assert.equal(s.events.filter(e=>e==='auth:status').length,1);
+ assert.equal(s.events.filter(e=>e==='push:register').length,1);
+ const start=s.events.length;await app.event('team-refresh');
+ assert.deepEqual(s.events.slice(start),['team:status','team:directory','direct:admin_members','direct:inbox','auth:status','push:register']);
+});
+
+test('a notification arriving during team refresh waits and opens exactly once after membership is confirmed',async()=>{
+ const s=await directFixture(),writer=await harness(s.stores[1],'',s.options);
+ await directSend(writer);const record=[...s.records.values()][0];
+ let gate=null,entered=false;
+ const reader=await harness(s.stores[2],'',{...s.options,teamFetch:async(url,init)=>{
+  if(gate&&JSON.parse(init.body).envelope.op==='status'){entered=true;await gate;}
+  return s.options.teamFetch(url,init);
+ }});
+ let release;gate=new Promise(resolve=>release=resolve);
+ const refresh=reader.event('team-refresh');await waitUntil(()=>entered,'refresh waiting on status');
+ await reader.hashchange('#m='+record.id);await reader.hashchange('#m='+record.id);
+ assert.equal(s.requests.filter(e=>e.op==='open').length,0,'The pending notification cannot open with membership refresh in flight');
+ assert.equal(reader.el('result').hidden,true);
+ release();await refresh;await reader.idle();
+ await waitUntil(()=>reader.el('surname').textContent==='Иванов','deferred notification displayed');
+ await waitUntil(()=>s.requests.filter(e=>e.op==='ack').length===1,'deferred notification acknowledged');
+ assert.equal(s.requests.filter(e=>e.op==='open').length,1);
+ await reader.hide();await reader.show();await reader.idle();
+ assert.equal(s.requests.filter(e=>e.op==='open').length,1,'A completed notification is not queued again');
+});
+
+test('a queued notification survives a failed team refresh and opens only after a later successful refresh',async()=>{
+ const s=await directFixture(),writer=await harness(s.stores[1],'',s.options);
+ await directSend(writer);const record=[...s.records.values()][0];
+ let gate=null,entered=false,failStatus=false;
+ const reader=await harness(s.stores[2],'',{...s.options,teamFetch:async(url,init)=>{
+  if(JSON.parse(init.body).envelope.op==='status'){
+   if(gate){entered=true;await gate;}
+   if(failStatus)return new Response(JSON.stringify({error:'request_rejected'}),{status:503,headers:{'Content-Type':'application/json'}});
+  }
+  return s.options.teamFetch(url,init);
+ }});
+ let release;gate=new Promise(resolve=>release=resolve);failStatus=true;
+ const refresh=reader.event('team-refresh');await waitUntil(()=>entered,'failing refresh waiting on status');
+ await reader.hashchange('#m='+record.id);release();await refresh;await reader.idle();
+ assert.match(reader.el('team-state').textContent,/Действия недоступны/);
+ assert.equal(s.requests.filter(e=>e.op==='open').length,0);assert.equal(reader.el('result').hidden,true);
+ await reader.show();await reader.idle();assert.equal(s.requests.filter(e=>e.op==='open').length,0);
+ gate=null;failStatus=false;await reader.event('team-refresh');await reader.idle();
+ await waitUntil(()=>reader.el('surname').textContent==='Иванов','notification retained through outage');
+ await waitUntil(()=>s.requests.filter(e=>e.op==='ack').length===1,'retained notification acknowledged');
+ assert.equal(s.requests.filter(e=>e.op==='open').length,1);
 });

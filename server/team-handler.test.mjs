@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {webcrypto} from 'node:crypto';
-import {createTeamHandler,MAX_TEAM_BODY_BYTES} from './team-handler.mjs';
+import {createTeamHandler,MAX_TEAM_BODY_BYTES,safeServiceDiagnostic} from './team-handler.mjs';
 import {createVapidKeys} from './web-push.mjs';
 import {makeDevice,base64url} from '../docs/crypto.mjs';
 import {deviceIdentity,exportPublicCard,importPublicCard,sealSurname,openSurname} from '../docs/exchange.mjs';
@@ -87,8 +87,50 @@ test('all outer signed fields are bound and no unverified request reaches storag
 test('fresh authentication, nonce replay and storage rate failures map to explicit errors',async()=>{
   const f=fixture(),e=await envelope(neuro,'status');assert.equal((await f.handler(request({envelope:e}))).status,200);
   const replay=await f.handler(request({envelope:e}));assert.equal(replay.status,409);assert.deepEqual(await replay.json(),{error:'replay'});
-  for(const at of [NOW-60001,NOW+30001])assert.equal((await f.handler(request({envelope:await envelope(neuro,'status',{},at)}))).status,400);
+  for(const at of [NOW-60001,NOW+30001]){
+    const response=await f.handler(request({envelope:await envelope(neuro,'status',{},at)}));
+    assert.equal(response.status,400);assert.deepEqual(await response.json(),{error:'clock_skew'});
+  }
   assert.equal((await fixture({acceptResult:'limited'}).op(neuro,'status')).status,429);
+});
+
+test('clock hint is limited to structurally valid timestamps and never reaches storage',async()=>{
+  const f=fixture(),original=await envelope(neuro,'status');
+  for(const changed of [{issued:String(NOW-60001)},{issued:null},{v:2,issued:NOW-60001},{op:'private-secret',issued:NOW-60001}]){
+    const response=await f.handler(request({envelope:{...original,...changed}}));
+    assert.equal(response.status,400);assert.deepEqual(await response.json(),{error:'request_rejected'});
+  }
+  assert.equal(f.calls.length,0);
+});
+
+test('unexpected database failures expose only allowlisted stage/code/status for every team operation',async()=>{
+  const error=Object.assign(new Error('PRIVATE SQL name=Иванов card='+cards[0]),{
+    code:'database_conflict',status:400040,cause:{sql:'PRIVATE SQL',parameters:cards[0]},deviceId:adminID
+  });
+  const operations=[['accept','status',{}],['status','status',{}],['directory','directory',{}],['pending','pending',{}],
+    ['invite','invite',{id:rid(),name:'Новый врач',role:'neurologist'}],['claim','claim',{id:rid()}],
+    ['approve','approve',{deviceId:neuroID}],['revoke','revoke',{deviceId:neuroID}],['resolve','resolve',{id:rid()}],
+    ['create','create',await dataFor()]];
+  for(const [failedMethod,op,data] of operations){
+    const f=fixture();f.store[failedMethod]=async()=>{throw error;};
+    const response=await f.op(admin,op,op==='create'?await dataFor(admin):data);
+    assert.equal(response.status,503,failedMethod);
+    assert.deepEqual(await response.json(),{error:'request_rejected',diagnostic:{stage:failedMethod,code:'database_conflict',status:400040}});
+  }
+});
+
+test('diagnostics cannot echo unknown codes, numeric data, messages, stack or causes',async()=>{
+  const f=fixture();
+  f.store.approve=async()=>{throw Object.assign(new Error('PRIVATE secret'),{
+    code:'PRIVATE patient Иванов',status:123456,cause:'PRIVATE key',stack:'PRIVATE stack'
+  });};
+  const response=await f.op(admin,'approve',{deviceId:neuroID});
+  assert.equal(response.status,503);
+  assert.deepEqual(await response.json(),{error:'request_rejected',diagnostic:{stage:'approve',code:'internal_error',status:null}});
+  assert.deepEqual(safeServiceDiagnostic({code:'database_unavailable',status:400060},'PRIVATE stage'),{
+    stage:'validation',code:'database_unavailable',status:400060
+  });
+  for(const status of ['400040',Infinity,400000,400040.5,400110])assert.equal(safeServiceDiagnostic({status},'accept').status,null);
 });
 
 test('invitation possession creates pending enrollment only; admin approves a bound immutable device',async()=>{

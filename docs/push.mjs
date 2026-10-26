@@ -1,6 +1,7 @@
 // Device-authenticated notification requests. No patient plaintext or private key
 // is sent here. The public card uses a fixed label instead of the doctor's name.
 import {exportPublicCard, deviceIdentity} from './exchange.mjs';
+import {runApiRequest} from './api-queue.mjs';
 const DOMAIN = 'PSO-PUSH-v1\0';
 const enc = new TextEncoder();
 const b64 = bytes => btoa(String.fromCharCode(...new Uint8Array(bytes))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
@@ -27,6 +28,9 @@ export class PushClient {
     this.endpoint=url.href; this.fetcher=fetcher; this.timeout=timeout; this.now=now;
   }
   async request(body) {
+    return runApiRequest(async()=>this.requestOnce(typeof body==='function'?await body():body));
+  }
+  async requestOnce(body) {
     const controller=new AbortController(), timer=setTimeout(()=>controller.abort(),this.timeout);
     try {
       const response=await this.fetcher(this.endpoint,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body),credentials:'omit',cache:'no-store',referrerPolicy:'no-referrer',redirect:'error',signal:controller.signal});
@@ -56,7 +60,8 @@ export class PushClient {
     pushKeyBytes(result.publicKey); return result.publicKey;
   }
   async signed(device,op,data={}) {
-    const result=await this.request({envelope:await pushEnvelope(device,op,data,this.now())});
+    const snapshot=JSON.parse(JSON.stringify(data));
+    const result=await this.request(async()=>({envelope:await pushEnvelope(device,op,snapshot,this.now())}));
     const statuses=['register','unregister','status'].includes(op)?['enabled','disabled']:['accepted','unavailable','already','failed','gone'];
     if(!exact(result,'status')||!statuses.includes(result.status))throw new Error('Сервис не подтвердил уведомление.');
     return result.status;

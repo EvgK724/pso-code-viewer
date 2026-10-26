@@ -8,11 +8,23 @@ const DOMAIN = 'PSO-TEAM-v1\0', TOKEN_DOMAIN = 'PSO-SURNAME-LINK-v1\0';
 const MAX_TTL = 86400000, MAX_RECIPIENTS = 25;
 const OPS = ['status','directory','invite','claim','pending','approve','revoke','create','resolve'];
 const ROLES = ['admin','neurologist','cardiologist','intensivist','bot'];
+const DIAGNOSTIC_STAGES = new Set(['validation','accept',...OPS,'configuration','database_connect','organizer_check','handler_setup','dispatch']);
+const DIAGNOSTIC_CODES = new Set(['database_conflict','database_deadline','database_unavailable','invalid_record','invalid_result','result_limit','database_closed','transaction_closed','operation_limit']);
+// Explicit error values from the pinned ydb-sdk 5.11.1 StatusCode enum. Do not
+// expose arbitrary numeric properties, error messages, SQL parameters or causes.
+const DIAGNOSTIC_STATUSES = new Set([400010,400020,400030,400040,400050,400060,400070,400080,400090,400100,400120,400130,400140,400150,400160,400170,400180,400190,400200,401010,401020,401030,401034,402030,402040,402050]);
 const enc = new TextEncoder();
 const exact = (value, keys) => value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).sort().join(',') === keys;
 const b64 = value => btoa(String.fromCharCode(...new Uint8Array(value))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
 class Rejected extends Error {
   constructor(status=400, code='request_rejected') { super('Request rejected'); this.status=status; this.code=code; }
+}
+export function safeServiceDiagnostic(error,stage) {
+  return {
+    stage:DIAGNOSTIC_STAGES.has(stage)?stage:'validation',
+    code:DIAGNOSTIC_CODES.has(error?.code)?error.code:'internal_error',
+    status:Number.isSafeInteger(error?.status)&&DIAGNOSTIC_STATUSES.has(error.status)?error.status:null
+  };
 }
 function bytes(value, length) {
   if (typeof value !== 'string' || value.length !== Math.ceil(length*4/3) || !/^[A-Za-z0-9_-]+$/.test(value)) throw new Rejected();
@@ -115,6 +127,7 @@ export function createTeamHandler({store,allowedOrigin,crypto=globalThis.crypto,
   }
   return async function handle(request) {
     if(request.headers.get('origin')!==allowedOrigin)return response(403,{error:'request_rejected'},false);
+    let stage='validation';
     try {
       const url=new URL(request.url);
       if(url.search||url.hash||url.username||url.password)throw new Rejected();
@@ -128,7 +141,8 @@ export function createTeamHandler({store,allowedOrigin,crypto=globalThis.crypto,
       if(!Number.isSafeInteger(at))throw new Error('Clock unavailable');
       if(!exact(body,'envelope')||!exact(body.envelope,'card,data,issued,nonce,op,signature,v'))throw new Rejected();
       const e=body.envelope;
-      if(e.v!==1||!OPS.includes(e.op)||!Number.isSafeInteger(e.issued)||e.issued<at-60000||e.issued>at+30000)throw new Rejected();
+      if(e.v!==1||!OPS.includes(e.op)||!Number.isSafeInteger(e.issued))throw new Rejected();
+      if(e.issued<at-60000||e.issued>at+30000)throw new Rejected(400,'clock_skew');
       bytes(e.nonce,16);const signature=bytes(e.signature,64);
       let owner;try{owner=await importPublicCard(e.card);}catch{throw new Rejected();}
       const unsigned={v:1,op:e.op,issued:e.issued,nonce:e.nonce,card:e.card,data:e.data};
@@ -160,8 +174,10 @@ export function createTeamHandler({store,allowedOrigin,crypto=globalThis.crypto,
         normalizedCreate={id:data.id,group:data.group,kind:data.kind,issued:data.issued,expires:data.expires,entries};
       }
       const signingSPKI=b64(await crypto.subtle.exportKey('spki',owner.signingPublicKey));
+      stage='accept';
       const accepted=await store.accept(owner.id,e.nonce,e.op,e.issued,e.card,signingSPKI);
       if(accepted!=='ok')failure(accepted);
+      stage=e.op;
       if(e.op==='status') {
         const result=await store.status(owner.id);
         if(!exact(result,'name,role,state')||!['unregistered','pending','active','revoked'].includes(result.state)||
@@ -202,7 +218,9 @@ export function createTeamHandler({store,allowedOrigin,crypto=globalThis.crypto,
       const push=result==='created'?await notify(owner.id,data.id,idHash,at,normalizedCreate.entries.map(entry=>entry.recipientId)):'unavailable';
       return response(200,{id:data.id,expires:data.expires,push});
     } catch(error) {
-      return response(error instanceof Rejected?error.status:503,{error:error instanceof Rejected?error.code:'request_rejected'});
+      return error instanceof Rejected
+        ? response(error.status,{error:error.code})
+        : response(503,{error:'request_rejected',diagnostic:safeServiceDiagnostic(error,stage)});
     }
   };
 }

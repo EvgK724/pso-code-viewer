@@ -5,7 +5,7 @@ const origin='https://example.apigw.yandexcloud.net';
 const event=(path,extra={})=>({path,httpMethod:'GET',headers:{host:new URL(origin).host},...extra});
 test('static shell is scoped to one HTTPS origin and has no foreign broker',async()=>{
  const router=createHttpRouter({allowedOrigin:origin,handlers:{}});
- for(const path of ['/','/shortlink-config.mjs','/sw.js','/manifest.webmanifest','/icon-pso-v2-192.png']){
+ for(const path of ['/','/api-queue.mjs','/shortlink-config.mjs','/sw.js','/manifest.webmanifest','/icon-pso-v2-192.png']){
   const r=await router(event(path));assert.equal(r.statusCode,200);assert.equal(r.headers['X-Frame-Options'],'DENY');
   if(path==='/shortlink-config.mjs'){const code=Buffer.from(r.body,'base64').toString();assert(!code.includes('supabase'));assert(code.includes(origin+'/api/pso-direct'));}
  }

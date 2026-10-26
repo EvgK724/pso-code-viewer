@@ -1,6 +1,7 @@
 // Authenticated team directory and per-recipient encrypted group links.
 // Only the server assigns roles; invitations merely request administrator review.
 import {exportPublicCard, importPublicCard} from './exchange.mjs';
+import {runApiRequest,readApiError,apiDiagnosticText} from './api-queue.mjs';
 const DOMAIN='PSO-TEAM-v1\0', enc=new TextEncoder();
 const ROLES=['admin','neurologist','intensivist','cardiologist','bot'];
 const ID=/^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/, LINK=/^[A-Za-z0-9_-]{21}[AQgw]$/;
@@ -22,23 +23,27 @@ export async function teamEnvelope(device,op,data={},issued=Date.now()){
   const signature=b64(await crypto.subtle.sign({name:'ECDSA',hash:'SHA-256'},device.signing.privateKey,enc.encode(DOMAIN+JSON.stringify(unsigned))));
   return {...unsigned,signature};
 }
-export class TeamError extends Error {constructor(message,status){super(message);this.status=status;}}
+export class TeamError extends Error {constructor(message,status,code=''){super(message);this.status=status;this.code=code;}}
 export class TeamClient {
-  constructor(endpoint,{fetch:fetcher=globalThis.fetch.bind(globalThis),timeout=15000,now=Date.now}={}){
+  constructor(endpoint,{fetch:fetcher=globalThis.fetch.bind(globalThis),timeout=15000,now=Date.now,sleep,random}={}){
     const u=new URL(endpoint);if(u.protocol!=='https:'||u.username||u.password||u.search||u.hash)throw new Error('Неверный адрес команды.');
-    this.endpoint=u.href;this.fetcher=fetcher;this.timeout=timeout;this.now=now;
+    this.endpoint=u.href;this.fetcher=fetcher;this.timeout=timeout;this.now=now;this.sleep=sleep;this.random=random;
   }
   async request(device,op,data={}){
+    const snapshot=JSON.parse(JSON.stringify(data));
+    return runApiRequest(()=>this.requestOnce(device,op,snapshot),{retry:['invite','claim','approve','revoke'].includes(op),sleep:this.sleep,random:this.random});
+  }
+  async requestOnce(device,op,data){
     const envelope=await teamEnvelope(device,op,data,this.now());
     const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),this.timeout);
     try{
       const r=await this.fetcher(this.endpoint,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({envelope}),credentials:'omit',cache:'no-store',referrerPolicy:'no-referrer',redirect:'error',signal:controller.signal});
-      if(!r.ok){const messages={403:'Этот телефон не имеет доступа. Проверьте подключение у администратора.',404:'Ссылка не найдена или срок её действия истёк.',409:'Состав команды изменился или приглашение уже использовано. Обновите подключение и повторите.',429:'Слишком много запросов. Повторите немного позже.'};throw new TeamError(messages[r.status]||'Сервис команды недоступен. Повторите позже.',r.status);}
+      if(!r.ok){const details=await readApiError(r),messages={400:details.code==='clock_skew'?'Проверьте автоматические дату и время на телефоне и повторите (HTTP 400).':'Запрос команды отклонён (HTTP 400). Обновите приложение и повторите.',403:'Этот телефон не имеет доступа. Проверьте подключение у администратора.',404:'Ссылка не найдена или срок её действия истёк.',409:'Состав команды изменился или приглашение уже использовано. Обновите подключение и повторите.',429:'Слишком много запросов. Повторите немного позже.'};throw new TeamError((messages[r.status]||'Сервис команды временно недоступен (HTTP '+r.status+'). Повторите позже.')+apiDiagnosticText(details),r.status,details.code);}
       if(!r.headers.get('content-type')?.startsWith('application/json'))throw new Error('Неверный ответ команды.');
       const reader=r.body?.getReader();if(!reader)throw new Error('Не удалось проверить ответ команды.');
       let bytes=0,body='';const decoder=new TextDecoder('utf-8',{fatal:true});
       try{for(;;){const {done,value}=await reader.read();if(done)break;bytes+=value.byteLength;if(bytes>1000000){await reader.cancel();throw new Error('Ответ команды слишком большой.');}body+=decoder.decode(value,{stream:true});}body+=decoder.decode();return JSON.parse(body);}finally{reader.releaseLock();}
-    }catch(e){if(e.name==='AbortError'||e instanceof TypeError||e instanceof SyntaxError)throw new Error('Нет связи с командой. Проверьте интернет.');throw e;}finally{clearTimeout(timer);}
+    }catch(e){if(e.name==='AbortError'||e instanceof TypeError||e instanceof SyntaxError){const error=new TeamError('Нет связи с командой. Проверьте интернет.',0);error.networkFailure=e.name==='AbortError'||e instanceof TypeError;throw error;}throw e;}finally{clearTimeout(timer);}
   }
   async status(device){const r=await this.request(device,'status');if(!exact(r,'name,role,state')||!['active','pending','unregistered','revoked'].includes(r.state)||!(r.role===null||ROLES.includes(r.role))||!(r.name===null||text(r.name)))throw new Error('Не удалось проверить подключение.');return r;}
   async members(device,op='directory'){
@@ -47,7 +52,7 @@ export class TeamClient {
   }
   directory(device){return this.members(device);}
   pending(device){return this.members(device,'pending');}
-  async invite(device,name,role){if(!text(name)||!['neurologist','intensivist','cardiologist','bot'].includes(role))throw new Error('Укажите имя и специальность.');const id=randomTeamID(),r=await this.request(device,'invite',{name,role,id});if(!exact(r,'expires,id')||r.id!==id||!Number.isSafeInteger(r.expires)||r.expires<=this.now())throw new Error('Приглашение не подтверждено.');return r;}
+  async invite(device,name,role){if(typeof name==='string')name=name.normalize('NFC');if(!text(name)||!['neurologist','intensivist','cardiologist','bot'].includes(role))throw new Error('Укажите имя и специальность.');const id=randomTeamID(),r=await this.request(device,'invite',{name,role,id});if(!exact(r,'expires,id')||r.id!==id||!Number.isSafeInteger(r.expires)||r.expires<=this.now())throw new Error('Приглашение не подтверждено.');return r;}
   async claim(device,id){if(!LINK.test(id))throw new Error('Приглашение неполное.');const r=await this.request(device,'claim',{id});if(!exact(r,'state')||!['pending','active'].includes(r.state))throw new Error('Заявка не подтверждена.');return r;}
   async change(device,op,deviceId){if(!['approve','revoke'].includes(op)||!ID.test(deviceId))throw new Error('Неверное подключение.');const r=await this.request(device,op,{deviceId});if(!exact(r,'state')||!['active','revoked'].includes(r.state))throw new Error('Изменение не подтверждено.');return r;}
   async create(device,{group,ttlMinutes,entries},base){

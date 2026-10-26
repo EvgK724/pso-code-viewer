@@ -26,6 +26,7 @@ let queuedIncoming = location.hash, activeIncoming = null;
 let workerReady = null, pushBusy = false, pushEnabled = false, pushSupported = false, pushRefreshPending = false;
 let pushPublicKey = '', pushSubscription = null;
 let teamState={state:'unregistered',role:null,name:null}, teamMembers=[], teamBusy=false, joinID='', inviteLink='';
+let lastConfirmedTeam=null, teamConnectionMessage='';
 let appUpdates=null, appUpdateAvailable=false;
 let organizerPin=null, invitationOrganizer=null;
 let activeBox='inbox', inboxItems=[], inboxNext=null, inboxBusy=false, directPhoto=null, photoURL='', previewURL='', photoBusy=false, directPendingBusy=false, discardPendingConfirmed=false;
@@ -69,7 +70,7 @@ function setBusy(value) {
   $('inbox-refresh').disabled=value||inboxBusy||!ready;$('inbox-more').disabled=value||inboxBusy||!inboxNext;
   $('retry-pending').disabled=value||directPendingBusy||!ready;
   $('discard-pending').disabled=value||directPendingBusy||!ready;
-  $('device-unlock-enable').disabled=value||!ready||teamState.state!=='active';
+  $('device-unlock-enable').disabled=value||teamBusy||!ready||teamState.state!=='active';
   $('copy-link').disabled = value || !demoLink;
   $('copy-demo-compact').disabled = value || !demoLink;
   $('copy-composed').disabled = value || !$('output-link').value;
@@ -83,13 +84,16 @@ function setBusy(value) {
   flushIncoming();
 }
 function flushIncoming() {
-  if (busy || !ready || document.hidden || activeIncoming || !queuedIncoming) return;
+  if (busy || incomingTeamBlocked(queuedIncoming) || !ready || document.hidden || activeIncoming || !queuedIncoming) return;
   // Recheck after the current operation has finished updating the UI.
   Promise.resolve().then(() => {
-    if (busy || !ready || document.hidden || activeIncoming || !queuedIncoming) return;
+    if (busy || incomingTeamBlocked(queuedIncoming) || !ready || document.hidden || activeIncoming || !queuedIncoming) return;
     const hash = queuedIncoming; queuedIncoming = '';
     void handleIncoming(hash);
   });
+}
+function incomingTeamBlocked(hash) {
+  return teamBusy || !!(directClient && hash?.startsWith('#m=') && teamState.state!=='active');
 }
 function suspendSensitive() {
   // A notification can navigate an existing hidden window before focusing it.
@@ -98,12 +102,12 @@ function suspendSensitive() {
   if (activeIncoming?.pending && activeIncoming.generation === generation && !queuedIncoming) queuedIncoming = activeIncoming.hash;
   clearSensitive();deviceUnlock?.clear();
 }
-function showMode(mode) {
+function showMode(mode, {preserveNotice=false} = {}) {
   clearSensitive(); const read = mode === 'read' || !!(teamClient && !canReview());
   $('read-panel').hidden = !read; $('write-panel').hidden = read;
   $('direct-panel').hidden=!directClient||!read;
   $('legacy-open').hidden=!!directClient&&!read;
-  $('show-read').setAttribute('aria-pressed', String(read)); $('show-write').setAttribute('aria-pressed', String(!read)); if (ready) say('');
+  $('show-read').setAttribute('aria-pressed', String(read)); $('show-write').setAttribute('aria-pressed', String(!read)); if (ready&&!preserveNotice) say('');
 }
 function messageCaption() {
   if (teamClient) return 'Проверочная история';
@@ -261,12 +265,13 @@ async function reveal(input, fromIncoming = false) {
 
 function pushStatus(message) { $('push-status').textContent = message; }
 function updatePushButtons() {
-  const blocked = busy || pushBusy || !ready || !pushSupported;
+  const teamBlocked=!!teamClient&&(teamBusy||['unavailable','revoked'].includes(teamState.state));
+  const blocked = busy || pushBusy || teamBlocked || !ready || !pushSupported;
   $('push-enable').disabled = blocked;
   $('push-enable').hidden = pushEnabled;
   $('push-test').disabled = blocked || !pushEnabled;
   $('push-test').hidden = !pushEnabled;
-  $('push-disable').disabled = busy || pushBusy || !ready || !pushSubscription;
+  $('push-disable').disabled = busy || pushBusy || teamBlocked || !ready || !pushSubscription;
   $('push-disable').hidden = !pushSubscription;
 }
 function notificationMessage(status) {
@@ -277,6 +282,7 @@ async function finishPushAction() {
   if (pushRefreshPending) { pushRefreshPending = false; await refreshNotifications(); }
 }
 async function refreshNotifications(checkStatus = false) {
+  if(teamBusy||(teamClient&&['unavailable','revoked'].includes(teamState.state)))return;
   if (!pushClient || !pushSupported || !ready || !workerReady || globalThis.Notification.permission !== 'granted') return;
   if (pushBusy) { pushRefreshPending = true; return; }
   if (!checkStatus && !pushEnabled) return;
@@ -284,8 +290,10 @@ async function refreshNotifications(checkStatus = false) {
   try {
     const registration = await workerReady;
     pushSubscription = await registration.pushManager.getSubscription();
+    if(teamBusy)return;
     if (!pushSubscription) { pushEnabled = false; pushStatus('Уведомления выключены. Нажмите «Включить уведомления».'); return; }
     if (checkStatus && await pushClient.status(device) !== 'enabled') { pushEnabled = false; pushStatus('Уведомления выключены. Нажмите «Включить уведомления».'); return; }
+    if(teamBusy)return;
     const status = await pushClient.register(device,pushSubscription,await notificationContacts());
     pushEnabled = status === 'enabled';
     pushStatus(pushEnabled ? 'Уведомления включены на этом телефоне.' : 'Сервис не включил уведомления. Повторите подключение.');
@@ -304,7 +312,7 @@ async function initNotifications() {
   await refreshNotifications(true);
 }
 $('push-enable').addEventListener('click', async () => {
-  if (busy || pushBusy || !ready || !pushSupported) return;
+  if (busy || pushBusy || teamBusy || (teamClient&&['unavailable','revoked'].includes(teamState.state)) || !ready || !pushSupported) return;
   pushBusy = true; updatePushButtons();
   try {
     // Must be the first asynchronous browser operation in the user click.
@@ -322,7 +330,7 @@ $('push-enable').addEventListener('click', async () => {
   finally { await finishPushAction(); }
 });
 $('push-disable').addEventListener('click', async () => {
-  if (busy || pushBusy || !ready || !pushSubscription) return;
+  if (busy || pushBusy || teamBusy || (teamClient&&['unavailable','revoked'].includes(teamState.state)) || !ready || !pushSubscription) return;
   pushBusy = true; pushRefreshPending = false; updatePushButtons();
   try {
     const status = await pushClient.unregister(device);
@@ -336,7 +344,7 @@ $('push-disable').addEventListener('click', async () => {
   finally { await finishPushAction(); }
 });
 $('push-test').addEventListener('click', async () => {
-  if (busy || pushBusy || !ready || !pushEnabled) return;
+  if (busy || pushBusy || teamBusy || (teamClient&&['unavailable','revoked'].includes(teamState.state)) || !ready || !pushEnabled) return;
   pushBusy = true; updatePushButtons();
   try { pushStatus(notificationMessage(await pushClient.test(device)) + ' Проверочное уведомление открывает главную страницу.'); }
   catch { pushStatus('Проверочное уведомление не подтверждено. Проверьте интернет и повторите.'); }
@@ -472,7 +480,7 @@ $('save-contact').addEventListener('click', async () => {
 });
 async function handleIncoming(hash) {
   if (!hash) return;
-  if (busy || !ready || document.hidden || activeIncoming) { queuedIncoming = hash; return; }
+  if (busy || incomingTeamBlocked(hash) || !ready || document.hidden || activeIncoming) { queuedIncoming = hash; return; }
   const request = {hash, pending:true, generation};
   activeIncoming = request;
   clearSensitive(); setCandidate(null);
@@ -505,22 +513,44 @@ addEventListener('pagehide', suspendSensitive);
 
 const roleLabels={admin:'Администратор',neurologist:'Невролог',intensivist:'Реаниматолог',cardiologist:'Кардиолог',bot:'Бот поступлений'};
 function canReview(){return teamState.state==='active'&&['admin','neurologist'].includes(teamState.role);}
+function canAdmin(){return teamState.state==='active'&&teamState.role==='admin';}
+function actionError(error,stage){
+  const status=Number.isInteger(error?.status)&&error.status>=100&&error.status<=599?' (HTTP '+error.status+')':'';
+  return stage+': '+(error?.message||'Не удалось завершить действие.')+status;
+}
+function teamRefreshFailed(error,stage){
+  teamMembers=[];
+  if(error?.status===403||error?.status===401){
+    lastConfirmedTeam=null;teamState={state:'revoked',role:null,name:null};teamConnectionMessage='';
+  }else{
+    teamState={state:'unavailable',role:null,name:null};
+    teamConnectionMessage=actionError(error,stage)+' Действия недоступны. Нажмите «Обновить».';
+  }
+  clearSensitive();deviceUnlock?.clear();
+  inboxItems=[];inboxNext=null;$('inbox-list').replaceChildren();
+}
 function updateTeamButtons(){
   if(!teamClient)return;
   const blocked=busy||teamBusy||!ready;
-  for(const id of ['team-refresh','team-claim','invite-create'])$(id).disabled=blocked;
-  $('team-claim').disabled=blocked||!joinID||!standalone;
+  $('team-refresh').disabled=blocked;
+  $('invite-create').disabled=blocked||!canAdmin();
+  $('team-claim').disabled=blocked||!joinID||!standalone||['unavailable','revoked'].includes(teamState.state);
   $('copy-invite').disabled=blocked||!inviteLink;
-  for(const button of $('team-pending').querySelectorAll('button'))button.disabled=blocked||(button.teamConfirmation&&!button.teamConfirmation.checked);
+  for(const id of ['team-pending','team-members'])for(const button of $(id).querySelectorAll('button'))button.disabled=blocked||!canAdmin()||(button.teamConfirmation&&!button.teamConfirmation.checked);
+  $('device-unlock-enable').disabled=blocked||teamState.state!=='active';
+  updatePushButtons();
 }
 function renderTeam(){
   if(!teamClient){$('team-panel').hidden=true;$('team-admin').hidden=true;return;}
   $('team-panel').hidden=false;
-  $('team-state').textContent=teamState.state==='active'?(teamState.name+' · '+roleLabels[teamState.role]):({pending:'Подключение ожидает подтверждения администратора.',revoked:'Доступ этого телефона отключён.',unregistered:'Откройте приглашение от администратора.',unavailable:'Нет связи с командой. Повторите подключение.'})[teamState.state];
+  const displayTeam=teamState.state==='unavailable'?lastConfirmedTeam:teamState;
+  const identity=displayTeam?.state==='active'?displayTeam.name+' · '+roleLabels[displayTeam.role]:'';
+  $('team-state').textContent=teamState.state==='active'?identity:teamState.state==='unavailable'?(identity?identity+'. ':'')+(teamConnectionMessage||'Нет связи с командой. Действия недоступны. Нажмите «Обновить».'):({pending:'Подключение ожидает подтверждения администратора.',revoked:'Доступ этого телефона отключён.',unregistered:'Откройте приглашение от администратора.'})[teamState.state];
   $('show-write').hidden=!canReview();
-  if(!canReview())showMode('read');
+  if(!canReview())showMode('read',{preserveNotice:true});
   if(directClient){$('show-read').textContent='Входящие';$('show-write').textContent='Написать';$('direct-panel').hidden=teamState.state!=='active';$('inbox-status').textContent=teamState.state==='active'?'':$('team-state').textContent;}
-  $('team-admin').hidden=teamState.state!=='active'||teamState.role!=='admin';
+  // The last confirmed role is display-only; all actions use teamState.
+  $('team-admin').hidden=displayTeam?.state!=='active'||displayTeam?.role!=='admin';
   $('team-my-code').textContent=selfContact?.fingerprint||'';
   $('team-code-box').hidden=!['pending','active'].includes(teamState.state);
   updateTeamButtons();
@@ -528,18 +558,27 @@ function renderTeam(){
 async function refreshTeam(){
   if(!teamClient||!device||teamBusy)return;
   teamBusy=true;updateTeamButtons();
-  try{teamState=await teamClient.status(device);teamMembers=teamState.state==='active'?await teamClient.directory(device):[];}
-  catch{teamState={state:'unavailable',role:null,name:null};teamMembers=[];}
-  finally{teamBusy=false;renderTeam();}
-  if(directClient&&teamState.state==='active'){
-    try{organizerPin=await loadOrganizerCard();if(teamState.role==='admin'&&!organizerPin)organizerPin=await pinOrganizerCard(await exportPublicCard(device,teamState.name),{confirmed:true});}
-    catch(e){say(e.message,true);}
-    if(!organizerPin)$('organizer-missing').hidden=false;else $('organizer-missing').hidden=true;
+  let stage='Проверка подключения';
+  try{
+    teamState=await teamClient.status(device);teamConnectionMessage='';
+    lastConfirmedTeam=teamState.state==='active'?{...teamState}:null;
+    stage='Не удалось обновить список команды';
+    teamMembers=teamState.state==='active'?await teamClient.directory(device):[];
+    if(teamState.state!=='active'){clearSensitive();deviceUnlock?.clear();inboxItems=[];inboxNext=null;$('inbox-list').replaceChildren();}
+    if(directClient&&teamState.state==='active'){
+      try{organizerPin=await loadOrganizerCard();if(teamState.role==='admin'&&!organizerPin)organizerPin=await pinOrganizerCard(await exportPublicCard(device,teamState.name),{confirmed:true});}
+      catch(e){say(e.message,true);}
+      $('organizer-missing').hidden=!!organizerPin;
+    }
+    if(canAdmin())await renderTeamAdmin();
   }
-  if(teamState.state==='active'&&teamState.role==='admin')await renderTeamAdmin();
-  if(directClient&&teamState.state==='active'){void refreshInbox();void refreshPending();}
-  if(deviceUnlock&&teamState.state==='active')void refreshUnlock();
-  if(pushEnabled)void refreshNotifications();
+  catch(error){teamRefreshFailed(error,stage);}
+  finally{teamBusy=false;renderTeam();flushIncoming();}
+  if(teamState.state!=='active')return;
+  // Do not burst inbox, device-auth and push requests after a team operation.
+  if(directClient){await refreshInbox();await refreshPending();}
+  if(deviceUnlock)await refreshUnlock();
+  if(pushEnabled)await refreshNotifications();
 }
 async function notificationContacts(){
   const local=await loadContacts(),seen=new Set(local.map(c=>c.id));
@@ -568,18 +607,18 @@ async function renderTeamAdmin(){
       const code=document.createElement('p');code.className='device-id fingerprint';code.textContent=member.fingerprint;
       const label=document.createElement('label');label.className='check-label';const check=document.createElement('input');check.type='checkbox';const wording=document.createElement('span');wording.textContent='Сверил этот код с врачом лично или по известному номеру';label.append(check,wording);
       const approve=document.createElement('button');approve.type='button';approve.className='button button-secondary';approve.textContent='Подтвердить';approve.disabled=true;approve.teamConfirmation=check;
-      check.addEventListener('change',()=>{approve.disabled=!check.checked||busy||teamBusy;});
-      approve.addEventListener('click',async()=>{if(!check.checked||busy||teamBusy)return;teamBusy=true;updateTeamButtons();try{await teamClient.change(device,'approve',member.id);say('Подключение подтверждено.');}catch(e){say(e.message,true);}finally{teamBusy=false;await refreshTeam();}});
+      check.addEventListener('change',()=>{approve.disabled=!check.checked||busy||teamBusy||!canAdmin();});
+      approve.addEventListener('click',async()=>{if(!check.checked||busy||teamBusy||!canAdmin())return;teamBusy=true;updateTeamButtons();approve.textContent='Подтверждаем…';say('Подтверждаем подключение телефона…');try{await teamClient.change(device,'approve',member.id);row.hidden=true;say('Подключение подтверждено.');}catch(e){say(actionError(e,'Подтверждение телефона'),true);}finally{approve.textContent='Подтвердить';teamBusy=false;await refreshTeam();}});
       row.append(name,code,label,approve);$('team-pending').append(row);
     }
     if(!pending.length){const empty=document.createElement('p');empty.textContent='Новых заявок нет.';$('team-pending').append(empty);}
     $('team-members').replaceChildren();
     for(const member of teamMembers){
       const row=document.createElement('div');row.className='contact-item';const name=document.createElement('strong');name.textContent=member.name+' · '+roleLabels[member.role];row.append(name);
-      if(member.id!==selfContact.id){const remove=document.createElement('button');remove.type='button';remove.className='button button-secondary';remove.textContent='Отключить';let confirm=false;remove.addEventListener('click',async()=>{if(busy||teamBusy)return;if(!confirm){confirm=true;remove.textContent='Подтвердить отключение';return;}teamBusy=true;updateTeamButtons();try{await teamClient.change(device,'revoke',member.id);say('Доступ отключён.');}catch(e){say(e.message,true);}finally{teamBusy=false;await refreshTeam();}});row.append(remove);}
+      if(member.id!==selfContact.id){const remove=document.createElement('button');remove.type='button';remove.className='button button-secondary';remove.textContent='Отключить';let confirm=false;remove.addEventListener('click',async()=>{if(busy||teamBusy||!canAdmin())return;if(!confirm){confirm=true;remove.textContent='Подтвердить отключение';return;}teamBusy=true;updateTeamButtons();try{await teamClient.change(device,'revoke',member.id);say('Доступ отключён.');}catch(e){say(e.message,true);}finally{teamBusy=false;await refreshTeam();}});row.append(remove);}
       $('team-members').append(row);
     }
-  }catch(e){const message=document.createElement('p');message.textContent=e.message;$('team-pending').append(message);}
+  }catch(e){if(e.status===403||e.status===401)teamRefreshFailed(e,'Проверка доступа');const message=document.createElement('p');message.textContent=e.message;$('team-pending').append(message);}
 }
 async function composeTeamReview(){
   if(!canReview()||teamBusy){say('Проверочные истории отправляют подключённые неврологи.',true);return;}
@@ -605,13 +644,13 @@ async function composeTeamReview(){
 $('team-refresh').addEventListener('click',()=>refreshTeam());
 $('copy-join').addEventListener('click',()=>copyText($('join-link').value,'join-link','Приглашение скопировано. Откройте синий значок → «Вставить и открыть».'));
 $('team-claim').addEventListener('click',async()=>{
-  if(!teamClient||!joinID||!standalone||busy||teamBusy)return;teamBusy=true;updateTeamButtons();
+  if(!teamClient||!joinID||!standalone||busy||teamBusy||['unavailable','revoked'].includes(teamState.state))return;teamBusy=true;updateTeamButtons();
   try{if(directClient&&!organizerPin)throw new Error('Сначала подтвердите ключ организатора по коду ниже.');await teamClient.claim(device,joinID);joinID='';$('join-panel').hidden=true;$('join-link').value='';say('Заявка отправлена. Сообщите администратору контрольный код ниже.');}
   catch(e){say(e.message,true);}finally{teamBusy=false;await refreshTeam();}
 });
 $('invite-form').addEventListener('submit',async event=>{
   event.preventDefault();if(!teamClient||busy||teamBusy||teamState.role!=='admin'||teamState.state!=='active')return;
-  teamBusy=true;updateTeamButtons();try{const result=await teamClient.invite(device,$('invite-name').value.trim(),$('invite-role').value);inviteLink=directClient?await trustedInvitationURL(appBase,result.id,await exportPublicCard(device,teamState.name)):appBase+'#join='+result.id;$('invite-link').value=inviteLink;$('invite-output').hidden=false;say('Приглашение готово. Передайте его только этому врачу.');}catch(e){say(e.message,true);}finally{teamBusy=false;updateTeamButtons();}
+  teamBusy=true;updateTeamButtons();try{const result=await teamClient.invite(device,$('invite-name').value.trim(),$('invite-role').value);inviteLink=directClient?await trustedInvitationURL(appBase,result.id,await exportPublicCard(device,teamState.name)):appBase+'#join='+result.id;$('invite-link').value=inviteLink;$('invite-output').hidden=false;say('Приглашение готово. Передайте его только этому врачу.');}catch(e){say(e.message,true);}finally{teamBusy=false;updateTeamButtons();flushIncoming();}
 });
 $('copy-invite').addEventListener('click',()=>copyText(inviteLink,'invite-link','Приглашение скопировано.'));
 
@@ -648,9 +687,8 @@ async function init() {
   if(teamClient) { $('message-caption').value='test';$('encrypt').textContent=directClient?'Отправить врачу':'Создать проверочную ссылку';$('push-compose-help').hidden=false; }
   $('direct-fields').hidden=!directClient;$('direct-panel').hidden=!directClient;
   $('legacy-open').open=!directClient;
-  if(directClient){$('show-read').textContent='Входящие';$('show-write').textContent='Написать';$('compose-surname').required=false;$('legacy-output').hidden=true;void refreshInbox();setInterval(()=>{if(!document.hidden){void refreshInbox();void retryPending(false);}},60000);}
+  if(directClient){$('show-read').textContent='Входящие';$('show-write').textContent='Написать';$('compose-surname').required=false;$('legacy-output').hidden=true;setInterval(async()=>{if(!document.hidden){await refreshInbox();await retryPending(false);}},60000);}
   $('device-unlock-settings').hidden=!deviceUnlock;
-  if(deviceUnlock)void refreshUnlock();
   void initNotifications();
 }
 $('app-update').addEventListener('click',async()=>{
@@ -683,16 +721,17 @@ function renderInbox(){
   if(!inboxItems.length)$('inbox-status').textContent=activeBox==='inbox'?'Новых сообщений пока нет.':'Отправленных сообщений пока нет.';
 }
 async function refreshInbox(more=false){
-  if(!directClient||!ready||teamState.state!=='active'||inboxBusy||document.hidden)return;
+  if(!directClient||!ready||teamBusy||teamState.state!=='active'||inboxBusy||document.hidden)return;
   const box=activeBox;inboxBusy=true;setBusy(busy);$('inbox-status').textContent='Обновляем…';
   try{const r=await directClient.list(device,box,more?inboxNext:null);if(box!==activeBox)return;
     inboxItems=more?[...inboxItems,...r.items.filter(m=>!inboxItems.some(old=>old.id===m.id))]:r.items;inboxNext=r.next;renderInbox();if(inboxItems.length)$('inbox-status').textContent=activeBox==='outbox'?'«Открыто» означает просмотр сообщения, а не выполненную консультацию.':'Сообщения доступны до 24 часов.';
     if(activeBox==='inbox'&&navigator.setAppBadge){const unread=inboxItems.filter(m=>!m.openedAt).length;try{if(unread)await navigator.setAppBadge(unread);else await navigator.clearAppBadge?.();}catch{}}
-  }catch(e){$('inbox-status').textContent=e.status===403?'Доступ этого телефона отключён.':e.message;if(e.status===403){clearSensitive();inboxItems=[];inboxNext=null;$('inbox-list').replaceChildren();}}
+  }catch(e){$('inbox-status').textContent=e.status===403?'Доступ этого телефона отключён.':e.message;if(e.status===403){teamRefreshFailed(e,'Проверка доступа');renderTeam();}}
   finally{inboxBusy=false;setBusy(busy);}
 }
 async function revealDirect(id,fromIncoming=false){
   if(!directClient||busy||!ready)return;
+  if(teamBusy||teamState.state!=='active'){say('Сначала обновите подключение к команде.',true);return;}
   showMode('read');const current=generation;setBusy(true);say('Открываем сообщение…');
   if(fromIncoming&&activeIncoming)activeIncoming.generation=current;
   try{
@@ -734,9 +773,10 @@ async function refreshPending(){
   catch{$('pending-count').textContent='Очередь этого телефона недоступна.';}
 }
 async function retryPending(announce=true){
-  if(!directClient||!ready||busy||directPendingBusy||document.hidden||!canReview())return;
+  if(!directClient||!ready||busy||teamBusy||directPendingBusy||document.hidden||!canReview())return;
   directPendingBusy=true;setBusy(busy);let sent=0;
   try{for(const data of await loadPending()){
+    if(teamBusy||!canReview())break;
     try{await directClient.create(device,data);await removePending(data.id);sent++;}
     catch(e){if(announce)say(e.status===409?'Состав получателей изменился. Старая зашифрованная запись не отправлена. Создайте её заново после удаления из очереди.':e.message,true);break;}
   }if(sent&&announce)say('Сохранено для получателей: '+sent+'.');await refreshPending();void refreshInbox();}
@@ -763,12 +803,12 @@ async function composeDirectReview(){
   finally{content=null;setBusy(false);}
 }
 async function refreshUnlock(){
-  if(!deviceUnlock||!ready||teamState.state!=='active')return;
+  if(!deviceUnlock||!ready||teamBusy||teamState.state!=='active')return;
   try{const s=await deviceUnlock.status(device);$('device-unlock-state').textContent=s.enabled?'Подтверждение при открытии включено.':'Можно подтверждать открытие Face ID или кодом телефона.';$('device-unlock-enable').hidden=s.enabled;}
   catch{$('device-unlock-state').textContent='Не удалось проверить защиту устройства.';}
 }
 $('device-unlock-enable').addEventListener('click',async()=>{
-  if(!deviceUnlock||busy||!ready)return;setBusy(true);
+  if(!deviceUnlock||busy||teamBusy||!ready||teamState.state!=='active')return;setBusy(true);
   try{await deviceUnlock.enroll(device);say('Подтверждение на этом телефоне включено.');await refreshUnlock();}catch(e){say(e.message||'Не удалось включить подтверждение.',true);}finally{setBusy(false);}
 });
 $('box-inbox').addEventListener('click',()=>{activeBox='inbox';inboxItems=[];inboxNext=null;void refreshInbox();});
@@ -789,7 +829,7 @@ $('compose-photo').addEventListener('change',async()=>{
   catch(e){if(current===generation&&!document.hidden)$('photo-status').textContent=e.message;}
   finally{photoBusy=false;setBusy(busy);}
 });
-addEventListener('online',()=>{void refreshInbox();void retryPending(false);});
+addEventListener('online',async()=>{await refreshInbox();await retryPending(false);});
 async function renderDirectAdmin(){
   if(teamState.state!=='active'||teamState.role!=='admin')return;
   $('team-pending').replaceChildren();$('team-members').replaceChildren();
@@ -802,8 +842,19 @@ async function renderDirectAdmin(){
       const old=document.createElement('select');old.setAttribute('aria-label','Вместо прежнего телефона');const first=document.createElement('option');first.value='';first.textContent='Новый участник';old.append(first);
       for(const previous of members.filter(m=>m.id!==member.id&&m.role!=='admin'&&m.state!=='pending')){const option=document.createElement('option');option.value=previous.id;option.textContent='Заменить телефон: '+previous.name+(previous.state==='revoked'?' · отключён':'');old.append(option);}
       const approve=document.createElement('button');approve.type='button';approve.className='button button-primary';approve.textContent='Подтвердить подключение';approve.disabled=true;approve.teamConfirmation=check;
-      check.addEventListener('change',()=>{approve.disabled=!check.checked||busy||teamBusy;});
-      approve.addEventListener('click',async()=>{if(!check.checked||busy||teamBusy)return;teamBusy=true;updateTeamButtons();try{if(old.value){const previous=members.find(m=>m.id===old.value);const proof=await makeRecipientGrant(device,{...member,name:previous.name,role:previous.role});await directClient.replace(device,old.value,member.id,proof);}else{await teamClient.change(device,'approve',member.id);await directClient.certify(device,member.id,await makeRecipientGrant(device,member));}say(old.value?'Новый телефон подключён, прежний отключён. Старые сообщения на новый ключ не переносятся.':'Подключение подтверждено.');}catch(e){say(e.message,true);}finally{teamBusy=false;await refreshTeam();}});
+      check.addEventListener('change',()=>{approve.disabled=!check.checked||busy||teamBusy||!canAdmin();});
+      approve.addEventListener('click',async()=>{
+        if(!check.checked||busy||teamBusy||!canAdmin())return;
+        teamBusy=true;updateTeamButtons();approve.textContent='Подтверждаем…';
+        let stage=old.value?'Замена телефона':'Подтверждение телефона';say(stage+'…');
+        try{
+          if(old.value){const previous=members.find(m=>m.id===old.value);const proof=await makeRecipientGrant(device,{...member,name:previous.name,role:previous.role});await directClient.replace(device,old.value,member.id,proof);}
+          else{await teamClient.change(device,'approve',member.id);stage='Подписание доступа';say(stage+'…');await directClient.certify(device,member.id,await makeRecipientGrant(device,member));}
+          row.hidden=true;
+          say(old.value?'Новый телефон подключён, прежний отключён. Старые сообщения на новый ключ не переносятся.':'Подключение подтверждено.');
+        }catch(e){say(actionError(e,stage),true);}
+        finally{approve.textContent='Подтвердить подключение';teamBusy=false;await refreshTeam();}
+      });
       row.append(title,code,label,old,approve);$('team-pending').append(row);
     }
     if(!pending.length){const p=document.createElement('p');p.textContent='Новых заявок нет.';$('team-pending').append(p);}
@@ -813,15 +864,15 @@ async function renderDirectAdmin(){
       if(member.role!=='admin'&&member.state==='active'){
         const name=document.createElement('input');name.type='text';name.maxLength=60;name.value=member.name;name.setAttribute('aria-label','Имя врача');
         const role=document.createElement('select');role.setAttribute('aria-label','Роль врача');for(const key of ['neurologist','intensivist','cardiologist','bot']){const o=document.createElement('option');o.value=key;o.textContent=roleLabels[key];role.append(o);}role.value=member.role;
-        const save=document.createElement('button');save.type='button';save.className='button button-secondary';save.textContent='Сохранить изменения';save.addEventListener('click',async()=>{if(busy||teamBusy)return;teamBusy=true;updateTeamButtons();try{await directClient.update(device,{id:member.id,name:name.value.trim(),role:role.value,state:'active',approvalProof:await makeRecipientGrant(device,{...member,name:name.value.trim(),role:role.value})});say('Данные участника обновлены.');}catch(e){say(e.message,true);}finally{teamBusy=false;await refreshTeam();}});
+        const save=document.createElement('button');save.type='button';save.className='button button-secondary';save.textContent='Сохранить изменения';save.addEventListener('click',async()=>{if(busy||teamBusy||!canAdmin())return;teamBusy=true;updateTeamButtons();try{await directClient.update(device,{id:member.id,name:name.value.trim(),role:role.value,state:'active',approvalProof:await makeRecipientGrant(device,{...member,name:name.value.trim(),role:role.value})});say('Данные участника обновлены.');}catch(e){say(e.message,true);}finally{teamBusy=false;await refreshTeam();}});
         const revoke=document.createElement('button');revoke.type='button';revoke.className='button button-secondary danger-button';revoke.textContent='Отключить доступ';let confirmed=false;
-        revoke.addEventListener('click',async()=>{if(busy||teamBusy)return;if(!confirmed){confirmed=true;revoke.textContent='Подтвердить отключение';return;}teamBusy=true;updateTeamButtons();try{await directClient.update(device,{id:member.id,name:member.name,role:member.role,state:'revoked'});say('Доступ отключён. Уже просмотренное удалить с чужого телефона нельзя.');}catch(e){say(e.message,true);}finally{teamBusy=false;await refreshTeam();}});
-        const certify=document.createElement('button');certify.type='button';certify.className='button button-secondary';certify.textContent='Подтвердить ключ для новых сообщений';let checked=false;certify.addEventListener('click',async()=>{if(busy||teamBusy)return;if(!checked){checked=true;certify.textContent='Код сверил — подписать доступ';return;}teamBusy=true;try{await directClient.certify(device,member.id,await makeRecipientGrant(device,member));say('Ключ подписан организатором.');}catch(e){say(e.message,true);}finally{teamBusy=false;await refreshTeam();}});
+        revoke.addEventListener('click',async()=>{if(busy||teamBusy||!canAdmin())return;if(!confirmed){confirmed=true;revoke.textContent='Подтвердить отключение';return;}teamBusy=true;updateTeamButtons();try{await directClient.update(device,{id:member.id,name:member.name,role:member.role,state:'revoked'});say('Доступ отключён. Уже просмотренное удалить с чужого телефона нельзя.');}catch(e){say(e.message,true);}finally{teamBusy=false;await refreshTeam();}});
+        const certify=document.createElement('button');certify.type='button';certify.className='button button-secondary';certify.textContent='Подтвердить ключ для новых сообщений';let checked=false;certify.addEventListener('click',async()=>{if(busy||teamBusy||!canAdmin())return;if(!checked){checked=true;certify.textContent='Код сверил — подписать доступ';return;}teamBusy=true;try{await directClient.certify(device,member.id,await makeRecipientGrant(device,member));say('Ключ подписан организатором.');}catch(e){say(e.message,true);}finally{teamBusy=false;await refreshTeam();}});
         inner.append(name,role,save,certify,revoke);
       }else{const p=document.createElement('p');p.textContent=member.state==='revoked'?'Для возврата создайте новое приглашение и подтвердите телефон.':'Устройство организатора.';inner.append(p);}
       row.append(inner);$('team-members').append(row);
     }
-  }catch(e){const p=document.createElement('p');p.textContent=e.message;$('team-members').append(p);}
+  }catch(e){if(e.status===403||e.status===401)teamRefreshFailed(e,'Проверка доступа');const p=document.createElement('p');p.textContent=e.message;$('team-members').append(p);}
 }
 
 

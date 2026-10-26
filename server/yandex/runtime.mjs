@@ -5,7 +5,7 @@ import {createTeamStore} from './team-store.mjs';
 import {createDirectStore} from './direct-store.mjs';
 import {createPushStore} from './push-store.mjs';
 import {createDeviceAuthStore} from './device-auth-store.mjs';
-import {createTeamHandler} from '../team-handler.mjs';
+import {createTeamHandler,safeServiceDiagnostic} from '../team-handler.mjs';
 import {createDirectHandler} from '../direct-handler.mjs';
 import {createPushHandler} from '../push-handler.mjs';
 import {createDeviceAuthHandler} from '../device-auth-handler.mjs';
@@ -32,14 +32,18 @@ export function composeStores(db){
  return {team,direct,push,auth};
 }
 export async function httpHandler(event,context){
+ let stage='configuration';
  try{
   if(process.env.PSO_SETUP_MODE!=='off')return jsonReply(503,{error:'setup_required'});
   const allowedOrigin=validateOrigin(process.env.PSO_VIEWER_ORIGIN);
   // Static shell requests need neither YDB nor a database session.
   if(!event?.path?.startsWith('/api/'))return createHttpRouter({allowedOrigin,handlers:{}})(event);
+  stage='database_connect';
   return await withDatabase(context,async db=>{
+   stage='organizer_check';
    const pinned=await db.transaction(tx=>tx.get('config:organizer'));
    if(!pinned||pinned.origin!==allowedOrigin)return jsonReply(503,{error:'organizer_setup_required'});
+   stage='handler_setup';
    const webauthn=await import('@simplewebauthn/server'),{team,direct,push,auth}=composeStores(db);
    const handlers={
     'pso-team':createTeamHandler({store:team,allowedOrigin}),
@@ -47,7 +51,8 @@ export async function httpHandler(event,context){
     'pso-push':createPushHandler({store:push,allowedOrigin}),
     'pso-device-auth':createDeviceAuthHandler({store:auth,webauthn,allowedOrigin})
    };
+   stage='dispatch';
    return createHttpRouter({allowedOrigin,handlers})(event);
   });
- }catch{return jsonReply(503,{error:'service_unavailable'});}
+ }catch(error){return jsonReply(503,{error:'service_unavailable',diagnostic:safeServiceDiagnostic(error,stage)});}
 }

@@ -131,7 +131,7 @@ test('service worker serves its own offline shell and leaves sibling app request
   for (const path of ['/', '/pso-code-viewer/']) {
     const handlers = new Map(), deleted = [], installed = [], lifecycle = [];
     const prefix = 'pso-viewer-' + encodeURIComponent(path) + '-shell-';
-    const current = prefix + 'github-v11-notification-open';
+    const current = prefix + 'github-v12-team-reliable';
     const unrelated = 'pso-viewer-%2Fanother-app%2F-shell-github-v1';
     const cached = {status:200, body:'offline-shell'};
     const cache = {
@@ -156,6 +156,7 @@ test('service worker serves its own offline shell and leaves sibling app request
     assert.ok(installed.includes('./sharing.mjs'), 'Compact-sharing logic must be available offline');
     assert.ok(installed.includes('./shortlinks.mjs') && installed.includes('./shortlink-config.mjs'), 'Client and configuration must update with the same offline shell');
     assert.ok(installed.includes('./team.mjs'), 'Team client updates with the shell');
+    assert.ok(installed.includes('./api-queue.mjs'), 'The request queue must update with all API clients');
     assert.ok(installed.includes('./updates.mjs'), 'Update controls are part of the same shell');
     assert.ok(installed.includes('./push.mjs'), 'Notification client must update with its shell');
     assert.ok(installed.every(file => new URL(file, origin + path + 'sw.js').pathname.startsWith(path)));
