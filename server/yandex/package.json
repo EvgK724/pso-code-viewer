@@ -1,0 +1,12 @@
+{
+  "name": "pso-yandex-runtime",
+  "version": "1.0.0",
+  "private": true,
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "ydb-sdk": "5.11.1",
+    "@simplewebauthn/server": "14.0.3"
+  }
+}
