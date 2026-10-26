@@ -1,7 +1,7 @@
 // Authenticated team directory and per-recipient encrypted group links.
 // Only the server assigns roles; invitations merely request administrator review.
 import {exportPublicCard, importPublicCard} from './exchange.mjs';
-import {runApiRequest,readApiError,apiDiagnosticText} from './api-queue.mjs';
+import {runApiRequest,readApiError,apiDiagnosticText,API_REQUEST_TIMEOUT_MS} from './api-queue.mjs';
 const DOMAIN='PSO-TEAM-v1\0', enc=new TextEncoder();
 const ROLES=['admin','neurologist','intensivist','cardiologist','bot'];
 const ID=/^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/, LINK=/^[A-Za-z0-9_-]{21}[AQgw]$/;
@@ -25,7 +25,7 @@ export async function teamEnvelope(device,op,data={},issued=Date.now()){
 }
 export class TeamError extends Error {constructor(message,status,code=''){super(message);this.status=status;this.code=code;}}
 export class TeamClient {
-  constructor(endpoint,{fetch:fetcher=globalThis.fetch.bind(globalThis),timeout=15000,now=Date.now,sleep,random}={}){
+  constructor(endpoint,{fetch:fetcher=globalThis.fetch.bind(globalThis),timeout=API_REQUEST_TIMEOUT_MS,now=Date.now,sleep,random}={}){
     const u=new URL(endpoint);if(u.protocol!=='https:'||u.username||u.password||u.search||u.hash)throw new Error('Неверный адрес команды.');
     this.endpoint=u.href;this.fetcher=fetcher;this.timeout=timeout;this.now=now;this.sleep=sleep;this.random=random;
   }

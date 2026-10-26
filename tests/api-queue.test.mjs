@@ -14,6 +14,29 @@ const endpoint='https://viewer.example/api/';
 const deferred=()=>{let resolve;const promise=new Promise(r=>resolve=r);return {promise,resolve};};
 const immediate=()=>new Promise(resolve=>setImmediate(resolve));
 
+test('all API clients wait for a slow server response without aborting or replaying it',async t=>{
+  t.mock.timers.enable({apis:['setTimeout']});
+  const cases=[
+    [options=>new TeamClient(endpoint+'team',options),client=>client.request(device,'approve',{deviceId:id}),{state:'active'}],
+    [options=>new DirectClient(endpoint+'direct',options),client=>client.request(device,'admin_certify',{deviceId:id}),{status:'ok'}],
+    [options=>new PushClient(endpoint+'push',options),client=>client.status(device),{status:'disabled'}],
+    [options=>new DeviceUnlockClient(endpoint+'auth',options),client=>client.status(device),{enabled:false}]
+  ];
+  for(const [create,request,body] of cases){
+    const started=deferred(),hold=deferred();let signal,calls=0;
+    const client=create({fetch:async(_url,options)=>{
+      calls++;signal=options.signal;started.resolve();
+      await hold.promise;return reply(body);
+    }});
+    const pending=request(client);await started.promise;
+    // Connection (10s), shared DB deadline (45s), cleanup and network transit.
+    t.mock.timers.tick(65000);
+    assert.equal(signal.aborted,false);
+    hold.resolve();await pending;
+    assert.equal(calls,1);
+  }
+});
+
 test('FIFO serializes work, and a failed item does not stop the next item',async()=>{
   const queue=createApiQueue(),hold=deferred(),started=deferred(),order=[];
   const first=queue(async()=>{order.push('one');started.resolve();await hold.promise;throw new Error('first failed');});

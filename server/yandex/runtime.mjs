@@ -13,12 +13,12 @@ import {createHttpRouter,jsonReply,validateOrigin} from './http.mjs';
 const require=createRequire(import.meta.url);
 const sdk=require('ydb-sdk');
 const silentLogger=Object.fromEntries(['trace','debug','info','warn','error','fatal'].map(k=>[k,()=>{}]));
-export async function withDatabase(context,callback){
+export async function withDatabase(context,callback,{requestTimeoutMs}={}){
  const token=context?.token?.access_token;
  if(typeof token!=='string'||!token)throw new Error('Service account required');
  const config=JSON.parse(await readFile(new URL('../../connection.json',import.meta.url),'utf8'));
  const driver=new sdk.Driver({endpoint:config.endpoint,database:config.database,authService:new sdk.TokenAuthService(token),logger:silentLogger,poolSettings:{minLimit:1,maxLimit:2}});
- try{if(!await driver.ready(10000))throw new Error('Database unavailable');return await callback(createYdbDatabase({driver}));}
+ try{if(!await driver.ready(10000))throw new Error('Database unavailable');return await callback(createYdbDatabase({driver,...(requestTimeoutMs===undefined?{}:{requestTimeoutMs})}));}
  finally{
   let timer;
   try{await Promise.race([driver.destroy().catch(()=>{}),new Promise(resolve=>{timer=setTimeout(resolve,1500);})]);}
@@ -41,7 +41,9 @@ export async function httpHandler(event,context){
   stage='database_connect';
   return await withDatabase(context,async db=>{
    stage='organizer_check';
-   const pinned=await db.transaction(tx=>tx.get('config:organizer'));
+   // One fresh, read-only key request per HTTP call. Never cache this pin:
+   // configuration changes must be observed before dispatching the next call.
+   const pinned=await db.read('config:organizer');
    if(!pinned||pinned.origin!==allowedOrigin)return jsonReply(503,{error:'organizer_setup_required'});
    stage='handler_setup';
    const webauthn=await import('@simplewebauthn/server'),{team,direct,push,auth}=composeStores(db);
@@ -53,6 +55,6 @@ export async function httpHandler(event,context){
    };
    stage='dispatch';
    return createHttpRouter({allowedOrigin,handlers})(event);
-  });
+  },{requestTimeoutMs:45000});
  }catch(error){return jsonReply(503,{error:'service_unavailable',diagnostic:safeServiceDiagnostic(error,stage)});}
 }

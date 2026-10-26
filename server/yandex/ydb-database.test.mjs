@@ -7,8 +7,10 @@ import {createYdbDatabase, ensureSchema, YdbDatabaseError} from './ydb-database.
 const require = createRequire(import.meta.url);
 const NOW = Date.UTC(2026, 9, 25);
 class YdbError extends Error {}
-const StatusCode = {ABORTED: 400040, UNAVAILABLE: 400050, SCHEME_ERROR: 400070,
-  TIMEOUT: 400090, ALREADY_EXISTS: 400130, NOT_FOUND: 400140, UNDETERMINED: 400170};
+const StatusCode = {UNAUTHORIZED: 400020, ABORTED: 400040, UNAVAILABLE: 400050,
+  OVERLOADED: 400060, SCHEME_ERROR: 400070, TIMEOUT: 400090, BAD_SESSION: 400100,
+  ALREADY_EXISTS: 400130, NOT_FOUND: 400140, SESSION_EXPIRED: 400150,
+  CANCELLED: 400160, UNDETERMINED: 400170, SESSION_BUSY: 400190};
 const error = (status, message = 'private database details') => {
   class SpecificError extends YdbError { static status = status; }
   return new SpecificError(message);
@@ -16,6 +18,7 @@ const error = (status, message = 'private database details') => {
 class Settings {
   withOperationParams(value) { this.operationParams = value; return this; }
   withIdempotent(value) { this.idempotent = value; return this; }
+  withKeepInCache(value) { this.keepInCache = value; return this; }
   withSyncMode() { return this; }
   withOperationTimeout(value) { this.operationTimeout = value; return this; }
   withCancelAfter(value) { this.cancelAfter = value; return this; }
@@ -56,6 +59,14 @@ function fixture(options = {}) {
         assert.equal(settings.idempotent, false, 'implicit SDK query retries must remain off');
         if (f.beforeQuery) await f.beforeQuery(query, params, control);
         if (f.queryFailures.length) throw f.queryFailures.shift();
+        if (control.beginTx && control.commitTx) {
+          assert.deepEqual(control.beginTx, {serializableReadWrite: {}});
+          assert.ok(query.startsWith('DECLARE $key AS Utf8;') && query.includes('SELECT key, value'), 'auto-commit path is read-only');
+          assert.equal(control.txId, undefined);
+          const row = data.get(params.$key);
+          const rows = row && (row.expiry === null || row.expiry > params.$now) ? [structuredClone(row)] : [];
+          return {resultSets: [{rows, truncated: f.truncated}]};
+        }
         if (control.beginTx) {
           assert.deepEqual(control.beginTx, {serializableReadWrite: {}});
           assert.equal(control.commitTx, false);
@@ -193,6 +204,115 @@ test('keys, cursors and JSON remain parameters even when they contain SQL punctu
   }
 });
 
+test('fresh point reads use one serializable auto-commit SELECT and never cache organizer data', async () => {
+  const f = fixture();
+  f.seed('config:organizer', {id: 'first'});
+  assert.deepEqual(await f.db.read('config:organizer'), {id: 'first'});
+  assert.equal(f.calls.length, 1);
+  assert.equal(f.commits.length, 0);
+  assert.equal(f.calls[0].settings.keepInCache, true);
+  f.seed('config:organizer', {id: 'replacement'});
+  assert.deepEqual(await f.db.read('config:organizer'), {id: 'replacement'});
+  f.data.delete('config:organizer');
+  assert.equal(await f.db.read('config:organizer'), null);
+});
+
+test('read budget permits an 8-second server query instead of cancelling it at 5 seconds', async () => {
+  const f = fixture();
+  f.seed('config:organizer', {id: 'current'});
+  f.beforeQuery = async () => {
+    const params = f.calls.at(-1).settings.operationParams;
+    const millis = duration => Number(duration.seconds || 0) * 1000 + Number(duration.nanos || 0) / 1000000;
+    if (millis(params.cancelAfter) < 8000 || millis(params.operationTimeout) < 8000) throw error(StatusCode.CANCELLED);
+  };
+  assert.deepEqual(await f.db.read('config:organizer'), {id: 'current'});
+  assert.equal(f.calls.length, 1);
+});
+
+test('cancelled read and unavailable transport retry fresh reads without writes or stale results', async () => {
+  const f = fixture();
+  f.seed('config:organizer', {id: 'old'});
+  f.queryFailures.push(error(StatusCode.CANCELLED), Object.assign(new Error('private transport details'), {code: 14}));
+  f.beforeQuery = async () => {
+    if (f.calls.length === 3) f.seed('config:organizer', {id: 'new'});
+  };
+  assert.deepEqual(await f.db.read('config:organizer'), {id: 'new'});
+  assert.equal(f.calls.length, 3);
+  assert.equal(f.sessions.length, 3);
+  assert.equal(f.commits.length, 0);
+  assert.equal(f.rollbacks.length, 0);
+  assert.equal(f.data.size, 1);
+});
+
+test('all safe-read transient statuses retry, but authorization and malformed data do not', async () => {
+  for (const status of [StatusCode.ABORTED, StatusCode.UNAVAILABLE, StatusCode.OVERLOADED,
+    StatusCode.TIMEOUT, StatusCode.BAD_SESSION, StatusCode.SESSION_EXPIRED,
+    StatusCode.CANCELLED, StatusCode.UNDETERMINED, StatusCode.SESSION_BUSY]) {
+    const f = fixture();
+    f.queryFailures.push(error(status));
+    assert.equal(await f.db.read('config:organizer'), null);
+    assert.equal(f.calls.length, 2);
+  }
+  for (const status of [StatusCode.UNAUTHORIZED, StatusCode.SCHEME_ERROR, StatusCode.NOT_FOUND]) {
+    const f = fixture();
+    f.queryFailures.push(error(status));
+    await assert.rejects(f.db.read('config:organizer'), e => e.code === 'database_unavailable'
+      && e.status === status && !e.message.includes('private') && !e.cause);
+    assert.equal(f.calls.length, 1);
+  }
+  const bad = fixture();
+  bad.data.set('config:organizer', {key: 'config:organizer', value: 'broken json', expiry: null});
+  await assert.rejects(bad.db.read('config:organizer'), {code: 'invalid_record'});
+  assert.equal(bad.calls.length, 1);
+});
+
+test('cancelled point reads stop at the attempt bound and preserve the status', async () => {
+  const f = fixture({maxAttempts: 2});
+  f.queryFailures.push(error(StatusCode.CANCELLED), error(StatusCode.CANCELLED), error(StatusCode.CANCELLED));
+  await assert.rejects(f.db.read('config:organizer'), {code: 'database_unavailable', status: StatusCode.CANCELLED});
+  assert.equal(f.calls.length, 2);
+  assert.equal(f.queryFailures.length, 1);
+});
+
+test('expired and truncated point reads cannot yield organizer data', async () => {
+  const f = fixture();
+  f.seed('config:organizer', {id: 'expired'}, NOW);
+  assert.equal(await f.db.read('config:organizer'), null);
+  f.seed('config:organizer', {id: 'current'});
+  f.truncated = true;
+  await assert.rejects(f.db.read('config:organizer'), {code: 'result_limit'});
+});
+
+test('one request budget spans reads and transactions; late reads cannot return stale success', async () => {
+  const f = fixture({requestTimeoutMs: 80, timeoutMs: 1000, operationTimeoutMs: 100});
+  f.seed('config:organizer', {id: 'current'});
+  assert.deepEqual(await f.db.read('config:organizer'), {id: 'current'});
+  await f.db.transaction(tx => tx.put('counter/one', {n: 1}));
+  await new Promise(resolve => setTimeout(resolve, 30));
+  let release;
+  const blocked = new Promise(resolve => { release = resolve; });
+  f.beforeQuery = async () => blocked;
+  const pending = f.db.read('config:organizer');
+  await assert.rejects(pending, {code: 'database_deadline'});
+  const duration = f.calls.at(-1).settings.operationParams.cancelAfter;
+  assert.ok(Number(duration.seconds || 0) * 1000 + Number(duration.nanos || 0) / 1000000 < 80);
+  release();
+  await new Promise(resolve => setTimeout(resolve, 5));
+  await assert.rejects(f.db.read('config:organizer'), {code: 'database_closed'});
+  await assert.rejects(f.db.transaction(tx => tx.put('counter/one', {n: 2})), {code: 'database_closed'});
+  assert.equal(JSON.parse(f.data.get('counter/one').value).n, 1);
+});
+
+test('expired overall request budget rejects new work before acquiring a session', async () => {
+  const f = fixture({requestTimeoutMs: 15});
+  await new Promise(resolve => setTimeout(resolve, 20));
+  await assert.rejects(f.db.read('config:organizer'), {code: 'database_deadline'});
+  assert.equal(f.sessions.length, 0);
+  for (const requestTimeoutMs of [0, -1, 110001, 1.5, null]) {
+    assert.throws(() => fixture({requestTimeoutMs}), {code: 'invalid_database_config'});
+  }
+});
+
 test('only definite ABORTED retries the full callback with fresh state', async () => {
   const f = fixture();
   f.commitFailures.push({error: error(StatusCode.ABORTED)});
@@ -231,7 +351,7 @@ test('concurrent serializable read-modify-write retries a conflict rather than l
 });
 
 test('uncertain commit is never replayed even if the server applied it', async () => {
-  for (const status of [StatusCode.UNDETERMINED, StatusCode.UNAVAILABLE, StatusCode.TIMEOUT]) {
+  for (const status of [StatusCode.UNDETERMINED, StatusCode.UNAVAILABLE, StatusCode.TIMEOUT, StatusCode.CANCELLED]) {
     const f = fixture();
     f.commitFailures.push({error: error(status), apply: true});
     let runs = 0;

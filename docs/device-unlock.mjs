@@ -1,7 +1,7 @@
 // Optional WebAuthn verification. Unlock tokens exist only in this page's memory.
 // The server, not a visual overlay, checks the token before returning ciphertext.
 import {exportPublicCard,deviceIdentity} from './exchange.mjs';
-import {runApiRequest} from './api-queue.mjs';
+import {runApiRequest,API_REQUEST_TIMEOUT_MS} from './api-queue.mjs';
 const DOMAIN='PSO-TEAM-v1\0', enc=new TextEncoder();
 const OPS=['status','enroll_begin','enroll_finish','unlock_begin','unlock_finish','reset'];
 const b64=x=>btoa(String.fromCharCode(...new Uint8Array(x))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
@@ -20,7 +20,7 @@ function serializeCredential(credential,registration){
   return {id:credential.id,rawId:b64(credential.rawId),type:'public-key',response,clientExtensionResults:credential.getClientExtensionResults?.()||{},authenticatorAttachment:credential.authenticatorAttachment||undefined};
 }
 export class DeviceUnlockClient{
-  constructor(endpoint,{fetch:fetcher=globalThis.fetch?.bind(globalThis),credentials=globalThis.navigator?.credentials,now=Date.now,timeout=15000}={}){
+  constructor(endpoint,{fetch:fetcher=globalThis.fetch?.bind(globalThis),credentials=globalThis.navigator?.credentials,now=Date.now,timeout=API_REQUEST_TIMEOUT_MS}={}){
     const u=new URL(endpoint);if(u.protocol!=='https:'||u.username||u.password||u.hash||u.search)throw new Error('Неверный адрес защиты.');
     this.endpoint=u.href;this.fetcher=fetcher;this.credentials=credentials;this.now=now;this.timeout=timeout;this.session=null;this.epoch=0;this.prompt=null;
   }

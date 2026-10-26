@@ -1,7 +1,7 @@
 // Direct delivery: signed requests, recipient-only inbox, encrypted local retries.
 import {exportPublicCard, importPublicCard} from './exchange.mjs';
 import {validateMessagePayload,inspectMessageToken} from './messages.mjs';
-import {runApiRequest,readApiError,apiDiagnosticText} from './api-queue.mjs';
+import {runApiRequest,readApiError,apiDiagnosticText,API_REQUEST_TIMEOUT_MS} from './api-queue.mjs';
 const DOMAIN='PSO-TEAM-v1\0', enc=new TextEncoder();
 const ID=/^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/, LINK=/^[A-Za-z0-9_-]{21}[AQgw]$/;
 const OPS=['create','inbox','outbox','open','ack','retry','admin_members','admin_update','admin_replace','directory','admin_certify'];
@@ -23,7 +23,7 @@ export async function directEnvelope(device,op,data,issued=Date.now()){
 }
 export class DirectError extends Error {constructor(message,status,code=''){super(message);this.status=status;this.code=code;}}
 export class DirectClient {
-  constructor(endpoint,{fetch:fetcher=globalThis.fetch.bind(globalThis),now=Date.now,timeout=25000,sleep,random}={}){
+  constructor(endpoint,{fetch:fetcher=globalThis.fetch.bind(globalThis),now=Date.now,timeout=API_REQUEST_TIMEOUT_MS,sleep,random}={}){
     const u=new URL(endpoint);if(u.protocol!=='https:'||u.username||u.password||u.search||u.hash)throw new Error('Неверный адрес сообщений.');
     this.endpoint=u.href;this.fetcher=fetcher;this.now=now;this.timeout=timeout;this.sleep=sleep;this.random=random;
   }

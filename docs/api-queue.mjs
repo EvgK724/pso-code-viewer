@@ -1,6 +1,9 @@
 // One page may refresh inbox, device protection and push at the same time.
 // Serialize signed API work so their shared database counters do not contend.
 // Callers create signatures and start network timeouts inside the queued work.
+// Yandex allows 10s to connect, then one 45s database budget plus cleanup.
+// Leave network headroom so a phone does not abort a still-running write.
+export const API_REQUEST_TIMEOUT_MS = 70000;
 export function createApiQueue() {
   let tail = Promise.resolve();
   return work => {

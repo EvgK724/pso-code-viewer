@@ -110,7 +110,8 @@ function remaining(deadline) {
  */
 export function createYdbDatabase({
   driver, now = Date.now, sdk: suppliedSdk,
-  timeoutMs = 15000, operationTimeoutMs = 5000, maxAttempts = 4,
+  timeoutMs = 30000, operationTimeoutMs = 10000, maxAttempts = 4,
+  requestTimeoutMs,
   maxOperations = 512, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)),
   random = Math.random
 } = {}) {
@@ -120,6 +121,8 @@ export function createYdbDatabase({
   integer(operationTimeoutMs, 1, timeoutMs, 'invalid_database_config');
   integer(maxAttempts, 1, 8, 'invalid_database_config');
   integer(maxOperations, 1, 4096, 'invalid_database_config');
+  if (requestTimeoutMs !== undefined) integer(requestTimeoutMs, 1, 110000, 'invalid_database_config');
+  const requestDeadline = requestTimeoutMs === undefined ? null : performance.now() + requestTimeoutMs;
   let poisoned = false;
   const wallNow = () => integer(now(), 0, MAX_EXPIRY_MS, 'invalid_clock');
   const opParams = (deadline, cap = operationTimeoutMs) => {
@@ -128,11 +131,16 @@ export function createYdbDatabase({
     return new sdk.OperationParams().withSyncMode().withOperationTimeout(duration).withCancelAfter(duration);
   };
   const querySettings = deadline => new sdk.ExecuteQuerySettings()
-    .withIdempotent(false).withOperationParams(opParams(deadline));
+    // Cache the parameterized query plan, never the returned data. Keep SDK
+    // retries off: the adapter decides which complete operations are safe.
+    .withIdempotent(false).withKeepInCache(true).withOperationParams(opParams(deadline));
 
   async function bounded(work) {
     if (poisoned) fail('database_closed');
-    const deadline = performance.now() + timeoutMs;
+    // HTTP work shares one budget across organizer check, authorization and
+    // action transactions, so a sequence of calls cannot outrun the client.
+    const budgetMs = requestDeadline === null ? timeoutMs : Math.min(timeoutMs, remaining(requestDeadline));
+    const deadline = performance.now() + budgetMs;
     const guard = {active: true};
     let timer;
     try {
@@ -145,7 +153,7 @@ export function createYdbDatabase({
             // adapter while a timed-out request could still be in flight.
             poisoned = true;
             reject(new YdbDatabaseError('database_deadline'));
-          }, timeoutMs);
+          }, budgetMs);
         })
       ]);
     } finally {
@@ -168,6 +176,44 @@ export function createYdbDatabase({
       if (row.expiry.getTime() <= wallNow()) return false;
     }
     return true;
+  }
+
+  /** Fresh, strongly consistent point read with no open transaction to commit.
+   * A failed read cannot have changed state, so unlike transaction(callback)
+   * it is safe to retry CANCELLED, TIMEOUT and uncertain transport outcomes.
+   */
+  async function read(key) {
+    validKey(key);
+    return bounded(async (deadline, guard) => {
+      for (let index = 0; index < maxAttempts; index++) {
+        if (!guard.active) fail('database_deadline');
+        try {
+          return await driver.tableClient.withSession(async session => {
+            const result = await session.executeQuery(QUERY.get, {
+              $key: sdk.TypedValues.utf8(key), $now: sdk.TypedValues.timestamp(new Date(wallNow()))
+            }, {beginTx: {serializableReadWrite: {}}, commitTx: true}, querySettings(deadline));
+            if (!guard.active) fail('database_deadline');
+            remaining(deadline);
+            const rows = nativeRows(result);
+            if (rows.length > 1 || (rows.length && rows[0].key !== key)) fail('invalid_result');
+            return rows.length && liveRow(rows[0]) ? decodeValue(rows[0].value) : null;
+          }, remaining(deadline));
+        } catch (error) {
+          if (!guard.active) fail('database_deadline');
+          const transient = ['ABORTED', 'UNAVAILABLE', 'OVERLOADED', 'TIMEOUT',
+            'BAD_SESSION', 'SESSION_EXPIRED', 'CANCELLED', 'UNDETERMINED', 'SESSION_BUSY']
+            .some(name => sdk.StatusCode[name] !== undefined && isStatus(sdk, error, name));
+          const transport = !(error instanceof YdbDatabaseError) && [4, 8, 14].includes(error?.code);
+          if ((!transient && !transport) || index + 1 === maxAttempts) {
+            if (error instanceof sdk.YdbError || typeof error?.code === 'number') throw safeDbError(sdk, error);
+            throw error;
+          }
+          const delay = Math.min(1000, 100 * 2 ** index) * (0.5 + 0.5 * random());
+          if (remaining(deadline) <= delay) fail('database_deadline');
+          await sleep(delay);
+        }
+      }
+    });
   }
 
   async function attempt(session, callback, deadline, guard) {
@@ -370,7 +416,7 @@ export function createYdbDatabase({
     });
   }
 
-  return Object.freeze({transaction, ensureSchema});
+  return Object.freeze({read, transaction, ensureSchema});
 }
 
 /** Explicit bootstrap entry point; never runs during normal transaction calls. */
