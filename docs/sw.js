@@ -1,5 +1,5 @@
 const PREFIX = 'pso-viewer-' + encodeURIComponent(new URL('./', self.location).pathname) + '-shell-';
-const CACHE = PREFIX + 'github-v10-direct';
+const CACHE = PREFIX + 'github-v11-notification-open';
 const SHELL = ['./','./index.html','./styles.css','./app.mjs','./updates.mjs','./direct.mjs','./messages.mjs','./photos.mjs','./device-unlock.mjs','./recipient-trust.mjs','./crypto.mjs','./exchange.mjs','./storage.mjs','./sharing.mjs','./push.mjs','./team.mjs','./shortlinks.mjs','./shortlink-config.mjs','./manifest.webmanifest','./icon-pso-v2-192.png','./icon-pso-v2-512.png','./apple-touch-icon-pso-v2.png','./favicon-pso-v2.png','./icon-192.png','./icon-512.png','./apple-touch-icon.png'];
 // Activate only after the complete shell is fetched without stale HTTP cache.
 // Existing pages are never navigated: drafts and in-progress operations survive.
@@ -48,23 +48,43 @@ self.addEventListener('push', event => {
     data:payload || {v:1,id:null,expires:0}
   }));
 });
+// A suspended window must be brought forward before navigation. In particular,
+// a test notification needs no reload (and must not discard a draft or session).
+// Bound window operations so a stale client cannot block the fallback forever.
+async function windowOperation(operation, timeout = 1500) {
+  let timer;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise(resolve => { timer = setTimeout(() => resolve(null), timeout); })
+    ]);
+  } finally { clearTimeout(timer); }
+}
 async function openNotification(data) {
   const payload = notificationPayload(data);
   const target = new URL(APP.href);
   if (payload?.id) target.hash = (payload.v===2?'m=':'r=') + payload.id;
   let windows = [];
-  try { windows = await self.clients.matchAll({type:'window',includeUncontrolled:true}); } catch {}
+  try { windows = await windowOperation(self.clients.matchAll({type:'window',includeUncontrolled:true})) || []; } catch {}
   for (const client of windows) {
     let current;
     try { current = new URL(client.url); } catch { continue; }
-    if (current.origin !== APP.origin || current.username || current.password ||
+    if ((client.frameType && client.frameType !== 'top-level') ||
+        current.origin !== APP.origin || current.username || current.password ||
         ![APP.pathname,APP.pathname+'index.html'].includes(current.pathname)) continue;
     try {
-      const navigated = await client.navigate(target.href);
-      if (navigated) { await navigated.focus(); return; }
+      const focused = await windowOperation(client.focus());
+      if (focused) {
+        // Invalid or expired data also only raises the existing application.
+        if (!payload?.id) return;
+        if (await windowOperation(focused.navigate(target.href))) return;
+      }
     } catch {}
+    // Do not spend the click activation walking through more suspended clients.
+    break;
   }
-  await self.clients.openWindow(target.href);
+  const opened = await windowOperation(self.clients.openWindow(target.href), 3000);
+  if (opened) await windowOperation(opened.focus());
 }
 self.addEventListener('notificationclick', event => {
   event.notification.close();
