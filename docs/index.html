@@ -90,14 +90,14 @@
           <button id="retry-pending" type="button" class="button button-secondary" hidden>Повторить отправку</button>
           <button id="discard-pending" type="button" class="button button-secondary danger-button" hidden>Удалить очередь с телефона</button>
         </section>
-        <details id="legacy-open"><summary>Открыть прежнюю ссылку или приглашение</summary>
+        <details id="legacy-open"><summary>Открыть ссылку или приглашение</summary>
         <section id="read-panel" aria-labelledby="input-label">
           <button id="paste-open" type="button" class="button button-primary">Вставить и открыть</button>
           <p class="field-help compact-help">Скопируйте ссылку из Пачки и нажмите кнопку.</p>
           <form id="open-form" autocomplete="off">
             <label id="input-label" for="token">Ссылка из сообщения</label>
             <textarea id="token" name="token" rows="3" maxlength="12000" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" placeholder="Или вставьте ссылку вручную сюда"></textarea>
-            <button id="open" type="submit" class="button button-secondary">Открыть на 30 секунд</button>
+            <button id="open" type="submit" class="button button-secondary">Открыть</button>
           </form>
           <div id="link-tools" class="link-tools" hidden>
             <button id="copy-demo-compact" type="button" class="button button-secondary">Копировать для чата</button>
@@ -190,7 +190,7 @@
             <div id="invite-output" class="output-block" hidden>
               <button id="share-invite" type="button" class="button button-primary">Отправить приглашение</button>
               <p class="field-help">Выберите врача в приложении сообщений. Ему придёт одна ссылка приглашения.</p>
-              <details class="sharing-details">
+              <details id="invite-full-link" class="sharing-details">
                 <summary>Скопировать ссылку</summary>
                 <label for="invite-link">Личная ссылка подключения</label>
                 <textarea id="invite-link" rows="2" readonly spellcheck="false" autocapitalize="off" autocomplete="off"></textarea>

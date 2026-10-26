@@ -163,7 +163,7 @@ async function pasteAndOpen() {
   if (busy || !ready) return;
   hideResult();
   const current = generation;
-  let input;
+  let input, manualPaste = false;
   setBusy(true); say('Если iPhone спросит разрешение, выберите «Вставить» или «Разрешить вставку».');
   try {
     // Must run in the click gesture: no background reads or earlier await.
@@ -171,10 +171,18 @@ async function pasteAndOpen() {
     if (current !== generation || document.hidden) return;
   } catch {
     if (current === generation && !document.hidden) {
-      say('Вставка не разрешена. Удерживайте поле ниже, выберите «Вставить», затем «Открыть на 30 секунд».', true);
+      manualPaste = true;
+      say('Вставка не разрешена. Удерживайте открытое поле, выберите «Вставить», затем «Открыть».', true);
     }
     return;
-  } finally { setBusy(false); }
+  } finally {
+    setBusy(false);
+    if (manualPaste && current === generation && !document.hidden) {
+      $('legacy-open').open = true;
+      $('token').scrollIntoView({block:'center', behavior:'auto'});
+      $('token').focus({preventScroll:true});
+    }
+  }
   return openInput(input);
 }
 async function copyText(text, fallbackId, success, detailsId = '') {
@@ -554,6 +562,7 @@ function renderTeam(){
   $('show-write').hidden=!canReview();
   if(!canReview())showMode('read',{preserveNotice:true});
   if(directClient){$('show-read').textContent='Входящие';$('show-write').textContent='Написать';$('direct-panel').hidden=teamState.state!=='active';$('inbox-status').textContent=teamState.state==='active'?'':$('team-state').textContent;}
+  if(teamState.state==='unregistered')$('legacy-open').open=true;
   // The last confirmed role is display-only; all actions use teamState.
   $('team-admin').hidden=displayTeam?.state!=='active'||displayTeam?.role!=='admin';
   $('team-my-code').textContent=selfContact?.fingerprint||'';
@@ -671,12 +680,23 @@ $('team-claim').addEventListener('click',async()=>{
 });
 $('invite-form').addEventListener('submit',async event=>{
   event.preventDefault();if(!teamClient||busy||teamBusy||teamState.role!=='admin'||teamState.state!=='active')return;
-  teamBusy=true;updateTeamButtons();try{const rootCard=directClient?await exportPublicCard(device,teamState.name):undefined;const result=await teamClient.invite(device,$('invite-name').value.trim(),$('invite-role').value,rootCard);inviteLink=directClient?await shortTrustedInvitationURL(appBase,result.id,rootCard):appBase+'#join='+result.id;$('invite-link').value=inviteLink;$('invite-output').hidden=false;say('Приглашение готово. Передайте его только этому врачу.');}catch(e){say(e.message,true);}finally{teamBusy=false;updateTeamButtons();flushIncoming();}
+  const current=generation,name=$('invite-name').value.trim(),role=$('invite-role').value;
+  inviteLink='';$('invite-link').value='';$('invite-output').hidden=true;$('invite-full-link').open=false;
+  teamBusy=true;updateTeamButtons();
+  try{
+    const rootCard=directClient?await exportPublicCard(device,teamState.name):undefined;
+    const result=await teamClient.invite(device,name,role,rootCard);
+    const link=directClient?await shortTrustedInvitationURL(appBase,result.id,rootCard):appBase+'#join='+result.id;
+    if(current!==generation||document.hidden)return;
+    inviteLink=link;$('invite-link').value=link;$('invite-output').hidden=false;
+    say('Приглашение готово. Передайте его только этому врачу.');
+  }catch(e){if(current===generation&&!document.hidden)say(e.message,true);}
+  finally{teamBusy=false;updateTeamButtons();flushIncoming();}
 });
-$('copy-invite').addEventListener('click',()=>copyText(inviteLink,'invite-link','Приглашение скопировано.'));
+$('copy-invite').addEventListener('click',()=>copyText(inviteLink,'invite-link','Приглашение скопировано.','invite-full-link'));
 $('share-invite').addEventListener('click',async()=>{
   if(!inviteLink||busy||teamBusy||!canAdmin())return;
-  if(typeof navigator.share!=='function')return copyText(inviteLink,'invite-link','Приглашение скопировано целиком. Отправьте его врачу одним сообщением.');
+  if(typeof navigator.share!=='function')return copyText(inviteLink,'invite-link','Приглашение скопировано целиком. Отправьте его врачу одним сообщением.','invite-full-link');
   try{
     // Call directly inside the tap gesture. URL only: no separate title, card,
     // image or text part for a messenger to copy instead of the invitation.
@@ -720,7 +740,7 @@ async function init() {
   } catch (error) { ready = false; $('status').textContent = 'Не удалось подготовить просмотрщик'; say(error.message, true); setBusy(false); }
   if(teamClient) { $('message-caption').value='test';$('encrypt').textContent=directClient?'Отправить врачу':'Создать проверочную ссылку';$('push-compose-help').hidden=false; }
   $('direct-fields').hidden=!directClient;$('direct-panel').hidden=!directClient;
-  $('legacy-open').open=!directClient;
+  $('legacy-open').open=!directClient||teamState.state==='unregistered';
   if(directClient){$('show-read').textContent='Входящие';$('show-write').textContent='Написать';$('compose-surname').required=false;$('legacy-output').hidden=true;setInterval(async()=>{if(!document.hidden){await refreshInbox();await retryPending(false);}},60000);}
   $('device-unlock-settings').hidden=!deviceUnlock;
   void initNotifications();

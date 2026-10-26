@@ -38,6 +38,7 @@ class Element {
     this.scrollCalls = [];
     this.focusCalls = [];
     this.checked = /\bchecked\b/.test(attrs);
+    this.open = /\bopen\b/.test(attrs);
     this.disabled = /\bdisabled\b/.test(attrs);
     this.hidden = /\bhidden\b/.test(attrs);
   }
@@ -245,6 +246,11 @@ async function harness(persistent, initialHash = '', {
       const read = pendingReads.shift();
       assert.ok(read, 'A clipboard read is awaiting resolution');
       read.resolve(value);
+    },
+    rejectClipboardRead() {
+      const read = pendingReads.shift();
+      assert.ok(read, 'A clipboard read is awaiting rejection');
+      read.reject(new Error('Clipboard read permission denied'));
     },
     async event(id, type = 'click') { await el(id).fire(type); },
     async idle() { await waitUntil(() => !el('open').disabled, 'async operation completion'); },
@@ -1380,6 +1386,94 @@ test('without native sharing the invitation copy fallback retains the complete U
  await app.event('invite-form','submit');const url=app.el('invite-link').value;assert.match(new URL(url).hash,/^#i=[A-Za-z0-9_-]{64}$/);
  await app.event('share-invite');assert.equal(app.clipboard(),url);
  assert.deepEqual(app.clipboardAttempts(),{rich:0,plain:1});
+});
+
+test('failed replacement invitation removes the previous doctors link and disables sharing',async()=>{
+ const s=await directFixture(['admin']);let fail=false;
+ const app=await harness(s.stores[0],'',{...s.options,standalone:true,teamFetch:async(url,options)=>{
+  if(fail&&JSON.parse(options.body).envelope.op==='invite')return new Response(JSON.stringify({error:'request_rejected'}),{status:403,headers:{'Content-Type':'application/json'}});
+  return s.options.teamFetch(url,options);
+ }});
+ app.el('invite-name').value='Первый врач';app.el('invite-role').value='cardiologist';
+ await app.event('invite-form','submit');assert.ok(app.el('invite-link').value);
+ fail=true;app.el('invite-name').value='Другой врач';
+ const creation=app.event('invite-form','submit');
+ assert.equal(app.el('invite-output').hidden,true,'Old invitation disappears before the new request starts');
+ assert.equal(app.el('invite-link').value,'');
+ await creation;
+ assert.equal(app.el('invite-output').hidden,true);
+ assert.equal(app.el('invite-link').value,'');
+ assert.equal(app.el('share-invite').disabled,true);
+ assert.equal(app.el('copy-invite').disabled,true);
+ await app.event('share-invite');await app.event('copy-invite');
+ assert.deepEqual(app.clipboardAttempts(),{rich:0,plain:0});
+ assert.ok(app.el('notice').textContent);
+});
+
+test('backgrounded invitation creation cannot display a stale result or error on return',async t=>{
+ for(const reject of [false,true])await t.test(reject?'late failure':'late success',async()=>{
+  const s=await directFixture(['admin']);let release;
+  const app=await harness(s.stores[0],'',{...s.options,standalone:true,teamFetch:async(url,options)=>{
+   if(JSON.parse(options.body).envelope.op==='invite'){
+    await new Promise(resolve=>{release=resolve;});
+    if(reject)return new Response(JSON.stringify({error:'request_rejected'}),{status:403,headers:{'Content-Type':'application/json'}});
+   }
+   return s.options.teamFetch(url,options);
+  }});
+  app.el('invite-name').value='Тестовый врач';app.el('invite-role').value='cardiologist';
+  const creation=app.event('invite-form','submit');await waitUntil(()=>release,'invite request started');
+  await app.hide();await app.show();app.el('notice').textContent='Текущий экран';
+  release();await creation;
+  assert.equal(app.el('invite-output').hidden,true);
+  assert.equal(app.el('invite-link').value,'');
+  assert.equal(app.el('share-invite').disabled,true);
+  assert.equal(app.el('notice').textContent,'Текущий экран');
+ });
+});
+
+test('share without native sharing or clipboard access exposes the full invitation for manual copying',async()=>{
+ const s=await directFixture(['admin']),app=await harness(s.stores[0],'',{...s.options,standalone:true,rejectText:true});
+ app.el('invite-name').value='Тестовый кардиолог';app.el('invite-role').value='cardiologist';
+ await app.event('invite-form','submit');const url=app.el('invite-link').value;
+ assert.equal(app.el('invite-full-link').open,false);
+ await app.event('share-invite');
+ assert.equal(app.el('invite-full-link').open,true);
+ assert.equal(app.el('invite-link').value,url);
+ assert.equal(app.el('invite-link').focusCalls.length,1);
+ assert.deepEqual(app.clipboardAttempts(),{rich:0,plain:1});
+ assert.match(app.el('notice').textContent,/Удерживайте выделенный текст/);
+});
+
+test('new installed device shows invitation paste and denied clipboard access supports manual opening',async()=>{
+ const s=await shortInvitationFixture(),app=await harness(s.store,'',{...s.options,standalone:true,rejectRead:true});
+ assert.equal(app.el('legacy-open').open,true,'The instructed paste button must be visible on a new phone');
+ assert.equal(app.clipboardReadAttempts(),0);
+ let focusedWhileDisabled;
+ const focus=app.el('token').focus.bind(app.el('token'));
+ app.el('token').focus=options=>{focusedWhileDisabled=app.el('token').disabled;focus(options);};
+ app.el('token').value=s.url;
+ await app.event('paste-open');
+ assert.equal(app.el('legacy-open').open,true);
+ assert.equal(app.el('token').value,s.url,'Denied clipboard must preserve a manually pasted invitation');
+ assert.equal(app.el('token').focusCalls.length,1);
+ assert.equal(focusedWhileDisabled,false,'The field is enabled before it receives focus');
+ assert.match(app.el('notice').textContent,/Вставить/);
+ await app.event('open-form','submit');
+ assert.equal(app.el('join-link').value,s.url);
+ assert.equal(app.el('join-panel').hidden,false);
+ assert.equal(s.store.pins.size,0);
+ assert.equal(s.service.requests.filter(e=>e.op==='claim').length,0);
+});
+
+test('a late clipboard rejection cannot move focus or replace the newer invitation notice',async()=>{
+ const s=await shortInvitationFixture(),app=await harness(s.store,'',{...s.options,standalone:true,deferRead:true});
+ const paste=app.event('paste-open');
+ await app.hashchange(new URL(s.url).hash);app.el('notice').textContent='Новое приглашение';
+ app.rejectClipboardRead();await paste;
+ await waitUntil(()=>!app.el('join-panel').hidden,'new invitation ready');
+ assert.equal(app.el('join-link').value,s.url);
+ assert.equal(app.el('token').focusCalls.length,0);
+ assert.equal(app.el('notice').textContent,'Новое приглашение');
 });
 
 test('admin approval requires explicit fingerprint checkbox even after ordinary busy updates',async()=>{
