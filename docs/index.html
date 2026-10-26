@@ -188,9 +188,14 @@
               <button id="invite-create" type="submit" class="button button-primary">Создать приглашение</button>
             </form>
             <div id="invite-output" class="output-block" hidden>
-              <label for="invite-link">Личная ссылка подключения</label>
-              <textarea id="invite-link" rows="2" readonly></textarea>
-              <button id="copy-invite" type="button" class="button button-secondary">Скопировать приглашение</button>
+              <button id="share-invite" type="button" class="button button-primary">Отправить приглашение</button>
+              <p class="field-help">Выберите врача в приложении сообщений. Ему придёт одна ссылка приглашения.</p>
+              <details class="sharing-details">
+                <summary>Скопировать ссылку</summary>
+                <label for="invite-link">Личная ссылка подключения</label>
+                <textarea id="invite-link" rows="2" readonly spellcheck="false" autocapitalize="off" autocomplete="off"></textarea>
+                <button id="copy-invite" type="button" class="button button-secondary">Скопировать ссылку</button>
+              </details>
               <p class="fine-print">После заявки сверите код телефона с врачом и подтвердите подключение.</p>
             </div>
           </section>

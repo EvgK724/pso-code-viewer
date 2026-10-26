@@ -32,7 +32,10 @@ let organizerPin=null, invitationOrganizer=null;
 let activeBox='inbox', inboxItems=[], inboxNext=null, inboxBusy=false, directPhoto=null, photoURL='', previewURL='', photoBusy=false, directPendingBusy=false, discardPendingConfirmed=false;
 const standalone = navigator.standalone === true || globalThis.matchMedia?.('(display-mode: standalone)').matches === true;
 
-if (queuedIncoming) history.replaceState(null, '', location.pathname);
+// An invitation must survive a reload/update. Unlike message links it contains
+// no patient payload; its fragment is not sent in HTTP requests or referrers.
+const isInvitationHash = hash => /^#(?:join|invite)=/.test(hash);
+if (queuedIncoming && !isInvitationHash(queuedIncoming)) history.replaceState(null, '', location.pathname);
 
 function say(text, error = false) {
   const notice = $('notice');
@@ -134,7 +137,7 @@ function inputKind(input) {
   if (/^[0-9a-f\s-]+$/i.test(value) && value.replace(/[\s-]/g, '').length === 64) throw new Error('Это контрольный код карточки врача. По нему фамилия не открывается. Попросите отправителя создать ссылку для вас через «Создать ссылку» и скопировать её целиком.');
   if (/^[0-9\s-]+$/.test(value)) throw new Error('Вставлен только набор цифр. Нужна полная ссылка из «Скопировать адрес для Пачки» или зашифрованный код, начинающийся с PSO1.');
   if (!value) throw new Error('Сначала вставьте ссылку в поле или нажмите «Вставить и открыть».');
-  if (joinIDFromInput(value,appBase)||value.includes('#join=')) return 'join';
+  if (joinIDFromInput(value,appBase)||/#(?:join|invite)=/.test(value)) return 'join';
   if (directIDFromInput(value,appBase)) return 'direct';
   let card = value.startsWith('PSO-CARD1.');
   try { card ||= new URL(value).hash.startsWith('#card='); } catch {}
@@ -487,7 +490,7 @@ async function handleIncoming(hash) {
   clearHandoff();
   const link = appBase + hash;
   try {
-    if (hash.startsWith('#join=')) { await prepareJoin(link);request.pending=false;return; }
+    if (isInvitationHash(hash)) { await prepareJoin(link);request.pending=false;return; }
     if (!hash.startsWith('#pso=') && !hash.startsWith('#card=') && !hash.startsWith('#r=') && !hash.startsWith('#m=')) throw new Error('Неизвестный формат ссылки.');
     inputKind(link);
     $('handoff-link').value = link;
@@ -501,7 +504,8 @@ async function handleIncoming(hash) {
   }
 }
 addEventListener('hashchange', () => {
-  const hash = location.hash; history.replaceState(null, '', location.pathname);
+  const hash = location.hash;
+  if (!isInvitationHash(hash)) history.replaceState(null, '', location.pathname);
   if (!hash) return;
   queuedIncoming = hash;
   clearSensitive(); setCandidate(null);
@@ -536,6 +540,7 @@ function updateTeamButtons(){
   $('invite-create').disabled=blocked||!canAdmin();
   $('team-claim').disabled=blocked||!joinID||!standalone||['unavailable','revoked'].includes(teamState.state);
   $('copy-invite').disabled=blocked||!inviteLink;
+  $('share-invite').disabled=blocked||!inviteLink;
   for(const id of ['team-pending','team-members'])for(const button of $(id).querySelectorAll('button'))button.disabled=blocked||!canAdmin()||(button.teamConfirmation&&!button.teamConfirmation.checked);
   $('device-unlock-enable').disabled=blocked||teamState.state!=='active';
   updatePushButtons();
@@ -586,8 +591,11 @@ async function notificationContacts(){
   return local;
 }
 async function prepareJoin(input){
+  joinID='';invitationOrganizer=null;$('join-panel').hidden=true;
+  $('organizer-trust').hidden=true;$('organizer-confirm').checked=false;
+  updateTeamButtons();
   const trusted=directClient?await parseTrustedInvitation(input,appBase):null;
-  const id=trusted?.id||joinIDFromInput(input,appBase);if(!id)throw new Error('Приглашение неполное.');
+  const id=trusted?.id||joinIDFromInput(input,appBase);if(!id)throw new Error('Ссылка приглашения обрезана или повреждена. Организатору нужно отправить её кнопкой «Отправить приглашение».');
   joinID=id;$('join-panel').hidden=false;$('join-link').value=trusted?String(input):appBase+'#join='+id;
   if(trusted){invitationOrganizer=trusted.organizerCard;$('organizer-code').textContent=trusted.fingerprint;$('organizer-confirm').checked=false;$('organizer-trust').hidden=false;}
   else if(directClient&&!organizerPin)say('Попросите организатора прислать новое приглашение с ключом команды.',true);
@@ -645,7 +653,7 @@ $('team-refresh').addEventListener('click',()=>refreshTeam());
 $('copy-join').addEventListener('click',()=>copyText($('join-link').value,'join-link','Приглашение скопировано. Откройте синий значок → «Вставить и открыть».'));
 $('team-claim').addEventListener('click',async()=>{
   if(!teamClient||!joinID||!standalone||busy||teamBusy||['unavailable','revoked'].includes(teamState.state))return;teamBusy=true;updateTeamButtons();
-  try{if(directClient&&!organizerPin)throw new Error('Сначала подтвердите ключ организатора по коду ниже.');await teamClient.claim(device,joinID);joinID='';$('join-panel').hidden=true;$('join-link').value='';say('Заявка отправлена. Сообщите администратору контрольный код ниже.');}
+  try{if(directClient&&!organizerPin)throw new Error('Сначала подтвердите ключ организатора по коду ниже.');await teamClient.claim(device,joinID);joinID='';if(isInvitationHash(location.hash))history.replaceState(null,'',location.pathname);$('join-panel').hidden=true;$('join-link').value='';say('Заявка отправлена. Сообщите администратору контрольный код ниже.');}
   catch(e){say(e.message,true);}finally{teamBusy=false;await refreshTeam();}
 });
 $('invite-form').addEventListener('submit',async event=>{
@@ -653,6 +661,19 @@ $('invite-form').addEventListener('submit',async event=>{
   teamBusy=true;updateTeamButtons();try{const result=await teamClient.invite(device,$('invite-name').value.trim(),$('invite-role').value);inviteLink=directClient?await trustedInvitationURL(appBase,result.id,await exportPublicCard(device,teamState.name)):appBase+'#join='+result.id;$('invite-link').value=inviteLink;$('invite-output').hidden=false;say('Приглашение готово. Передайте его только этому врачу.');}catch(e){say(e.message,true);}finally{teamBusy=false;updateTeamButtons();flushIncoming();}
 });
 $('copy-invite').addEventListener('click',()=>copyText(inviteLink,'invite-link','Приглашение скопировано.'));
+$('share-invite').addEventListener('click',async()=>{
+  if(!inviteLink||busy||teamBusy||!canAdmin())return;
+  if(typeof navigator.share!=='function')return copyText(inviteLink,'invite-link','Приглашение скопировано целиком. Отправьте его врачу одним сообщением.');
+  try{
+    // Call directly inside the tap gesture. URL only: no separate title, card,
+    // image or text part for a messenger to copy instead of the invitation.
+    await navigator.share({url:inviteLink});
+    say('Приглашение передано выбранному приложению.');
+  }catch(error){
+    if(error?.name==='AbortError')return;
+    say('Не удалось открыть отправку. Нажмите «Скопировать ссылку».',true);
+  }
+});
 
 async function init() {
   setBusy(true);

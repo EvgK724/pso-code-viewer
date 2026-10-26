@@ -85,7 +85,7 @@ async function persistentDevice() {
 async function harness(persistent, initialHash = '', {
   richClipboard = false, rejectRich = false, rejectText = false,
   readText = '', rejectRead = false, deferRead = false, standalone = false, legacyStandalone = false, initialHidden = false,
-  nativeCopy = undefined, shortlinkEndpoint = '', shortlinkFetch = undefined,
+  nativeCopy = undefined, nativeShare = undefined, shortlinkEndpoint = '', shortlinkFetch = undefined,
   directEndpoint = '', directFetch = undefined,
   deviceAuthEndpoint = '', deviceAuthFetch = undefined,
   teamEndpoint = '', teamFetch = undefined, pushEndpoint = '', pushFetch = undefined, notificationPermission = 'default', pushSubscription = null, permissionResult = 'granted', rejectSubscribe = false, rejectUnsubscribe = false
@@ -188,7 +188,7 @@ async function harness(persistent, initialHash = '', {
   const context = vm.createContext({
     document, location, getSelection:() => selection,
     history:{replaceState() { location.hash = ''; }},
-    navigator:{clipboard:clipboardAPI, standalone:legacyStandalone,...(pushEndpoint?{serviceWorker:{register:async()=>registration,ready:Promise.resolve(registration)}}:{})},
+    navigator:{clipboard:clipboardAPI, standalone:legacyStandalone,...(nativeShare?{share:nativeShare}:{}),...(pushEndpoint?{serviceWorker:{register:async()=>registration,ready:Promise.resolve(registration)}}:{})},
     ...(pushEndpoint?{Notification:notification,PushManager:class {}}:{}),
     matchMedia(query) { return {matches:query === '(display-mode: standalone)' && standalone}; },
     crypto:webcrypto, URL, console, Blob,
@@ -1189,6 +1189,92 @@ test('activation never submits on opening invitation or in ordinary browser; exp
  const store=await persistentDevice(),service=await teamFixture([],[]),id=team.randomTeamID();
  const browser=await harness(store,'#join='+id,service.options);await waitUntil(()=>!browser.el('join-panel').hidden,'join visible');assert.equal(service.requests.filter(e=>e.op==='claim').length,0);assert.equal(browser.el('team-claim').disabled,true);await browser.event('team-claim');assert.equal(service.requests.filter(e=>e.op==='claim').length,0);
  const app=await harness(store,'#join='+id,{...service.options,standalone:true});await waitUntil(()=>!app.el('join-panel').hidden,'join visible installed');assert.equal(app.el('team-claim').disabled,false);await app.event('team-claim');assert.equal(service.requests.filter(e=>e.op==='claim').length,1);assert.equal(app.el('show-write').hidden,true,'A claim alone never grants a sender role');
+});
+
+async function invitationFixture(){
+ const organizer=await persistentDevice(),store=await persistentDevice(),service=await teamFixture([],[]);
+ const card=await exchange.exportPublicCard(organizer.device,'Тестовый организатор');
+ const id=team.randomTeamID(),url=await recipientTrust.trustedInvitationURL(origin+appPath,id,card);
+ const options={...service.options,directEndpoint:'https://direct.example/api',directFetch:async()=>{throw new Error('No direct call expected before enrollment');}};
+ return {store,service,card,id,url,options};
+}
+
+test('compact invitation opens and survives reload without enrolling or trusting a device automatically',async()=>{
+ const s=await invitationFixture(),hash=new URL(s.url).hash;
+ const browser=await harness(s.store,hash,s.options);
+ await waitUntil(()=>!browser.el('join-panel').hidden,'compact invitation visible');
+ assert.equal(browser.location.hash,hash,'Public invitation remains available after refresh');
+ assert.equal(browser.el('organizer-trust').hidden,false);
+ assert.equal(browser.el('join-link').value,s.url);
+ assert.equal(browser.el('team-claim').disabled,true,'Ordinary browser cannot silently bind a different device store');
+ assert.equal(s.store.pins.size,0);assert.equal(s.service.requests.filter(r=>r.op==='claim').length,0);
+ const reloaded=await harness(s.store,browser.location.hash,s.options);
+ await waitUntil(()=>!reloaded.el('join-panel').hidden,'invitation restored from address on reload');
+ assert.equal(reloaded.el('join-link').value,s.url);assert.equal(reloaded.location.hash,hash);
+ assert.equal(s.store.pins.size,0);assert.equal(s.service.requests.filter(r=>r.op==='claim').length,0);
+});
+
+test('compact invitation paste is recognized, requires trust confirmation and clears address only after successful claim',async()=>{
+ const s=await invitationFixture(),hash=new URL(s.url).hash;
+ const app=await harness(s.store,'',{...s.options,standalone:true,readText:s.url});
+ await app.event('paste-open');await app.idle();
+ assert.equal(app.el('join-panel').hidden,false);assert.equal(app.el('organizer-trust').hidden,false);
+ assert.equal(s.store.pins.size,0);assert.equal(s.service.requests.filter(r=>r.op==='claim').length,0);
+ app.el('join-link').value='';
+ await app.hashchange(hash);await waitUntil(()=>app.el('join-link').value===s.url,'incoming invitation parsed');
+ assert.equal(app.location.hash,hash);
+ await app.event('team-claim');assert.equal(s.service.requests.filter(r=>r.op==='claim').length,0);
+ app.el('organizer-confirm').checked=true;await app.event('organizer-confirm','change');
+ await app.event('organizer-save');await app.idle();
+ assert.equal(s.store.pins.size,1);assert.equal(app.location.hash,hash);
+ await app.event('team-claim');
+ assert.equal(s.service.requests.filter(r=>r.op==='claim').length,1);
+ assert.equal(s.service.requests.find(r=>r.op==='claim').data.id,s.id);
+ assert.equal(app.location.hash,'');assert.equal(app.el('join-panel').hidden,true);
+});
+
+test('truncated legacy organizer-card invitation reports the actual error without claiming or pinning',async()=>{
+ const s=await invitationFixture(),broken=origin+appPath+'#join='+s.id+'&organizer=PSO-CARD1';
+ const app=await harness(s.store,new URL(broken).hash,{...s.options,standalone:true});
+ await waitUntil(()=>/Ссылка приглашения обрезана/.test(app.el('notice').textContent),'specific incomplete invitation message');
+ assert.equal(app.el('join-panel').hidden,true);assert.equal(app.el('organizer-trust').hidden,true);
+ assert.equal(s.store.pins.size,0);assert.equal(s.service.requests.filter(r=>r.op==='claim').length,0);
+ app.el('token').value=broken;await app.event('open-form','submit');await app.idle();
+ assert.match(app.el('notice').textContent,/Ссылка приглашения обрезана/);
+ assert.equal(s.store.pins.size,0);assert.equal(s.service.requests.filter(r=>r.op==='claim').length,0);
+});
+
+test('retaining invitation hashes does not retain patient-message hashes on startup or hash change',async()=>{
+ const store=await persistentDevice(),id=team.randomTeamID();
+ const app=await harness(store,'#m='+id);
+ assert.equal(app.location.hash,'');
+ await app.hashchange('#pso=PSO1.invalid');assert.equal(app.location.hash,'');
+});
+
+test('invite sharing sends only the full URL from the click gesture; cancel never falls back to clipboard',async()=>{
+ const s=await directFixture(['admin']),payloads=[];
+ let cancel=false;
+ const app=await harness(s.stores[0],'',{...s.options,standalone:true,nativeShare(payload){
+  payloads.push(JSON.parse(JSON.stringify(payload)));
+  if(cancel){const error=new Error('Share dismissed');error.name='AbortError';return Promise.reject(error);}
+  return Promise.resolve();
+ }});
+ app.el('invite-name').value='Тестовый кардиолог';app.el('invite-role').value='cardiologist';
+ await app.event('invite-form','submit');
+ const url=app.el('invite-link').value;assert.match(url,/#invite=/);
+ const first=app.event('share-invite');
+ assert.deepEqual(payloads,[{url}],'Native share must run during the button gesture, with no additional text/card');
+ await first;assert.deepEqual(app.clipboardAttempts(),{rich:0,plain:0});
+ cancel=true;await app.event('share-invite');
+ assert.deepEqual(payloads,[{url},{url}]);assert.deepEqual(app.clipboardAttempts(),{rich:0,plain:0});
+});
+
+test('without native sharing the invitation copy fallback retains the complete URL',async()=>{
+ const s=await directFixture(['admin']),app=await harness(s.stores[0],'',{...s.options,standalone:true});
+ app.el('invite-name').value='Тестовый кардиолог';app.el('invite-role').value='cardiologist';
+ await app.event('invite-form','submit');const url=app.el('invite-link').value;assert.match(url,/#invite=/);
+ await app.event('share-invite');assert.equal(app.clipboard(),url);
+ assert.deepEqual(app.clipboardAttempts(),{rich:0,plain:1});
 });
 
 test('admin approval requires explicit fingerprint checkbox even after ordinary busy updates',async()=>{

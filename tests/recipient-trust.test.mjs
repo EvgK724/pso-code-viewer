@@ -95,7 +95,48 @@ test('known-origin invitation carries public organizer card, not a server-truste
   const url=await trustedInvitationURL(base,id,rootCard), parsed=await parseTrustedInvitation(url,base);
   assert.equal(parsed.id,id);assert.equal(parsed.organizerCard,rootCard);assert.equal(parsed.fingerprint,root.fingerprint);
   assert.equal(new URL(url).search,'');
+  assert.match(new URL(url).hash,/^#invite=[A-Za-z0-9_-]+$/);
+  assert.ok(!url.includes('PSO-CARD1.'));assert.ok(!url.includes('&'));
   for(const bad of [url.replace('viewer.example','other.example'),url.replace('/pso-code-viewer/','/other/'),url+'&join='+id,url+'&extra=1',base+'#join='+id,base+'?other=1'+new URL(url).hash])
     assert.equal(await parseTrustedInvitation(bad,base),null);
   await assert.rejects(trustedInvitationURL('http://viewer.example/',id,rootCard));
+});
+
+test('complete legacy invitations work but the two observed split fragments are rejected',async()=>{
+  const base='https://viewer.example/pso-code-viewer/',id=Buffer.alloc(16,8).toString('base64url');
+  const legacy=base+'#'+new URLSearchParams({join:id,organizer:rootCard});
+  const parsed=await parseTrustedInvitation(legacy,base);
+  assert.equal(parsed.id,id);assert.equal(parsed.organizerCard,rootCard);assert.equal(parsed.fingerprint,root.fingerprint);
+  const split=legacy.indexOf('PSO-CARD1.')+'PSO-CARD1'.length;
+  for(const bad of [legacy.slice(0,split),legacy.slice(split),legacy+'&organizer='+rootCard,legacy+'&join='+id])
+    assert.equal(await parseTrustedInvitation(bad,base),null);
+});
+
+test('invitation envelope rejects truncation, malformed encoding, schema and public cards',async()=>{
+  const base='https://viewer.example/pso-code-viewer/',id=Buffer.alloc(16,8).toString('base64url');
+  const valid={v:1,id,organizer:rootCard};
+  const envelope=value=>base+'#invite='+Buffer.from(JSON.stringify(value)).toString('base64url');
+  const url=await trustedInvitationURL(base,id,rootCard);
+  for(const bad of [url.slice(0,-1),url.slice(0,-20),url+'=',url+'&invite=A',url+'&organizer='+rootCard,
+    base+'#invite=',base+'#invite=A',base+'#invite=@@@@',base+'#invite='+Buffer.from([0xff]).toString('base64url'),
+    base+'#invite='+Buffer.from('{broken').toString('base64url')])
+    assert.equal(await parseTrustedInvitation(bad,base),null);
+  for(const payload of [null,[],{}, {...valid,v:2}, {...valid,extra:true}, {...valid,id:id+'='},
+    {...valid,id:id.slice(0,-1)+'h'}, {...valid,organizer:'PSO-CARD1'}, {...valid,organizer:null},
+    {id,organizer:rootCard},{v:1,id}])
+    assert.equal(await parseTrustedInvitation(envelope(payload),base),null);
+  assert.equal(await parseTrustedInvitation('x'.repeat(12001),base),null);
+  assert.equal(await parseTrustedInvitation(null,base),null);
+});
+
+test('new invitation enforces origin, path, credentials and query restrictions',async()=>{
+  const base='https://viewer.example/pso-code-viewer/',id=Buffer.alloc(16,8).toString('base64url');
+  const url=await trustedInvitationURL(base,id,rootCard),fragment=new URL(url).hash;
+  for(const bad of ['http://viewer.example/pso-code-viewer/'+fragment,
+    'https://name:password@viewer.example/pso-code-viewer/'+fragment,
+    'https://viewer.example:8443/pso-code-viewer/'+fragment,
+    'https://viewer.example/pso-code-viewer/child/'+fragment,
+    base+'?invite=other'+fragment])
+    assert.equal(await parseTrustedInvitation(bad,base),null);
+  assert.equal((await parseTrustedInvitation(base+'index.html'+fragment,base)).id,id);
 });

@@ -106,7 +106,10 @@ export async function trustedInvitationURL(base,id,card) {
   unb64(id,16);
   const root=await organizerCard(card), url=new URL('./',base);
   if(url.protocol!=='https:' || url.username || url.password || url.search) throw new Error('Неверный адрес просмотрщика.');
-  url.hash=new URLSearchParams({join:id,organizer:root.card}).toString();
+  // Keep the complete invitation in one URL-safe token. A literal card prefix
+  // followed by a dot can be split from its payload by messenger link previews.
+  // The envelope carries the same public card; it does not establish trust.
+  url.hash='invite='+b64(enc.encode(JSON.stringify({v:1,id,organizer:root.card})));
   return url.href;
 }
 
@@ -116,8 +119,19 @@ export async function parseTrustedInvitation(input,base) {
     const url=new URL(input.trim(),base), own=new URL('./',base);
     if(url.protocol!=='https:' || url.origin!==own.origin || ![own.pathname,own.pathname+'index.html'].includes(url.pathname) || url.search || url.username || url.password) return null;
     const values=new URLSearchParams(url.hash.slice(1));
-    if([...values.keys()].sort().join(',')!=='join,organizer') return null;
-    const id=values.get('join'), root=await importPublicCard(values.get('organizer'));
+    const keys=[...values.keys()].sort().join(',');
+    let id,card;
+    if(keys==='invite') {
+      const token=values.get('invite');
+      const bytes=unb64(token,Math.floor(token.length*3/4));
+      const payload=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes));
+      if(!exact(payload,'id,organizer,v') || payload.v!==1) return null;
+      id=payload.id;card=payload.organizer;
+    } else if(keys==='join,organizer') {
+      // Complete invitations already sent by an earlier version remain valid.
+      id=values.get('join');card=values.get('organizer');
+    } else return null;
+    const root=await importPublicCard(card);
     unb64(id,16);
     return {id,organizerCard:root.card,fingerprint:root.fingerprint};
   } catch { return null; }
