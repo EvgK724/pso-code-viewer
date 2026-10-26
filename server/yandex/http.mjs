@@ -28,7 +28,7 @@ export function createHttpRouter({allowedOrigin,handlers,assets=new URL('../../d
     const html=data.toString('utf8'),pattern=/<meta\s+http-equiv=["']Content-Security-Policy["']\s+content=(["'])(.*?)\1\s*\/?\s*>/gis;
     if([...html.matchAll(pattern)].length!==1)throw new Error('CSP missing');
     data=Buffer.from(html.replace(pattern,`<meta http-equiv="Content-Security-Policy" content="${policy.replace(/; frame-ancestors 'none'/,'')}">`));
-  }else if(name==='sw.js')data=Buffer.from(data.toString('utf8').replace('github-v16-invitation-recovery','yandex-v7-invitation-recovery'));
+  }else if(name==='sw.js')data=Buffer.from(data.toString('utf8').replace('github-v17-bottom-navigation','yandex-v8-bottom-navigation'));
    else if(name==='manifest.webmanifest'){
     const manifest=JSON.parse(data);Object.assign(manifest,{id:'./',start_url:'./',scope:'./'});data=Buffer.from(JSON.stringify(manifest));
    }

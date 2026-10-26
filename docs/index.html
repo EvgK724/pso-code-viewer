@@ -26,24 +26,25 @@
 
     <main>
       <section class="intro" aria-labelledby="page-title">
-        <h1 id="page-title">Сообщения ПСО</h1>
-        <p class="lead">Сообщения вашей команды. Содержимое открывается на этом телефоне.</p>
+        <h1 id="page-title" tabindex="-1">Сообщения</h1>
+        <p id="page-description" class="lead">Входящие и исходящие сообщения вашей команды.</p>
       </section>
 
-      <section id="team-panel" class="team-panel" aria-labelledby="team-heading" hidden>
-        <div class="team-heading-row"><h2 id="team-heading">Подключение</h2><button id="team-refresh" type="button" class="text-button">Обновить</button></div>
-        <p id="team-state" role="status">Проверяем подключение…</p>
-        <div id="join-panel" hidden>
-          <p id="join-hint"></p>
-          <button id="team-claim" type="button" class="button button-primary">Подключить этот телефон</button>
-          <button id="copy-join" type="button" class="button button-secondary">Скопировать приглашение</button>
-          <details><summary>Ссылка приглашения</summary><textarea id="join-link" rows="2" readonly></textarea></details>
-        </div>
-        <p id="organizer-missing" class="fine-print" hidden>Для новых сообщений откройте личное приглашение организатора и один раз подтвердите его ключ.</p>
-        <section id="organizer-trust" class="contact-confirm" hidden><h2>Ключ организатора</h2><p id="organizer-code" class="fingerprint device-id"></p><label class="check-label"><input id="organizer-confirm" type="checkbox"><span>Приглашение получил от организатора по известному каналу, код сверили</span></label><button id="organizer-save" type="button" class="button button-primary" disabled>Подтвердить организатора</button></section>
-        <details id="team-code-box" hidden><summary>Мой контрольный код</summary><p id="team-my-code" class="device-id fingerprint"></p></details>
-      </section>
-
+      <p id="notice" class="notice" role="status" aria-live="polite" tabindex="-1"></p>
+        <section id="handoff-panel" class="handoff-panel" aria-labelledby="handoff-heading" hidden>
+          <h2 id="handoff-heading">Открыть в установленном просмотрщике</h2>
+          <p id="handoff-hint">Откройте эту ссылку через синий значок на экране «Домой».</p>
+          <button id="copy-handoff" type="button" class="button button-primary">Скопировать для приложения</button>
+          <p class="fine-print">Синий значок → «Вставить и открыть».</p>
+          <details id="handoff-full-link" class="sharing-details">
+            <summary>Полная ссылка для ручного копирования</summary>
+            <div class="details-body">
+              <label for="handoff-link">Входящая ссылка</label>
+              <textarea id="handoff-link" rows="3" readonly spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off"></textarea>
+            </div>
+          </details>
+        </section>
+      <section id="screen-read" class="app-screen" aria-labelledby="page-title">
       <section id="result" class="result-card" aria-labelledby="surname" hidden>
         <div class="result-topline">
           <span id="result-label" class="eyebrow">Фамилия пациента</span>
@@ -61,26 +62,7 @@
         <p class="fine-print">Скрытие с экрана не запрещает сделать скриншот.</p>
       </section>
 
-      <nav class="mode-switch" aria-label="Действие с кодом">
-        <button id="show-read" type="button" aria-pressed="true" aria-controls="read-panel">Открыть</button>
-        <button id="show-write" type="button" aria-pressed="false" aria-controls="write-panel" hidden>Проверочная история</button>
-      </nav>
-
       <div class="input-card">
-        <p id="status" class="device-status" role="status">Подготовка…</p>
-        <section id="handoff-panel" class="handoff-panel" aria-labelledby="handoff-heading" hidden>
-          <h2 id="handoff-heading">Открыть в установленном просмотрщике</h2>
-          <p id="handoff-hint">Откройте эту ссылку через синий значок на экране «Домой».</p>
-          <button id="copy-handoff" type="button" class="button button-primary">Скопировать для приложения</button>
-          <p class="fine-print">Синий значок → «Вставить и открыть».</p>
-          <details id="handoff-full-link" class="sharing-details">
-            <summary>Полная ссылка для ручного копирования</summary>
-            <div class="details-body">
-              <label for="handoff-link">Входящая ссылка</label>
-              <textarea id="handoff-link" rows="3" readonly spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off"></textarea>
-            </div>
-          </details>
-        </section>
         <section id="direct-panel" class="direct-panel" aria-label="Сообщения" hidden>
           <div class="inbox-toolbar"><div class="box-switch"><button id="box-inbox" type="button" aria-pressed="true">Входящие <span id="inbox-count" class="count-badge"></span></button><button id="box-outbox" type="button" aria-pressed="false">Исходящие</button></div><button id="inbox-refresh" class="text-button" type="button">Обновить</button></div>
           <p id="inbox-status" class="field-help compact-help" role="status">Подключитесь по приглашению организатора.</p>
@@ -107,33 +89,40 @@
         </section>
 
         </details>
-        <section id="write-panel" aria-labelledby="compose-label" hidden>
-          <p class="field-help">Для уточнения или проверки истории. Поступления сообщает бот.</p>
+      </div>
+      </section>
+      <section id="screen-write" class="app-screen" aria-labelledby="page-title" hidden>
+        <section class="input-card" id="write-panel" aria-labelledby="compose-label" hidden>
+          <p class="field-help">Фамилия или фото истории, при необходимости — комментарий.</p>
           <form id="compose-form" autocomplete="off">
+            <div class="compose-content">
             <label id="compose-label" for="compose-surname">Фамилия пациента</label>
             <input id="compose-surname" name="surname" type="text" maxlength="80" spellcheck="false" autocapitalize="words" autocomplete="off" autocorrect="off" placeholder="Введите фамилию" required>
+            <div id="direct-fields" hidden>
+              <label for="compose-photo" class="photo-picker"><svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M8 5l1.5-2h5L16 5h3a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h3Z"/><circle cx="12" cy="12" r="4"/></svg><span class="photo-picker-label">Добавить фото</span><input id="compose-photo" class="visually-hidden" type="file" accept="image/jpeg,image/png,image/webp" aria-describedby="photo-help"></label>
+              <p id="photo-help" class="field-help compact-help">Один снимок. Выберите только нужную часть документа. Исходное фото может остаться в галерее и её резервной копии.</p>
+              <img id="photo-preview" class="message-photo" alt="Фото, подготовленное к шифрованию" hidden>
+              <p id="photo-status" class="field-help compact-help" role="status"></p>
+              <button id="photo-remove" class="button button-secondary" type="button" hidden>Убрать фото</button>
+              <label for="compose-comment">Комментарий</label>
+              <textarea id="compose-comment" rows="6" maxlength="2000" autocomplete="off" spellcheck="false" autocorrect="off" placeholder="Напишите, что нужно уточнить или проверить"></textarea>
+            </div>
+            </div>
+            <div class="compose-routing">
             <label for="recipient">Кому отправить</label>
             <select id="recipient" name="recipient" required>
               <option value="">Выберите группу врачей</option>
             </select>
             <p class="field-help">Содержимое доступно только подключённым врачам выбранной группы.</p>
             <label class="check-label" for="compose-orit"><input id="compose-orit" type="checkbox"><span>Пациент в ОРИТ</span></label>
-            <div id="direct-fields" hidden>
-              <label for="compose-comment">Комментарий</label>
-              <textarea id="compose-comment" rows="3" maxlength="2000" autocomplete="off" spellcheck="false" autocorrect="off" placeholder="При необходимости — пояснение врачу"></textarea>
-              <label for="compose-photo" class="photo-picker">Добавить фото<input id="compose-photo" type="file" accept="image/jpeg,image/png,image/webp" aria-describedby="photo-help"></label>
-              <p id="photo-help" class="field-help compact-help">Один снимок. Выберите только нужную часть документа. Исходное фото может остаться в галерее и её резервной копии.</p>
-              <img id="photo-preview" class="message-photo" alt="Фото, подготовленное к шифрованию" hidden>
-              <p id="photo-status" class="field-help compact-help" role="status"></p>
-              <button id="photo-remove" class="button button-secondary" type="button" hidden>Убрать фото</button>
-            </div>
-            <input id="message-caption" type="hidden" value="test">
             <label for="expiry">Срок доступа к сообщению</label>
             <select id="expiry" name="expiry">
               <option value="60">1 час</option>
               <option value="240">4 часа</option>
               <option value="1440" selected>24 часа</option>
             </select>
+            </div>
+            <input id="message-caption" type="hidden" value="test">
             <button id="encrypt" type="submit" class="button button-primary">Создать ссылку</button>
             <p id="push-compose-help" class="fine-print" hidden>Сообщение появится во «Входящих» получателей. Уведомление не содержит фамилии или фото.</p>
           </form>
@@ -160,22 +149,23 @@
           </div>
           <p class="fine-print">Скопируйте ссылку в выбранный чат. Комментарий в Пачке виден участникам чата.</p></div>
         </section>
-        <p id="notice" class="notice" role="status" aria-live="polite" tabindex="-1"></p>
-      </div>
-
-      <section id="push-panel" class="push-panel" aria-labelledby="push-heading">
-        <h2 id="push-heading">Уведомления</h2>
-        <p>Нажатие на уведомление откроет запись. Фамилия остаётся внутри просмотрщика.</p>
-        <p id="push-status" class="push-status" role="status" aria-live="polite">Подготовка уведомлений…</p>
-        <div class="push-actions">
-          <button id="push-enable" type="button" class="button button-primary" disabled>Включить уведомления</button>
-          <button id="push-test" type="button" class="button button-secondary" disabled hidden>Проверить уведомление</button>
-          <button id="push-disable" type="button" class="button button-secondary" disabled hidden>Отключить уведомления</button>
+      </section>
+      <section id="screen-team" class="app-screen" aria-labelledby="page-title" hidden>
+      <section id="team-panel" class="team-panel" aria-labelledby="team-heading" hidden>
+        <div class="team-heading-row"><h2 id="team-heading">Подключение</h2><button id="team-refresh" type="button" class="text-button">Обновить</button></div>
+        <p id="team-state" role="status">Проверяем подключение…</p>
+        <div id="join-panel" hidden>
+          <p id="join-hint"></p>
+          <button id="team-claim" type="button" class="button button-primary">Подключить этот телефон</button>
+          <button id="copy-join" type="button" class="button button-secondary">Скопировать приглашение</button>
+          <details><summary>Ссылка приглашения</summary><textarea id="join-link" rows="2" readonly></textarea></details>
         </div>
-        <p class="fine-print">Разрешите один раз на этом телефоне.</p>
+        <p id="organizer-missing" class="fine-print" hidden>Для новых сообщений откройте личное приглашение организатора и один раз подтвердите его ключ.</p>
+        <section id="organizer-trust" class="contact-confirm" hidden><h2>Ключ организатора</h2><p id="organizer-code" class="fingerprint device-id"></p><label class="check-label"><input id="organizer-confirm" type="checkbox"><span>Приглашение получил от организатора по известному каналу, код сверили</span></label><button id="organizer-save" type="button" class="button button-primary" disabled>Подтвердить организатора</button></section>
+        <details id="team-code-box" hidden><summary>Мой контрольный код</summary><p id="team-my-code" class="device-id fingerprint"></p></details>
       </section>
 
-      <details id="team-admin" class="admin-panel" hidden>
+      <details id="team-admin" class="admin-panel" open hidden>
         <summary>Управление командой</summary>
         <div class="details-body">
           <section class="contact-section">
@@ -203,10 +193,24 @@
           <section class="contact-section"><h2>Врачи и устройства</h2><p class="field-help compact-help">При увольнении отключите все устройства врача. Для смены телефона создайте приглашение, затем в новой заявке выберите прежний телефон. Старые сообщения не переносятся.</p><div id="team-members"></div></section>
         </div>
       </details>
-      <details class="settings-panel">
+      </section>
+      <section id="screen-settings" class="app-screen" aria-labelledby="page-title" hidden>
+      <section id="push-panel" class="push-panel" aria-labelledby="push-heading">
+        <h2 id="push-heading">Уведомления</h2>
+        <p>Нажатие на уведомление откроет запись. Фамилия остаётся внутри просмотрщика.</p>
+        <p id="push-status" class="push-status" role="status" aria-live="polite">Подготовка уведомлений…</p>
+        <div class="push-actions">
+          <button id="push-enable" type="button" class="button button-primary" disabled>Включить уведомления</button>
+          <button id="push-test" type="button" class="button button-secondary" disabled hidden>Проверить уведомление</button>
+          <button id="push-disable" type="button" class="button button-secondary" disabled hidden>Отключить уведомления</button>
+        </div>
+        <p class="fine-print">Разрешите один раз на этом телефоне.</p>
+      </section>
+
+      <details id="app-settings" class="settings-panel" open>
         <summary>Настройки и помощь</summary>
         <div class="details-body">
-          <p class="fine-print">Версия 10 · Сообщения</p>
+          <p id="status" class="device-status" role="status">Подготовка…</p>
           <button id="app-update" type="button" class="button button-secondary">Проверить обновление</button>
           <p id="app-update-status" class="field-help" role="status"></p>
           <section id="device-unlock-settings" class="contact-section" hidden>
@@ -303,7 +307,14 @@
       <footer>
         <p>Поступления — от бота. Проверочные истории — от неврологов.</p>
       </footer>
+      </section>
     </main>
+    <nav class="bottom-nav" aria-label="Разделы приложения">
+      <button id="show-read" type="button" aria-pressed="true" aria-controls="screen-read"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M3 12h5l2 3h4l2-3h5"/></svg><span id="nav-read-label" class="nav-label">Сообщения</span></button>
+      <button id="show-write" type="button" aria-pressed="false" aria-controls="screen-write" hidden><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 4 5 5M4 20l4-1 12-12a2.1 2.1 0 0 0-3-3L5 16l-1 4Z"/></svg><span id="nav-write-label" class="nav-label">Написать</span></button>
+      <button id="show-team" type="button" aria-pressed="false" aria-controls="screen-team"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="9" cy="8" r="3"/><path d="M3 20v-2a6 6 0 0 1 12 0v2M16 5a3 3 0 0 1 0 6M18 14a5 5 0 0 1 3 4v2"/></svg><span id="nav-team-label" class="nav-label">Команда</span></button>
+      <button id="show-settings" type="button" aria-pressed="false" aria-controls="screen-settings"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3" fill="currentColor"/><circle cx="15" cy="17" r="3" fill="currentColor"/></svg><span id="nav-settings-label" class="nav-label">Настройки</span></button>
+    </nav>
   </div>
   <script type="module" src="app.mjs"></script>
 </body>

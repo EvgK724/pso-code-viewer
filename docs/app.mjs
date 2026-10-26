@@ -22,6 +22,7 @@ const deviceUnlock = DEVICE_AUTH_ENDPOINT ? new DeviceUnlockClient(DEVICE_AUTH_E
 const $ = id => document.getElementById(id);
 let device, selfContact, contacts = [], candidate = null;
 let ready = false, busy = false, generation = 0, timer, endsAt = 0, demoLink = '';
+let activeScreen = 'read';
 let queuedIncoming = location.hash, activeIncoming = null;
 let workerReady = null, pushBusy = false, pushEnabled = false, pushSupported = false, pushRefreshPending = false;
 let pushPublicKey = '', pushSubscription = null;
@@ -105,12 +106,47 @@ function suspendSensitive() {
   if (activeIncoming?.pending && activeIncoming.generation === generation && !queuedIncoming) queuedIncoming = activeIncoming.hash;
   clearSensitive();deviceUnlock?.clear();
 }
+const screens = {
+  read: ['Сообщения', 'Входящие и исходящие сообщения вашей команды.'],
+  write: ['Новое сообщение', 'Фамилия, фото и комментарий для врача.'],
+  team: ['Команда', 'Подключение, приглашения и доступ врачей.'],
+  settings: ['Настройки', 'Уведомления, защита и помощь.']
+};
+function allowedScreen(screen) {
+  if (!(screen in screens)) return 'read';
+  if (screen === 'write' && teamClient && !canReview()) return 'read';
+  if (screen === 'team' && !teamClient) return 'settings';
+  return screen;
+}
+function renderNavigation() {
+  for (const screen of Object.keys(screens)) {
+    $('screen-' + screen).hidden = screen !== activeScreen;
+    $('show-' + screen).setAttribute('aria-pressed', String(screen === activeScreen));
+  }
+  $('show-write').hidden = !!teamClient && !canReview();
+  $('show-team').hidden = !teamClient;
+  $('read-panel').hidden = activeScreen !== 'read';
+  $('write-panel').hidden = activeScreen !== 'write';
+  $('direct-panel').hidden = !directClient || activeScreen !== 'read';
+  $('legacy-open').hidden = activeScreen !== 'read';
+  $('page-title').textContent = screens[activeScreen][0];
+  $('page-description').textContent = screens[activeScreen][1];
+}
+function showScreen(screen, {preserveNotice=false, focus=false} = {}) {
+  const next = allowedScreen(screen);
+  // Re-tapping the current tab must not erase an unfinished message.
+  if (next === activeScreen) return;
+  clearSensitive(); activeScreen = next; renderNavigation();
+  if (ready && !preserveNotice) say('');
+  if (focus) {
+    $('page-title').scrollIntoView({block:'start', behavior:'auto'});
+    $('page-title').focus({preventScroll:true});
+  }
+}
 function showMode(mode, {preserveNotice=false} = {}) {
-  clearSensitive(); const read = mode === 'read' || !!(teamClient && !canReview());
-  $('read-panel').hidden = !read; $('write-panel').hidden = read;
-  $('direct-panel').hidden=!directClient||!read;
-  $('legacy-open').hidden=!!directClient&&!read;
-  $('show-read').setAttribute('aria-pressed', String(read)); $('show-write').setAttribute('aria-pressed', String(!read)); if (ready&&!preserveNotice) say('');
+  // Opening another message invalidates any earlier reveal, even in the same tab.
+  clearSensitive(); activeScreen = allowedScreen(mode); renderNavigation();
+  if (ready && !preserveNotice) say('');
 }
 function messageCaption() {
   if (teamClient) return 'Проверочная история';
@@ -362,8 +398,9 @@ $('push-test').addEventListener('click', async () => {
   finally { await finishPushAction(); }
 });
 
-$('show-read').addEventListener('click', () => showMode('read'));
-$('show-write').addEventListener('click', () => showMode('write'));
+for (const screen of Object.keys(screens)) {
+  $('show-' + screen).addEventListener('click', () => showScreen(screen, {focus:true}));
+}
 $('open-form').addEventListener('submit', event => { event.preventDefault(); return openInput($('token').value); });
 $('token').addEventListener('input', clearHandoff);
 $('paste-open').addEventListener('click', pasteAndOpen);
@@ -440,6 +477,7 @@ $('copy-composed-compact').addEventListener('click', () => {
 $('copy-composed-address').addEventListener('click', () => copyText($('output-link').value, 'output-link', 'Ссылка скопирована. Вставьте её в выбранный чат.', 'compose-full-link'));
 $('demo').addEventListener('click', async () => {
   if (busy || !ready) return;
+  showMode('read');
   clearSensitive(); const current = generation; setBusy(true); say('Создаём вымышленный пример…');
   try {
     $('legacy-open').open=true;
@@ -466,6 +504,7 @@ $('copy-card-compact').addEventListener('click', () => copyCompactLink($('my-car
 $('contact-input').addEventListener('input', () => setCandidate(null));
 async function inspectCard(input, fromIncoming = false) {
   if (busy || !ready) return;
+  showScreen('settings', {preserveNotice:true});
   clearSensitive(); $('contacts-details').open = true; $('contact-input').value = input;
   const current = generation;
   if (fromIncoming && activeIncoming) activeIncoming.generation = current;
@@ -560,14 +599,15 @@ function renderTeam(){
   const identity=displayTeam?.state==='active'?displayTeam.name+' · '+roleLabels[displayTeam.role]:'';
   $('team-state').textContent=teamState.state==='active'?identity:teamState.state==='unavailable'?(identity?identity+'. ':'')+(teamConnectionMessage||'Нет связи с командой. Действия недоступны. Нажмите «Обновить».'):({pending:'Подключение ожидает подтверждения администратора.',revoked:'Доступ этого телефона отключён.',unregistered:'Откройте приглашение от администратора.'})[teamState.state];
   $('show-write').hidden=!canReview();
-  if(!canReview())showMode('read',{preserveNotice:true});
-  if(directClient){$('show-read').textContent='Входящие';$('show-write').textContent='Написать';$('direct-panel').hidden=teamState.state!=='active';$('inbox-status').textContent=teamState.state==='active'?'':$('team-state').textContent;}
+  if(activeScreen==='write'&&!canReview())showScreen('read',{preserveNotice:true});
+  if(directClient)$('inbox-status').textContent=teamState.state==='active'?'':$('team-state').textContent;
   if(teamState.state==='unregistered')$('legacy-open').open=true;
   // The last confirmed role is display-only; all actions use teamState.
   $('team-admin').hidden=displayTeam?.state!=='active'||displayTeam?.role!=='admin';
   $('team-my-code').textContent=selfContact?.fingerprint||'';
   $('team-code-box').hidden=!['pending','active'].includes(teamState.state);
   updateTeamButtons();
+  renderNavigation();
 }
 async function refreshTeam(){
   if(!teamClient||!device||teamBusy)return;
@@ -600,6 +640,7 @@ async function notificationContacts(){
   return local;
 }
 async function prepareJoin(input,fromIncoming=false){
+  showScreen('team', {preserveNotice:true});
   joinID='';invitationOrganizer=null;$('join-panel').hidden=true;
   $('organizer-trust').hidden=true;$('organizer-confirm').checked=false;
   const current=generation;
@@ -741,8 +782,9 @@ async function init() {
   if(teamClient) { $('message-caption').value='test';$('encrypt').textContent=directClient?'Отправить врачу':'Создать проверочную ссылку';$('push-compose-help').hidden=false; }
   $('direct-fields').hidden=!directClient;$('direct-panel').hidden=!directClient;
   $('legacy-open').open=!directClient||teamState.state==='unregistered';
-  if(directClient){$('show-read').textContent='Входящие';$('show-write').textContent='Написать';$('compose-surname').required=false;$('legacy-output').hidden=true;setInterval(async()=>{if(!document.hidden){await refreshInbox();await retryPending(false);}},60000);}
+  if(directClient){$('compose-surname').required=false;$('legacy-output').hidden=true;setInterval(async()=>{if(!document.hidden){await refreshInbox();await retryPending(false);}},60000);}
   $('device-unlock-settings').hidden=!deviceUnlock;
+  renderNavigation();
   void initNotifications();
 }
 $('app-update').addEventListener('click',async()=>{

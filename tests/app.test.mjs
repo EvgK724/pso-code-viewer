@@ -1772,3 +1772,106 @@ test('a queued notification survives a failed team refresh and opens only after 
  await waitUntil(()=>s.requests.filter(e=>e.op==='ack').length===1,'retained notification acknowledged');
  assert.equal(s.requests.filter(e=>e.op==='open').length,1);
 });
+
+function assertScreen(app,selected){
+ for(const screen of ['read','write','team','settings']){
+  assert.equal(app.el('screen-'+screen).hidden,screen!==selected,'Only the '+selected+' screen is visible: '+screen);
+  assert.equal(app.el('show-'+screen).attributes.get('aria-pressed'),String(screen===selected),'Navigation selection follows visible screen: '+screen);
+ }
+}
+
+test('bottom navigation shows one topic at a time and keeps the writer role restriction',async()=>{
+ const stores=await Promise.all([persistentDevice(),persistentDevice()]);
+ const service=await teamFixture(stores,['neurologist','cardiologist']);
+ const writer=await harness(stores[0],'',service.options);
+ for(const screen of ['write','team','settings','read']){
+  await writer.event('show-'+screen);assertScreen(writer,screen);
+ }
+ const reader=await harness(stores[1],'',service.options);
+ assert.equal(reader.el('show-write').hidden,true);
+ for(const screen of ['team','settings','read']){
+  await reader.event('show-'+screen);assertScreen(reader,screen);
+ }
+ await reader.event('show-write');
+ assert.equal(reader.el('screen-write').hidden,true,'A synthetic click cannot grant writing access');
+ assert.equal(reader.el('write-panel').hidden,true);
+ assert.equal(service.requests.filter(e=>e.op==='create').length,0);
+});
+
+test('selecting the current write tab keeps the draft while leaving it clears plaintext',async()=>{
+ const app=await harness(await persistentDevice());
+ await app.event('show-write');
+ app.el('compose-surname').value='Тестовая';app.el('compose-comment').value='Пояснение врачу';
+ await app.event('show-write');assertScreen(app,'write');
+ assert.equal(app.el('compose-surname').value,'Тестовая');
+ assert.equal(app.el('compose-comment').value,'Пояснение врачу');
+ await app.event('show-settings');assertScreen(app,'settings');
+ assert.equal(app.el('compose-surname').value,'');assert.equal(app.el('compose-comment').value,'');
+ assert.equal(app.el('photo-preview').hidden,true);
+ await app.event('show-write');assertScreen(app,'write');
+ assert.equal(app.el('compose-surname').value,'');assert.equal(app.el('compose-comment').value,'');
+});
+
+test('team status refresh keeps the selected topic and an authorized writer draft',async()=>{
+ const stores=await Promise.all([persistentDevice(),persistentDevice()]);
+ const service=await teamFixture(stores,['neurologist','cardiologist']);
+ const reader=await harness(stores[1],'',service.options);
+ for(const screen of ['team','settings']){
+  await reader.event('show-'+screen);await reader.event('team-refresh');await reader.idle();
+  assertScreen(reader,screen);
+ }
+ const writer=await harness(stores[0],'',service.options);
+ await writer.event('show-write');writer.el('compose-surname').value='Тестовая';writer.el('compose-comment').value='Не потерять при обновлении';
+ await writer.event('team-refresh');await writer.idle();assertScreen(writer,'write');
+ assert.equal(writer.el('compose-surname').value,'Тестовая');
+ assert.equal(writer.el('compose-comment').value,'Не потерять при обновлении');
+});
+
+test('changing topics hides decrypted patient content and revokes its photo without redisplaying on return',async()=>{
+ const s=await directFixture(),issued=Date.now(),id=direct.newMessageID(),meta={id,group:'cardiology',kind:'review',issued,expires:issued+60000};
+ const data=(await readFile(new URL('./fixtures/review.jpg',import.meta.url))).toString('base64url');
+ const photo={mime:'image/jpeg',data,width:3,height:2},recipient={...await exchange.importPublicCard(s.members[2].card),verified:true};
+ const sealed=await messages.sealMessage(s.stores[1].device,[recipient],{surname:'Тестовая',comment:'Защищённый комментарий',photo},meta);
+ s.records.set(id,{...meta,...sealed,sender:s.members[1],opened:new Set()});
+ const reader=await harness(s.stores[2],'',s.options);await reader.event('show-settings');
+ await reader.hashchange('#m='+id);await reader.idle();assertScreen(reader,'read');
+ assert.equal(reader.el('surname').textContent,'Тестовая');assert.equal(reader.el('result-comment').textContent,'Защищённый комментарий');
+ const url=reader.el('result-photo').src;assert.match(url,/^blob:/);assert.equal((await fetch(url)).status,200);
+ await reader.event('show-team');assertScreen(reader,'team');
+ assert.equal(reader.el('result').hidden,true);assert.equal(reader.el('surname').textContent,'');assert.equal(reader.el('result-comment').textContent,'');
+ assert.equal(reader.el('result-photo').hidden,true);await assert.rejects(fetch(url));
+ await reader.event('show-read');assertScreen(reader,'read');assert.equal(reader.el('result').hidden,true);
+ assert.equal(reader.el('surname').textContent,'');assert.equal(reader.el('result-comment').textContent,'');
+});
+
+test('changing topics while a message opens prevents its delayed plaintext and acknowledgement',async()=>{
+ const s=await directFixture(),writer=await harness(s.stores[1],'',s.options);await directSend(writer);
+ const record=[...s.records.values()][0];let release;s.gate(new Promise(resolve=>release=resolve));
+ const reader=await harness(s.stores[2],'',s.options),operation=reader.hashchange('#m='+record.id);
+ await waitUntil(()=>s.requests.some(r=>r.op==='open'),'message opening before navigation');
+ await reader.event('show-settings');assertScreen(reader,'settings');release();await operation;await reader.idle();
+ assertScreen(reader,'settings');assert.equal(reader.el('result').hidden,true);
+ assert.equal(reader.el('surname').textContent,'');assert.equal(reader.el('result-comment').textContent,'');
+ assert.equal(s.requests.filter(r=>r.op==='ack').length,0);
+});
+
+test('an incoming invitation selects the team topic without bypassing explicit enrollment',async()=>{
+ const fixture=await invitationFixture(),app=await harness(fixture.store,'',fixture.options);
+ await app.event('show-settings');assertScreen(app,'settings');
+ await app.hashchange(new URL(fixture.url).hash);await app.idle();
+ assertScreen(app,'team');assert.equal(app.el('join-panel').hidden,false,app.el('notice').textContent);
+ assert.equal(app.el('organizer-trust').hidden,false);assert.equal(app.el('organizer-save').disabled,true);
+ assert.equal(app.el('team-claim').disabled,true,'Ordinary browser cannot enroll');
+ assert.equal(fixture.service.requests.filter(e=>e.op==='claim').length,0);
+});
+
+test('an incoming public card opens its confirmation in settings instead of a hidden topic',async()=>{
+ const sender=await persistentDevice(),recipient=await persistentDevice(),app=await harness(recipient);
+ await app.event('show-read');
+ const card=await exchange.exportPublicCard(sender.device,'Коллега');
+ await app.hashchange(new URL(sharing.cardLinkFor(card,origin+appPath)).hash);await app.idle();
+ assertScreen(app,'settings');assert.equal(app.el('contacts-details').open,true);
+ assert.equal(app.el('contact-confirm').hidden,false,app.el('notice').textContent);
+ assert.equal(app.el('save-contact').disabled,true,'Verification is still required');
+ assert.equal(recipient.contacts.size,0);
+});
