@@ -104,6 +104,53 @@ test('expired invitations and invitations from a revoked organizer fail closed',
   assert.deepEqual(await store.pending(admin),{status:'denied'});
 });
 
+test('short invitation lookup is nonconsuming, private-field free and bound to an immutable snapshot',async()=>{
+  const {db,store,now}=await fixture(),stranger=id(9),invitation=hash(1),snapshot=CARD+'A';
+  assert.equal(await store.accept(stranger,nonce(1),'invite_info',now(),CARD,SPKI),'ok');
+  assert.deepEqual(await store.inviteInfo(stranger,invitation),{status:'missing'});
+  assert.equal((await store.invite(neurologist,invitation,'Private name','bot',snapshot)).status,'denied');
+  assert.equal((await store.invite(admin,invitation,'Private name','bot','malformed')).status,'invalid');
+  const created=await store.invite(admin,invitation,'Private name','bot',snapshot);
+  assert.equal(created.status,'created');
+  const before=db.dump();
+  for(let n=0;n<2;n++) {
+    assert.deepEqual(await store.inviteInfo(stranger,invitation),{status:'ok',expires:created.expires,organizerCard:snapshot});
+    assert.deepEqual(db.dump(),before,'Lookup does not create membership, claim or additional quota records');
+  }
+  assert.deepEqual(await store.invite(admin,invitation,'Private name','bot',snapshot),{status:'exists',expires:created.expires});
+  assert.deepEqual(await store.invite(admin,invitation,'Private name','bot',CARD),{status:'conflict'});
+  assert.deepEqual(await store.invite(admin,invitation,'Private name','bot'),{status:'conflict'});
+  assert.equal(db.dump().get(`invite:${invitation}`).organizer_card,snapshot);
+  assert.equal(await store.claim(stranger,invitation,CARD,SPKI),'pending');
+  assert.deepEqual(await store.inviteInfo(stranger,invitation),{status:'missing'});
+  assert.deepEqual(await store.inviteInfo(id(10),invitation),{status:'missing'});
+  assert.equal(await store.claim(stranger,invitation,CARD,SPKI),'pending','Claim retries retain existing semantics');
+  assert.equal(await store.approve(admin,stranger),'active');
+  assert.equal(await store.claim(stranger,invitation,CARD,SPKI),'active');
+});
+
+test('lookup fails closed for legacy snapshots, revoked identities, expired or malformed expiry',async()=>{
+  const {db,store,seed,advance,now}=await fixture(),stranger=id(9);
+  await store.invite(admin,hash(1),'Legacy','neurologist');
+  assert.deepEqual(await store.inviteInfo(stranger,hash(1)),{status:'missing'});
+  assert.deepEqual(await store.invite(admin,hash(1),'Legacy','neurologist',CARD),{status:'conflict'});
+  assert.equal(await store.claim(stranger,hash(1),CARD,SPKI),'pending','Legacy invitation claim remains supported');
+  await store.invite(admin,hash(2),'New','neurologist',CARD);
+  await seed(neurologist,'neurologist','revoked');
+  assert.deepEqual(await store.inviteInfo(neurologist,hash(2)),{status:'denied'});
+  await seed(admin,'admin','revoked');
+  assert.deepEqual(await store.inviteInfo(stranger,hash(2)),{status:'missing'});
+  await seed(admin,'admin');
+  const record=db.dump().get(`invite:${hash(2)}`);
+  for(const expires of [String(now()+DAY),null,now()+0.5]) {
+    await db.seed(`invite:${hash(2)}`,{...record,expires});
+    assert.deepEqual(await store.inviteInfo(stranger,hash(2)),{status:'missing'});
+  }
+  await db.seed(`invite:${hash(2)}`,record);
+  advance(2*DAY);
+  assert.deepEqual(await store.inviteInfo(stranger,hash(2)),{status:'missing'});
+});
+
 test('team revocation removes holder credential, pending challenges and every session atomically',async()=>{
   const {db,store,seed,now}=await fixture();
   await seed(neurologist);
@@ -227,3 +274,4 @@ test('revoked sender, stale subscription or removed membership cannot emit a pus
   assert.equal(db.dump().has(`pushendpoint:${hash(3)}`),false);
   assert.deepEqual(await store.pushClaim(neurologist,hash(1)),{targets:[]});
 });
+

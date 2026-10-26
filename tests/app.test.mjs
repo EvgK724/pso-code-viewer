@@ -1128,7 +1128,7 @@ test('composition notifies only the created short-link capability; push failure 
 });
 
 async function teamFixture(stores,roles,{pushResult='unavailable',resolveStatus=0}={}){
-  const records=new Map(),requests=[],members=[];
+  const records=new Map(),invitations=new Map(),requests=[],members=[];
   for(let i=0;i<stores.length;i++){const card=await exchange.exportPublicCard(stores[i].device,'Врач '+i),c=await exchange.importPublicCard(card);members.push({id:c.id,name:'Врач '+i,role:roles[i],card});}
   let pending=[];
   const fetcher=async(url,options)=>{
@@ -1139,7 +1139,14 @@ async function teamFixture(stores,roles,{pushResult='unavailable',resolveStatus=
     if(e.op==='pending')return response({members:pending});
     if(e.op==='claim'){pending.push({id:own.id,name:'Заявка',role:'neurologist',card:e.card});return response({state:'pending'});}
     if(e.op==='approve'){const entry=pending.find(v=>v.id===e.data.deviceId);if(entry){members.push(entry);pending=pending.filter(v=>v!==entry);}return response({state:'active'});}
-    if(e.op==='invite')return response({id:e.data.id,expires:Date.now()+60000});
+    if(e.op==='invite'){
+      const invitation={id:e.data.id,expires:Date.now()+60000,...(e.data.organizerCard?{organizerCard:e.data.organizerCard}:{})};
+      invitations.set(e.data.id,invitation);return response({id:invitation.id,expires:invitation.expires});
+    }
+    if(e.op==='invite_info'){
+      const invitation=invitations.get(e.data.id);
+      return invitation?.organizerCard?response(invitation):response({error:'request_rejected'},404);
+    }
     if(e.op==='create'){records.set(e.data.id,{...e.data,sender:m});return response({id:e.data.id,expires:e.data.expires,push:pushResult});}
     if(e.op==='resolve'){
       if(resolveStatus)return response({error:'request_rejected'},resolveStatus);
@@ -1149,7 +1156,7 @@ async function teamFixture(stores,roles,{pushResult='unavailable',resolveStatus=
     }
     return response({error:'request_rejected'},403);
   };
-  return {members,records,requests,setPending(value){pending=value;},options:{teamEndpoint:'https://team.example/api',teamFetch:fetcher,shortlinkEndpoint:'https://legacy.example/api',shortlinkFetch:async()=>new Response('{}',{status:404,headers:{'Content-Type':'application/json'}})}};
+  return {members,records,invitations,requests,setPending(value){pending=value;},options:{teamEndpoint:'https://team.example/api',teamFetch:fetcher,shortlinkEndpoint:'https://legacy.example/api',shortlinkFetch:async()=>new Response('{}',{status:404,headers:{'Content-Type':'application/json'}})}};
 }
 
 test('team UI exposes manual review only to neurologists/admin and never offers self/individual recipients',async()=>{
@@ -1198,6 +1205,104 @@ async function invitationFixture(){
  const options={...service.options,directEndpoint:'https://direct.example/api',directFetch:async()=>{throw new Error('No direct call expected before enrollment');}};
  return {store,service,card,id,url,options};
 }
+
+async function shortInvitationFixture(){
+ const s=await invitationFixture();
+ const url=await recipientTrust.shortTrustedInvitationURL(origin+appPath,s.id,s.card);
+ s.service.invitations.set(s.id,{id:s.id,expires:Date.now()+60000,organizerCard:s.card});
+ return {...s,url};
+}
+
+test('short invitation loads its public card without claiming or pinning and survives browser reload',async()=>{
+ const s=await shortInvitationFixture(),hash=new URL(s.url).hash;
+ assert.match(hash,/^#i=[A-Za-z0-9_-]{64}$/);
+ const browser=await harness(s.store,hash,s.options);
+ await waitUntil(()=>!browser.el('join-panel').hidden,'short invitation visible');
+ assert.equal(browser.el('join-link').value,s.url);assert.equal(browser.location.hash,hash);
+ assert.equal(browser.el('organizer-trust').hidden,false);assert.equal(browser.el('team-claim').disabled,true);
+ const lookups=s.service.requests.filter(r=>r.op==='invite_info');
+ assert.equal(lookups.length,1);assert.deepEqual(lookups[0].data,{id:s.id});
+ assert.equal(s.store.pins.size,0);assert.equal(s.service.requests.filter(r=>r.op==='claim').length,0);
+ const reloaded=await harness(s.store,browser.location.hash,s.options);
+ await waitUntil(()=>!reloaded.el('join-panel').hidden,'short invitation restored');
+ assert.equal(reloaded.el('join-link').value,s.url);assert.equal(reloaded.location.hash,hash);
+ assert.equal(s.service.requests.filter(r=>r.op==='invite_info').length,2);
+ assert.equal(s.store.pins.size,0);assert.equal(s.service.requests.filter(r=>r.op==='claim').length,0);
+});
+
+test('pasted short invitation requires explicit organizer confirmation and installed-device claim',async()=>{
+ const s=await shortInvitationFixture(),app=await harness(s.store,'',{...s.options,standalone:true,readText:s.url});
+ await app.event('paste-open');await app.idle();
+ assert.equal(app.el('join-link').value,s.url);assert.equal(app.el('join-panel').hidden,false);
+ assert.equal(s.service.requests.filter(r=>r.op==='invite_info').length,1);
+ assert.equal(s.store.pins.size,0);assert.equal(s.service.requests.filter(r=>r.op==='claim').length,0);
+ await app.event('team-claim');assert.equal(s.service.requests.filter(r=>r.op==='claim').length,0);
+ app.el('organizer-confirm').checked=true;await app.event('organizer-confirm','change');
+ await app.event('organizer-save');await app.idle();assert.equal(s.store.pins.size,1);
+ await app.event('team-claim');
+ assert.equal(s.service.requests.filter(r=>r.op==='claim').length,1);
+ assert.equal(s.service.requests.find(r=>r.op==='claim').data.id,s.id);
+ assert.equal(app.el('join-panel').hidden,true);
+});
+
+test('short invitation rejects a substituted public card without pinning or submitting a claim',async()=>{
+ const s=await shortInvitationFixture(),other=await persistentDevice();
+ const substituted=await exchange.exportPublicCard(other.device,'Другой организатор');
+ s.service.invitations.set(s.id,{id:s.id,expires:Date.now()+60000,organizerCard:substituted});
+ const app=await harness(s.store,'',{...s.options,standalone:true,readText:s.url});
+ await app.event('paste-open');await app.idle();
+ assert.equal(s.service.requests.filter(r=>r.op==='invite_info').length,1);
+ assert.equal(app.el('join-panel').hidden,true);assert.equal(app.el('organizer-trust').hidden,true);
+ assert.equal(app.el('team-claim').disabled,true);assert.match(app.el('notice').textContent,/ключ|карточк|приглашени/i);
+ await app.event('team-claim');
+ assert.equal(s.store.pins.size,0);assert.equal(s.service.requests.filter(r=>r.op==='claim').length,0);
+});
+
+test('a short invitation cannot replace a confirmed organizer with another root key',async()=>{
+ const s=await shortInvitationFixture(),other=await persistentDevice();
+ const app=await harness(s.store,'',{...s.options,standalone:true,readText:s.url});
+ await app.event('paste-open');await app.idle();
+ app.el('organizer-confirm').checked=true;await app.event('organizer-confirm','change');
+ await app.event('organizer-save');await app.idle();
+ const storedPin=[...s.store.pins.entries()];assert.equal(storedPin.length,1);
+ const otherCard=await exchange.exportPublicCard(other.device,'Другой организатор'),otherID=team.randomTeamID();
+ const otherURL=await recipientTrust.shortTrustedInvitationURL(origin+appPath,otherID,otherCard);
+ s.service.invitations.set(otherID,{id:otherID,expires:Date.now()+60000,organizerCard:otherCard});
+ app.setReadText(otherURL);await app.event('paste-open');await app.idle();
+ assert.equal(app.el('join-panel').hidden,true);assert.equal(app.el('team-claim').disabled,true);
+ assert.match(app.el('notice').textContent,/Ключ организатора.*не совпадает.*сохранённым/);
+ await app.event('team-claim');
+ assert.deepEqual([...s.store.pins.entries()],storedPin);
+ assert.equal(s.service.requests.filter(r=>r.op==='claim').length,0);
+ const reloaded=await harness(s.store,new URL(otherURL).hash,{...s.options,standalone:true});
+ await waitUntil(()=>/Ключ организатора.*не совпадает.*сохранённым/.test(reloaded.el('notice').textContent),'saved pin checked after reload');
+ assert.equal(reloaded.el('join-panel').hidden,true);assert.equal(reloaded.el('team-claim').disabled,true);
+ await reloaded.event('team-claim');
+ assert.deepEqual([...s.store.pins.entries()],storedPin);
+ assert.equal(s.service.requests.filter(r=>r.op==='claim').length,0);
+});
+
+test('a delayed short-invitation response cannot replace a newer incoming invitation',async()=>{
+ const s=await shortInvitationFixture(),other=await persistentDevice();
+ const nextCard=await exchange.exportPublicCard(other.device,'Следующий организатор'),nextID=team.randomTeamID();
+ const nextURL=await recipientTrust.shortTrustedInvitationURL(origin+appPath,nextID,nextCard);
+ s.service.invitations.set(nextID,{id:nextID,expires:Date.now()+60000,organizerCard:nextCard});
+ let release,started=false,finished=false;
+ const gate=new Promise(resolve=>release=resolve);
+ const app=await harness(s.store,'',{...s.options,standalone:true,teamFetch:async(url,options)=>{
+  const e=JSON.parse(options.body).envelope;
+  if(e.op==='invite_info'&&e.data.id===s.id){started=true;await gate;const response=await s.options.teamFetch(url,options);finished=true;return response;}
+  return s.options.teamFetch(url,options);
+ }});
+ await app.hashchange(new URL(s.url).hash);await waitUntil(()=>started,'first lookup started');
+ await app.hashchange(new URL(nextURL).hash);
+ release();await waitUntil(()=>finished,'old lookup finished');
+ await waitUntil(()=>app.el('join-link').value===nextURL&&!app.el('join-panel').hidden,'new invitation displayed');
+ assert.equal(app.location.hash,new URL(nextURL).hash);
+ const next=await exchange.importPublicCard(nextCard);assert.equal(app.el('organizer-code').textContent,next.fingerprint);
+ assert.equal(s.store.pins.size,0);assert.equal(s.service.requests.filter(r=>r.op==='claim').length,0);
+ assert.deepEqual(s.service.requests.filter(r=>r.op==='invite_info').map(r=>r.data.id).sort(),[s.id,nextID].sort());
+});
 
 test('compact invitation opens and survives reload without enrolling or trusting a device automatically',async()=>{
  const s=await invitationFixture(),hash=new URL(s.url).hash;
@@ -1261,7 +1366,7 @@ test('invite sharing sends only the full URL from the click gesture; cancel neve
  }});
  app.el('invite-name').value='Тестовый кардиолог';app.el('invite-role').value='cardiologist';
  await app.event('invite-form','submit');
- const url=app.el('invite-link').value;assert.match(url,/#invite=/);
+ const url=app.el('invite-link').value;assert.match(new URL(url).hash,/^#i=[A-Za-z0-9_-]{64}$/);
  const first=app.event('share-invite');
  assert.deepEqual(payloads,[{url}],'Native share must run during the button gesture, with no additional text/card');
  await first;assert.deepEqual(app.clipboardAttempts(),{rich:0,plain:0});
@@ -1272,7 +1377,7 @@ test('invite sharing sends only the full URL from the click gesture; cancel neve
 test('without native sharing the invitation copy fallback retains the complete URL',async()=>{
  const s=await directFixture(['admin']),app=await harness(s.stores[0],'',{...s.options,standalone:true});
  app.el('invite-name').value='Тестовый кардиолог';app.el('invite-role').value='cardiologist';
- await app.event('invite-form','submit');const url=app.el('invite-link').value;assert.match(url,/#invite=/);
+ await app.event('invite-form','submit');const url=app.el('invite-link').value;assert.match(new URL(url).hash,/^#i=[A-Za-z0-9_-]{64}$/);
  await app.event('share-invite');assert.equal(app.clipboard(),url);
  assert.deepEqual(app.clipboardAttempts(),{rich:0,plain:1});
 });

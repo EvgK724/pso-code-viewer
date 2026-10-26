@@ -51,3 +51,34 @@ test('transport preserves HTTP error class and rejects malformed/oversized respo
  await assert.rejects(client(()=>new Response('x'.repeat(1000001),{headers:{'Content-Type':'application/json'}})).status(device),/слишком большой/);
  await assert.rejects(client(()=>new Response('{}',{headers:{'Content-Type':'text/html'}})).status(device),/Неверный/);
 });
+
+test('new invitation submits a caller-owned exact public-card snapshot while old payload stays compatible',async()=>{
+ let sent;const c=client(e=>{sent=e;return reply({id:e.data.id,expires:Date.now()+60000});});
+ await c.invite(device,'Доктор','cardiologist',cards[0]);
+ assert.equal(sent.op,'invite');assert.equal(sent.data.organizerCard,cards[0]);
+ assert.deepEqual(Object.keys(sent.data).sort(),['id','name','organizerCard','role']);
+ const before=sent;
+ await assert.rejects(c.invite(device,'Доктор','cardiologist',cards[1]),/не совпадает/);assert.equal(sent,before);
+ await assert.rejects(c.invite(device,'Доктор','cardiologist',' '+cards[0]),/не совпадает/);assert.equal(sent,before);
+ await c.invite(device,'Доктор','cardiologist');assert.deepEqual(Object.keys(sent.data).sort(),['id','name','role']);
+});
+
+test('invitation info is a signed read-only operation with exact ID and card response',async()=>{
+ const id=randomTeamID(),info={id,expires:Date.now()+60000,organizerCard:cards[0]};let sent;
+ const result=await client(e=>{sent=e;return reply(info);}).invitationInfo(other,id);
+ assert.deepEqual(result,info);assert.equal(sent.op,'invite_info');assert.deepEqual(sent.data,{id});
+ const {signature,...unsigned}=sent,owner=await importPublicCard(sent.card);
+ assert.equal(owner.id,contacts[1].id);
+ assert.equal(await crypto.subtle.verify({name:'ECDSA',hash:'SHA-256'},owner.signingPublicKey,Buffer.from(signature,'base64url'),new TextEncoder().encode('PSO-TEAM-v1\0'+JSON.stringify(unsigned))),true);
+});
+
+test('invitation info rejects missing, spent, expired and malformed responses without claim or fallback',async()=>{
+ const id=randomTeamID(),info={id,expires:Date.now()+60000,organizerCard:cards[0]};
+ for(const bad of [null,{}, {...info,extra:true}, {...info,id:randomTeamID()}, {...info,expires:Date.now()-1},
+   {...info,expires:Date.now()+0.5}, {...info,organizerCard:' '+cards[0]}, {...info,organizerCard:'PSO-CARD1'}]){
+   const ops=[];await assert.rejects(client(e=>{ops.push(e.op);return reply(bad);}).invitationInfo(other,id));
+   assert.deepEqual(ops,['invite_info']);
+ }
+ for(const status of [403,404,409])await assert.rejects(client(()=>reply({},status)).invitationInfo(other,id),e=>e.status===status);
+ let calls=0;await assert.rejects(client(()=>{calls++;return reply(info);}).invitationInfo(other,'bad'));assert.equal(calls,0);
+});

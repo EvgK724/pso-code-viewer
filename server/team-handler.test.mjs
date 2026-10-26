@@ -41,7 +41,8 @@ function fixture({sendStatus='accepted',throwSend=false,acceptResult,createResul
     async accept(id,nonce,op,issued,card,spki){calls.push(['accept',id,nonce,op,issued,card,spki]);if(acceptResult)return acceptResult;if(nonces.has(id+nonce))return'replay';nonces.add(id+nonce);return'ok';},
     async status(id){calls.push(['status',id]);const m=roster.get(id);return m?{state:m.state,role:m.role,name:m.name}:{state:'unregistered',role:null,name:null};},
     async directory(id){calls.push(['directory',id]);return active(id)?{status:'ok',members:[...roster.values()].filter(m=>m.state==='active').map(publicMember)}:{status:'denied'};},
-    async invite(id,hash,name,role){calls.push(['invite',id,hash,name,role]);if(!isAdmin(id))return{status:'denied'};const old=invites.get(hash);if(old&&(old.name!==name||old.role!==role))return{status:'conflict'};if(!old)invites.set(hash,{name,role,expires:clock+86400000,claimed:null});return{status:old?'exists':'created',expires:invites.get(hash).expires};},
+    async invite(id,hash,name,role,organizerCard){calls.push(['invite',id,hash,name,role,organizerCard]);if(!isAdmin(id))return{status:'denied'};const old=invites.get(hash);if(old&&(old.name!==name||old.role!==role||old.organizerCard!==organizerCard))return{status:'conflict'};if(!old)invites.set(hash,{inviter:id,name,role,organizerCard,expires:clock+86400000,claimed:null});return{status:old?'exists':'created',expires:invites.get(hash).expires};},
+    async inviteInfo(id,hash){calls.push(['inviteInfo',id,hash]);if(roster.get(id)?.state==='revoked')return{status:'denied'};const invite=invites.get(hash);if(!invite||!Number.isSafeInteger(invite.expires)||invite.expires<=clock||invite.claimed||!invite.organizerCard||!isAdmin(invite.inviter))return{status:'missing'};return{status:'ok',expires:invite.expires,organizerCard:invite.organizerCard};},
     async claim(id,hash,card,spki){calls.push(['claim',id,hash,card,spki]);const invite=invites.get(hash);if(!invite||invite.expires<=clock)return'denied';if(invite.claimed&&invite.claimed!==id)return'conflict';if(invite.claimed===id)return roster.get(id).state;if(roster.has(id))return'conflict';invite.claimed=id;roster.set(id,{id,name:invite.name,role:invite.role,card,state:'pending'});return'pending';},
     async pending(id){calls.push(['pending',id]);return isAdmin(id)?{status:'ok',members:[...roster.values()].filter(m=>m.state==='pending').map(publicMember)}:{status:'denied'};},
     async approve(id,target){calls.push(['approve',id,target]);if(!isAdmin(id))return'denied';const m=roster.get(target);if(!m||m.state!=='pending')return'denied';if(m.role==='cardiologist'&&[...roster.values()].some(v=>v.state==='active'&&v.role==='cardiologist'))return'conflict';m.state='active';return'active';},
@@ -108,14 +109,14 @@ test('unexpected database failures expose only allowlisted stage/code/status for
     code:'database_conflict',status:400040,cause:{sql:'PRIVATE SQL',parameters:cards[0]},deviceId:adminID
   });
   const operations=[['accept','status',{}],['status','status',{}],['directory','directory',{}],['pending','pending',{}],
-    ['invite','invite',{id:rid(),name:'Новый врач',role:'neurologist'}],['claim','claim',{id:rid()}],
+    ['invite','invite',{id:rid(),name:'Новый врач',role:'neurologist'}],['inviteInfo','invite_info',{id:rid()}],['claim','claim',{id:rid()}],
     ['approve','approve',{deviceId:neuroID}],['revoke','revoke',{deviceId:neuroID}],['resolve','resolve',{id:rid()}],
     ['create','create',await dataFor()]];
   for(const [failedMethod,op,data] of operations){
     const f=fixture();f.store[failedMethod]=async()=>{throw error;};
     const response=await f.op(admin,op,op==='create'?await dataFor(admin):data);
     assert.equal(response.status,503,failedMethod);
-    assert.deepEqual(await response.json(),{error:'request_rejected',diagnostic:{stage:failedMethod,code:'database_conflict',status:400040}});
+    assert.deepEqual(await response.json(),{error:'request_rejected',diagnostic:{stage:failedMethod==='accept'?'accept':op,code:'database_conflict',status:400040}});
   }
 });
 
@@ -147,6 +148,70 @@ test('invitation possession creates pending enrollment only; admin approves a bo
   assert.equal((await f.op(icuA,'claim',{id})).status,409);
   assert.equal((await f.op(admin,'revoke',{deviceId:adminID})).status,403);
   assert.deepEqual(await(await f.op(admin,'revoke',{deviceId:newID})).json(),{state:'revoked'});
+});
+
+test('short invitation stores the exact signed organizer snapshot and returns only public lookup fields without claiming',async()=>{
+  const f=fixture(),stranger=await makeDevice(),strangerID=(await deviceIdentity(stranger)).id,id=rid();
+  const organizerCard=await exportPublicCard(admin,'Организатор'),data={id,name:'Новый врач',role:'neurologist',organizerCard};
+  assert.notEqual(organizerCard,cards[0],'Envelope display name differs from the invitation snapshot');
+  const created=await f.op(admin,'invite',data);assert.equal(created.status,200);
+  const {expires}=await created.json(),hash=await idHash(id),before=structuredClone(f.invites.get(hash));
+  for(let n=0;n<2;n++) {
+    const info=await f.op(stranger,'invite_info',{id});assert.equal(info.status,200);
+    assert.deepEqual(await info.json(),{id,expires,organizerCard});
+    assert.deepEqual(f.invites.get(hash),before);
+    assert.equal(f.roster.has(strangerID),false);
+  }
+  assert.equal(f.calls.some(call=>call[0]==='claim'),false);
+  assert.equal((await f.op(admin,'invite',data)).status,200);
+  assert.equal((await f.op(admin,'invite',{...data,organizerCard:cards[0]})).status,409);
+  assert.deepEqual(await(await f.op(stranger,'claim',{id})).json(),{state:'pending'});
+  assert.equal((await f.op(stranger,'invite_info',{id})).status,404);
+});
+
+test('invitation snapshots must be canonical and match both public keys of the signed issuer before storage',async()=>{
+  const f=fixture(),data={id:rid(),name:'Новый врач',role:'neurologist'};
+  const otherEncryption=await exportPublicCard({encryption:neuro.encryption,signing:admin.signing},'Организатор');
+  for(const organizerCard of [cards[1],otherEncryption])
+    assert.equal((await f.op(admin,'invite',{...data,organizerCard})).status,403);
+  for(const organizerCard of [null,'PSO-CARD1.invalid',' '+cards[0],cards[0]+'\n'])
+    assert.equal((await f.op(admin,'invite',{...data,organizerCard})).status,400);
+  assert.equal((await f.op(admin,'invite',{...data,organizerCard:cards[0],extra:true})).status,400);
+  assert.equal((await f.op(neuro,'invite_info',{id:data.id,organizerCard:cards[0]})).status,400);
+  assert.equal(f.calls.length,0);
+  const legacy=fixture();delete legacy.store.inviteInfo;
+  assert.equal((await legacy.op(admin,'invite',{...data,organizerCard:cards[0]})).status,503);
+  assert.equal(legacy.calls.length,0);
+  assert.equal((await legacy.op(admin,'invite',data)).status,200,'Old adapters still accept the legacy format');
+});
+
+test('invitation lookup is signed and rejects missing, expired, legacy, claimed and revoked invitations or requesters',async()=>{
+  const f=fixture(),id=rid(),legacyID=rid(),data={id,name:'Private invitee name',role:'bot',organizerCard:cards[0]};
+  assert.equal((await f.op(neuro,'invite_info',{id})).status,404);
+  assert.equal((await f.op(admin,'invite',data)).status,200);
+  assert.equal((await f.op(admin,'invite',{id:legacyID,name:'Legacy',role:'bot'})).status,200);
+  assert.equal((await f.op(neuro,'invite_info',{id:legacyID})).status,404);
+  const signed=await envelope(neuro,'invite_info',{id}),corrupted={...signed,data:{id:rid()}};
+  assert.equal((await f.handler(request({envelope:corrupted}))).status,403);
+  const info=await f.handler(request({envelope:signed}));assert.equal(info.status,200);
+  assert.equal((await f.handler(request({envelope:signed}))).status,409);
+  f.roster.get(neuroID).state='revoked';
+  assert.equal((await f.op(neuro,'invite_info',{id})).status,403);
+  f.roster.get(neuroID).state='active';f.roster.get(adminID).state='revoked';
+  assert.equal((await f.op(neuro,'invite_info',{id})).status,404);
+  f.roster.get(adminID).state='active';f.setTime(NOW+86400000);
+  assert.equal((await f.op(neuro,'invite_info',{id})).status,404);
+  assert.equal(f.calls.some(call=>call[0]==='claim'),false);
+});
+
+test('invalid invitation lookup storage data cannot escape as a public card or stale success',async()=>{
+  const f=fixture(),id=rid();
+  for(const organizerCard of ['PSO-CARD1.invalid',' '+cards[0]]) {
+    f.store.inviteInfo=async()=>({status:'ok',expires:NOW+1000,organizerCard});
+    assert.equal((await f.op(neuro,'invite_info',{id})).status,503);
+  }
+  f.store.inviteInfo=async()=>({status:'ok',expires:NOW,organizerCard:cards[0]});
+  assert.equal((await f.op(neuro,'invite_info',{id})).status,404);
 });
 
 test('group ciphertext opens independently for each selected intensivist, not neurologist or cardiologist',async()=>{
@@ -240,3 +305,4 @@ test('CORS, method, size, schema and canonical encoding checks precede privilege
   const preflight=await f.handler(request(null,{method:'OPTIONS',headers:{'Access-Control-Request-Method':'POST','Access-Control-Request-Headers':'Content-Type'}}));
   assert.equal(preflight.status,204);assert.equal(preflight.headers.get('access-control-allow-origin'),ORIGIN);
 });
+

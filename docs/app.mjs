@@ -11,7 +11,7 @@ import {DirectClient, directIDFromInput, newMessageID, savePending, loadPending,
 import {sealMessage, openMessage} from './messages.mjs';
 import {preparePhoto, photoObjectURL} from './photos.mjs';
 import {DeviceUnlockClient} from './device-unlock.mjs';
-import {makeRecipientGrant, verifyRecipientGrant, verifyRecipientDirectory, pinOrganizerCard, loadOrganizerCard, trustedInvitationURL, parseTrustedInvitation} from './recipient-trust.mjs';
+import {makeRecipientGrant, verifyRecipientGrant, verifyRecipientDirectory, pinOrganizerCard, loadOrganizerCard, shortTrustedInvitationURL, parseShortInvitation, verifyShortInvitation, parseTrustedInvitation} from './recipient-trust.mjs';
 
 const appBase = new URL('./', import.meta.url).href;
 const shortLinks = SHORTLINK_ENDPOINT ? new ShortLinkClient(SHORTLINK_ENDPOINT) : null;
@@ -34,7 +34,7 @@ const standalone = navigator.standalone === true || globalThis.matchMedia?.('(di
 
 // An invitation must survive a reload/update. Unlike message links it contains
 // no patient payload; its fragment is not sent in HTTP requests or referrers.
-const isInvitationHash = hash => /^#(?:join|invite)=/.test(hash);
+const isInvitationHash = hash => /^#(?:join|invite|i)=/.test(hash);
 if (queuedIncoming && !isInvitationHash(queuedIncoming)) history.replaceState(null, '', location.pathname);
 
 function say(text, error = false) {
@@ -137,7 +137,7 @@ function inputKind(input) {
   if (/^[0-9a-f\s-]+$/i.test(value) && value.replace(/[\s-]/g, '').length === 64) throw new Error('Это контрольный код карточки врача. По нему фамилия не открывается. Попросите отправителя создать ссылку для вас через «Создать ссылку» и скопировать её целиком.');
   if (/^[0-9\s-]+$/.test(value)) throw new Error('Вставлен только набор цифр. Нужна полная ссылка из «Скопировать адрес для Пачки» или зашифрованный код, начинающийся с PSO1.');
   if (!value) throw new Error('Сначала вставьте ссылку в поле или нажмите «Вставить и открыть».');
-  if (joinIDFromInput(value,appBase)||/#(?:join|invite)=/.test(value)) return 'join';
+  if (joinIDFromInput(value,appBase)||/#(?:join|invite|i)=/.test(value)) return 'join';
   if (directIDFromInput(value,appBase)) return 'direct';
   let card = value.startsWith('PSO-CARD1.');
   try { card ||= new URL(value).hash.startsWith('#card='); } catch {}
@@ -490,7 +490,7 @@ async function handleIncoming(hash) {
   clearHandoff();
   const link = appBase + hash;
   try {
-    if (isInvitationHash(hash)) { await prepareJoin(link);request.pending=false;return; }
+    if (isInvitationHash(hash)) { request.pending=!await prepareJoin(link,true);return; }
     if (!hash.startsWith('#pso=') && !hash.startsWith('#card=') && !hash.startsWith('#r=') && !hash.startsWith('#m=')) throw new Error('Неизвестный формат ссылки.');
     inputKind(link);
     $('handoff-link').value = link;
@@ -590,18 +590,31 @@ async function notificationContacts(){
   if(teamState.state==='active')for(const member of teamMembers){if(['admin','neurologist','bot'].includes(member.role)&&!seen.has(member.id)){local.push(member);seen.add(member.id);}}
   return local;
 }
-async function prepareJoin(input){
+async function prepareJoin(input,fromIncoming=false){
   joinID='';invitationOrganizer=null;$('join-panel').hidden=true;
   $('organizer-trust').hidden=true;$('organizer-confirm').checked=false;
-  updateTeamButtons();
-  const trusted=directClient?await parseTrustedInvitation(input,appBase):null;
-  const id=trusted?.id||joinIDFromInput(input,appBase);if(!id)throw new Error('Ссылка приглашения обрезана или повреждена. Организатору нужно отправить её кнопкой «Отправить приглашение».');
-  joinID=id;$('join-panel').hidden=false;$('join-link').value=trusted?String(input):appBase+'#join='+id;
-  if(trusted){invitationOrganizer=trusted.organizerCard;$('organizer-code').textContent=trusted.fingerprint;$('organizer-confirm').checked=false;$('organizer-trust').hidden=false;}
-  else if(directClient&&!organizerPin)say('Попросите организатора прислать новое приглашение с ключом команды.',true);
-  $('join-hint').textContent=standalone?'Нажмите «Подключить этот телефон». Администратор подтвердит вашу роль.':'Скопируйте приглашение, откройте синий значок и нажмите «Вставить и открыть».';
-  $('team-panel').hidden=false;$('token').value='';updateTeamButtons();
-  $('team-panel').scrollIntoView({block:'start',behavior:'auto'});
+  const current=generation;
+  if(fromIncoming&&activeIncoming)activeIncoming.generation=current;
+  setBusy(true);
+  try{
+    const reference=directClient?parseShortInvitation(input,appBase):null;
+    const trusted=reference?await verifyShortInvitation(input,appBase,await teamClient.invitationInfo(device,reference.id)):
+      directClient?await parseTrustedInvitation(input,appBase):null;
+    if(current!==generation||document.hidden)return false;
+    const id=trusted?.id||joinIDFromInput(input,appBase);if(!id)throw new Error('Ссылка приглашения обрезана или повреждена. Организатору нужно отправить её кнопкой «Отправить приглашение».');
+    if(directClient)organizerPin=await loadOrganizerCard();
+    if(trusted&&organizerPin&&(await importPublicCard(trusted.organizerCard)).id!==organizerPin.id)
+      throw new Error('Ключ организатора в приглашении не совпадает с сохранённым на этом телефоне. Обратитесь к организатору.');
+    if(current!==generation||document.hidden)return false;
+    joinID=id;$('join-panel').hidden=false;$('join-link').value=trusted?String(input).trim():appBase+'#join='+id;
+    if(trusted){invitationOrganizer=trusted.organizerCard;$('organizer-code').textContent=trusted.fingerprint;$('organizer-confirm').checked=false;$('organizer-trust').hidden=!!organizerPin;}
+    else if(directClient&&!organizerPin)say('Попросите организатора прислать новое приглашение с ключом команды.',true);
+    $('join-hint').textContent=standalone?'Нажмите «Подключить этот телефон». Администратор подтвердит вашу роль.':'Скопируйте приглашение, откройте синий значок и нажмите «Вставить и открыть».';
+    $('team-panel').hidden=false;$('token').value='';updateTeamButtons();
+    $('team-panel').scrollIntoView({block:'start',behavior:'auto'});
+    return true;
+  }catch(error){if(current===generation&&!document.hidden)throw error;return false;}
+  finally{setBusy(false);}
 }
 async function renderTeamAdmin(){
   if(directClient)return renderDirectAdmin();
@@ -653,12 +666,12 @@ $('team-refresh').addEventListener('click',()=>refreshTeam());
 $('copy-join').addEventListener('click',()=>copyText($('join-link').value,'join-link','Приглашение скопировано. Откройте синий значок → «Вставить и открыть».'));
 $('team-claim').addEventListener('click',async()=>{
   if(!teamClient||!joinID||!standalone||busy||teamBusy||['unavailable','revoked'].includes(teamState.state))return;teamBusy=true;updateTeamButtons();
-  try{if(directClient&&!organizerPin)throw new Error('Сначала подтвердите ключ организатора по коду ниже.');await teamClient.claim(device,joinID);joinID='';if(isInvitationHash(location.hash))history.replaceState(null,'',location.pathname);$('join-panel').hidden=true;$('join-link').value='';say('Заявка отправлена. Сообщите администратору контрольный код ниже.');}
+  try{if(directClient&&!organizerPin)throw new Error('Сначала подтвердите ключ организатора по коду ниже.');if(invitationOrganizer&&(await importPublicCard(invitationOrganizer)).id!==organizerPin?.id)throw new Error('Ключ организатора не совпадает с сохранённым на этом телефоне.');await teamClient.claim(device,joinID);joinID='';if(isInvitationHash(location.hash))history.replaceState(null,'',location.pathname);$('join-panel').hidden=true;$('join-link').value='';say('Заявка отправлена. Сообщите администратору контрольный код ниже.');}
   catch(e){say(e.message,true);}finally{teamBusy=false;await refreshTeam();}
 });
 $('invite-form').addEventListener('submit',async event=>{
   event.preventDefault();if(!teamClient||busy||teamBusy||teamState.role!=='admin'||teamState.state!=='active')return;
-  teamBusy=true;updateTeamButtons();try{const result=await teamClient.invite(device,$('invite-name').value.trim(),$('invite-role').value);inviteLink=directClient?await trustedInvitationURL(appBase,result.id,await exportPublicCard(device,teamState.name)):appBase+'#join='+result.id;$('invite-link').value=inviteLink;$('invite-output').hidden=false;say('Приглашение готово. Передайте его только этому врачу.');}catch(e){say(e.message,true);}finally{teamBusy=false;updateTeamButtons();flushIncoming();}
+  teamBusy=true;updateTeamButtons();try{const rootCard=directClient?await exportPublicCard(device,teamState.name):undefined;const result=await teamClient.invite(device,$('invite-name').value.trim(),$('invite-role').value,rootCard);inviteLink=directClient?await shortTrustedInvitationURL(appBase,result.id,rootCard):appBase+'#join='+result.id;$('invite-link').value=inviteLink;$('invite-output').hidden=false;say('Приглашение готово. Передайте его только этому врачу.');}catch(e){say(e.message,true);}finally{teamBusy=false;updateTeamButtons();flushIncoming();}
 });
 $('copy-invite').addEventListener('click',()=>copyText(inviteLink,'invite-link','Приглашение скопировано.'));
 $('share-invite').addEventListener('click',async()=>{

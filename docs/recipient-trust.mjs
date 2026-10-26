@@ -113,6 +113,39 @@ export async function trustedInvitationURL(base,id,card) {
   return url.href;
 }
 
+// Short invitations commit to the exact public card received from the organizer.
+// Fetching that card from the server does not pin it or authorize this device.
+export async function shortTrustedInvitationURL(base,id,card) {
+  const idBytes=unb64(id,16),root=await organizerCard(card),url=new URL('./',base);
+  if(root.card!==(typeof card==='string'?card:card?.card)) throw new Error('Карточка организатора повреждена.');
+  if(url.protocol!=='https:' || url.username || url.password || url.search) throw new Error('Неверный адрес просмотрщика.');
+  const digest=new Uint8Array(await crypto.subtle.digest('SHA-256',enc.encode(root.card)));
+  const token=new Uint8Array(48);token.set(idBytes);token.set(digest,16);
+  url.hash='i='+b64(token);
+  return url.href;
+}
+
+export function parseShortInvitation(input,base) {
+  if(typeof input!=='string' || input.length>12000) return null;
+  try {
+    const url=new URL(input.trim(),base),own=new URL('./',base);
+    if(url.protocol!=='https:' || url.origin!==own.origin || ![own.pathname,own.pathname+'index.html'].includes(url.pathname) || url.search || url.username || url.password || !/^#i=[A-Za-z0-9_-]{64}$/.test(url.hash)) return null;
+    const token=unb64(url.hash.slice(3),48);
+    return {id:b64(token.slice(0,16)),organizerHash:b64(token.slice(16))};
+  } catch { return null; }
+}
+
+export async function verifyShortInvitation(input,base,info,{now=Date.now()}={}) {
+  const reference=parseShortInvitation(input,base);
+  if(!reference || !exact(info,'expires,id,organizerCard') || info.id!==reference.id ||
+     !Number.isSafeInteger(now) || !Number.isSafeInteger(info.expires) || info.expires<=now ||
+     typeof info.organizerCard!=='string') throw new Error('Приглашение недоступно или срок его действия истёк.');
+  const root=await importPublicCard(info.organizerCard);
+  if(root.card!==info.organizerCard || b64(await crypto.subtle.digest('SHA-256',enc.encode(root.card)))!==reference.organizerHash)
+    throw new Error('Содержимое приглашения не совпадает со ссылкой. Попросите организатора отправить новое приглашение.');
+  return {id:reference.id,organizerCard:root.card,fingerprint:root.fingerprint};
+}
+
 export async function parseTrustedInvitation(input,base) {
   if(typeof input!=='string' || input.length>12000) return null;
   try {

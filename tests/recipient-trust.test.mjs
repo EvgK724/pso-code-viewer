@@ -6,6 +6,7 @@ import {exportPublicCard,importPublicCard} from '../docs/exchange.mjs';
 import {
   makeRecipientGrant,verifyRecipientGrant,verifyRecipientDirectory,
   pinOrganizerCard,loadOrganizerCard,trustedInvitationURL,parseTrustedInvitation,
+  shortTrustedInvitationURL,parseShortInvitation,verifyShortInvitation,
   MAX_GRANT_TTL,RECIPIENT_GRANT_DOMAIN
 } from '../docs/recipient-trust.mjs';
 
@@ -139,4 +140,41 @@ test('new invitation enforces origin, path, credentials and query restrictions',
     base+'?invite=other'+fragment])
     assert.equal(await parseTrustedInvitation(bad,base),null);
   assert.equal((await parseTrustedInvitation(base+'index.html'+fragment,base)).id,id);
+});
+
+test('short invitation encodes exactly 16 ID bytes and SHA-256 of the exact public card in one token',async()=>{
+  const base='https://viewer.example/pso-code-viewer/',idBytes=Buffer.from(Array.from({length:16},(_,i)=>i*13+7));
+  const id=idBytes.toString('base64url'),url=await shortTrustedInvitationURL(base,id,rootCard),hash=new URL(url).hash;
+  assert.match(hash,/^#i=[A-Za-z0-9_-]{64}$/);assert.ok(!url.includes('PSO-CARD1.'));assert.ok(!url.includes('&'));
+  const digest=Buffer.from(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(rootCard)));
+  const bytes=Buffer.from(hash.slice(3),'base64url');assert.equal(bytes.length,48);
+  assert.deepEqual(bytes.subarray(0,16),idBytes);assert.deepEqual(bytes.subarray(16),digest);
+  assert.deepEqual(parseShortInvitation(url,base),{id,organizerHash:digest.toString('base64url')});
+  assert.equal(parseShortInvitation(base+'index.html'+hash,base).id,id);
+  const checked=await verifyShortInvitation(url,base,{id,expires:now+60000,organizerCard:rootCard},{now});
+  assert.deepEqual(checked,{id,organizerCard:rootCard,fingerprint:root.fingerprint});
+  assert.equal(hash.length,67,'No string-concatenation padding boundary is introduced');
+});
+
+test('short invitation rejects incomplete tokens, foreign origins, credentials and unexpected URL parts',async()=>{
+  const base='https://viewer.example/pso-code-viewer/',id=Buffer.alloc(16,251).toString('base64url');
+  const url=await shortTrustedInvitationURL(base,id,rootCard),hash=new URL(url).hash;
+  for(const bad of [url.slice(0,-1),url+'A',url+'=',url+'&x=1',base+'#i=',base+'#i='+'!'.repeat(64),
+    url.replace('viewer.example','other.example'),url.replace('https:','http:'),url.replace('/pso-code-viewer/','/other/'),
+    'https://user:pass@viewer.example/pso-code-viewer/'+hash,base+'?x=1'+hash,null,'x'.repeat(12001)])
+    assert.equal(parseShortInvitation(bad,base),null);
+  await assert.rejects(shortTrustedInvitationURL(base,id+'=',rootCard));
+  await assert.rejects(shortTrustedInvitationURL(base,id,' '+rootCard),/повреждена/);
+});
+
+test('server card lookup must match the committed exact card and live invitation schema before use',async()=>{
+  const base='https://viewer.example/pso-code-viewer/',id=Buffer.alloc(16,199).toString('base64url');
+  const url=await shortTrustedInvitationURL(base,id,rootCard),info={id,expires:now+60000,organizerCard:rootCard};
+  for(const bad of [null,{}, {...info,extra:true}, {...info,id:Buffer.alloc(16,200).toString('base64url')},
+    {...info,expires:now}, {...info,expires:now+0.5}, {...info,organizerCard:' '+rootCard},
+    {...info,organizerCard:attackerCard}, {...info,organizerCard:'PSO-CARD1'}])
+    await assert.rejects(verifyShortInvitation(url,base,bad,{now}));
+  const renamed=await exportPublicCard(organizer,'Другое имя того же организатора');
+  await assert.rejects(verifyShortInvitation(url,base,{...info,organizerCard:renamed},{now}),/не совпадает/);
+  const storage=store();await verifyShortInvitation(url,base,info,{now});assert.equal(await loadOrganizerCard({storage}),null);
 });
