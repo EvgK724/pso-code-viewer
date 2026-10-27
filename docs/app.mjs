@@ -1055,4 +1055,27 @@ $('organizer-save').addEventListener('click',async()=>{
   try{organizerPin=await pinOrganizerCard(invitationOrganizer,{confirmed:true});$('organizer-trust').hidden=true;$('organizer-missing').hidden=true;say('Ключ организатора подтверждён на этом телефоне.');}
   catch(e){say(e.message,true);}finally{setBusy(false);}
 });
+// Keep the brand at the safe top during iOS rubber-band overscroll,
+// while letting ordinary positive scrolling carry it out of view.
+function installBrandScroll(){
+  const brand=document.querySelector?.('.brand');
+  if(!brand?.parentElement||typeof globalThis.requestAnimationFrame!=='function')return;
+  let scheduled=false;
+  const sync=()=>{
+    const y=Number.isFinite(globalThis.scrollY)?globalThis.scrollY:0;
+    brand.style.setProperty('--brand-scroll-y',-Math.max(0,y)+'px');
+  };
+  const schedule=()=>{
+    if(scheduled)return;
+    scheduled=true;
+    globalThis.requestAnimationFrame(()=>{scheduled=false;sync();});
+  };
+  sync();
+  brand.classList.add('is-viewport-bound');
+  brand.parentElement.classList.add('has-viewport-brand');
+  addEventListener('scroll',schedule,{passive:true});
+  addEventListener('pageshow',sync);
+}
+installBrandScroll();
 init();
+

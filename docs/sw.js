@@ -1,5 +1,5 @@
 const PREFIX = 'pso-viewer-' + encodeURIComponent(new URL('./', self.location).pathname) + '-shell-';
-const CACHE = PREFIX + 'github-v19-glass-ui';
+const CACHE = PREFIX + 'github-v20-compact-chrome';
 const SHELL = ['./','./index.html','./styles.css','./app.mjs','./api-queue.mjs','./updates.mjs','./direct.mjs','./messages.mjs','./photos.mjs','./device-unlock.mjs','./recipient-trust.mjs','./crypto.mjs','./exchange.mjs','./storage.mjs','./sharing.mjs','./push.mjs','./team.mjs','./shortlinks.mjs','./shortlink-config.mjs','./manifest.webmanifest','./icon-pso-v2-192.png','./icon-pso-v2-512.png','./apple-touch-icon-pso-v2.png','./favicon-pso-v2.png','./icon-192.png','./icon-512.png','./apple-touch-icon.png'];
 // Activate only after the complete shell is fetched without stale HTTP cache.
 // Existing pages are never navigated: drafts and in-progress operations survive.
