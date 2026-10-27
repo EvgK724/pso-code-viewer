@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#0c1018">
+  <meta name="theme-color" content="#111214">
   <meta name="referrer" content="no-referrer">
   <meta name="robots" content="noindex, nofollow, noarchive">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; worker-src 'self'; connect-src 'self' https://spugfikalpihorcwcdqc.supabase.co; manifest-src 'self'; base-uri 'none'; form-action 'none'">
@@ -58,7 +58,7 @@
           <svg width="19" height="19" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.7"/><path d="M12 7v5l3 2" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
           <span id="countdown"></span>
         </div>
-        <button id="hide" type="button" class="button button-secondary">Скрыть сейчас</button>
+        <div class="result-actions"><button id="reply-message" type="button" class="button button-primary" hidden>Ответить</button><button id="hide" type="button" class="button button-secondary">Скрыть сейчас</button></div>
         <p class="fine-print">Скрытие с экрана не запрещает сделать скриншот.</p>
       </section>
 
@@ -93,7 +93,11 @@
       </section>
       <section id="screen-write" class="app-screen" aria-labelledby="page-title" hidden>
         <section class="input-card" id="write-panel" aria-labelledby="compose-label" hidden>
-          <p class="field-help">Фамилия или фото истории, при необходимости — комментарий.</p>
+          <section id="reply-context" class="reply-context" aria-label="Ответ на сообщение" hidden>
+            <p class="eyebrow">Ответ отправителю</p><p id="reply-recipient"></p>
+            <p class="field-help compact-help">Ответ получит только этот врач. Комментарий и фото будут зашифрованы.</p>
+            <button id="cancel-reply" type="button" class="text-button">Отменить ответ</button>
+          </section>
           <form id="compose-form" autocomplete="off">
             <div class="compose-content">
             <label id="compose-label" for="compose-surname">Фамилия пациента</label>
@@ -109,11 +113,13 @@
             </div>
             </div>
             <div class="compose-routing">
+            <div id="recipient-routing">
             <label for="recipient">Кому отправить</label>
             <select id="recipient" name="recipient" required>
               <option value="">Выберите группу врачей</option>
             </select>
             <p class="field-help">Содержимое доступно только подключённым врачам выбранной группы.</p>
+            </div>
             <label class="check-label" for="compose-orit"><input id="compose-orit" type="checkbox"><span>Пациент в ОРИТ</span></label>
             <label for="expiry">Срок доступа к сообщению</label>
             <select id="expiry" name="expiry">

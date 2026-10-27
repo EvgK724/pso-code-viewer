@@ -16,7 +16,11 @@ const bytes = x => Buffer.byteLength(JSON.stringify(x),'utf8');
 const object = x => x !== null && typeof x === 'object' && !Array.isArray(x);
 const memberKey = id => `member:${id}`;
 const roleFor = group => group === 'cardiology' ? 'cardiologist' : 'intensivist';
-const senderAllowed = (m,kind) => m?.state === 'active' && (kind === 'admission' ? m.role === 'bot' : ['admin','neurologist'].includes(m.role));
+const HUMAN_ROLES = new Set(['admin','neurologist','cardiologist','intensivist']);
+const senderAllowed = (m,kind) => m?.state === 'active' && (kind === 'reply' ? HUMAN_ROLES.has(m.role) : kind === 'admission' ? m.role === 'bot' : kind === 'review' && ['admin','neurologist'].includes(m.role));
+// Replies are private to one original sender. A later role change must not
+// turn an old reply entry into access under another role.
+const recipientAllowed = (actor,m,e) => actor?.state === 'active' && !!e && (m.kind === 'reply' ? HUMAN_ROLES.has(actor.role) && e.recipient_role === actor.role : actor.role === roleFor(m.group_name));
 const padded = n => String(n).padStart(16,'0');
 // Fixed-width ASCII inverse preserves SQL ORDER BY issued DESC,id DESC.
 const inverse = text => [...text].map(c => (127-c.charCodeAt(0)).toString(16).padStart(2,'0')).join('');
@@ -122,17 +126,29 @@ export function createDirectStore(db,{now=Date.now}={}) {
     create(senderId,requestHash,data) {
       return transaction(async (tx,at) => {
         if (!validId(senderId) || !validHash(requestHash) || !object(data) || !validNonce(data.id) ||
-            !['cardiology','orit'].includes(data.group) || !['admission','review'].includes(data.kind) ||
+            !['cardiology','orit'].includes(data.group) || !['admission','review','reply'].includes(data.kind) ||
             !Number.isSafeInteger(data.issued) || !Number.isSafeInteger(data.expires) || data.issued <= 0 ||
             data.expires <= data.issued || data.expires-data.issued > DAY || !Array.isArray(data.entries) ||
             data.entries.length < 1 || data.entries.length > 25 || bytes(data) > 2050000) return 'invalid';
+        if (data.kind === 'reply' ? !validNonce(data.replyTo) || data.replyTo === data.id || !object(data.payload) || data.payload.replyTo !== data.replyTo : Object.hasOwn(data,'replyTo')) return 'invalid';
         const sender = await tx.get(memberKey(senderId));
         if (!senderAllowed(sender,data.kind) || !await approved(tx,sender,at)) return 'denied';
         if (data.expires <= at || data.issued > at+30000) return 'invalid';
         const old = await tx.get(messageKey(data.id));
         if (old) return old.sender_id === senderId && old.request_hash === requestHash ? 'exists' : 'conflict';
-        const recipients = (await teamMembers(tx)).filter(m => m.state === 'active' && m.role === roleFor(data.group))
-          .sort((a,b) => cmp(a.device_id,b.device_id));
+        let recipients;
+        if (data.kind === 'reply') {
+          const parent = await tx.get(messageKey(data.replyTo));
+          if (!parent || parent.expires <= at) return 'missing';
+          const originalEntry = await tx.get(entryKey(parent.id,senderId));
+          if (parent.group_name !== data.group || !recipientAllowed(sender,parent,originalEntry)) return 'denied';
+          const recipient = await tx.get(memberKey(parent.sender_id));
+          if (parent.sender_id === senderId || !senderAllowed(recipient,'reply')) return 'denied';
+          recipients = [recipient];
+        } else {
+          recipients = (await teamMembers(tx)).filter(m => m.state === 'active' && m.role === roleFor(data.group))
+            .sort((a,b) => cmp(a.device_id,b.device_id));
+        }
         const entries = [...data.entries].sort((a,b) => cmp(a?.recipientId,b?.recipientId));
         if (!recipients.length || JSON.stringify(entries.map(e => e?.recipientId)) !== JSON.stringify(recipients.map(m => m.device_id))) return 'roster_changed';
         for (const m of recipients) if (!await approved(tx,m,at)) return 'denied';
@@ -152,12 +168,12 @@ export function createDirectStore(db,{now=Date.now}={}) {
         if (globalQuota.filter(q => q.created_at > at-DAY).length >= 5000 ||
             (hasPayload && globalQuota.filter(q => q.expires > at).reduce((s,q) => s+q.payload_bytes,0)+payloadBytes > 250000000)) return 'limited';
         const m = {id:data.id,request_hash:requestHash,sender_id:senderId,group_name:data.group,kind:data.kind,issued:data.issued,
-          expires:data.expires,created_at:at,has_payload:hasPayload,recipient_count:entries.length,opened_count:0};
+          expires:data.expires,created_at:at,has_payload:hasPayload,recipient_count:entries.length,opened_count:0,...(data.kind === 'reply' ? {reply_to:data.replyTo} : {})};
         await tx.put(messageKey(m.id),m,m.expires);
         if (hasPayload) await tx.put(`directpayload:${m.id}`,data.payload,m.expires);
         await tx.put(`directout:${senderId}:${newest(m.issued,m.id)}`,{message_id:m.id},m.expires);
         for (const item of entries) {
-          const e = {message_id:m.id,recipient_id:item.recipientId,token:item.token,opened_at:null,push_state:'queued',push_attempts:0,lease_until:0,next_attempt:0,endpoint_hash:null};
+          const e = {message_id:m.id,recipient_id:item.recipientId,token:item.token,opened_at:null,push_state:'queued',push_attempts:0,lease_until:0,next_attempt:0,endpoint_hash:null,...(data.kind === 'reply' ? {recipient_role:recipients[0].role} : {})};
           await tx.put(entryKey(m.id,e.recipient_id),e,m.expires);
           await tx.put(`directin:${e.recipient_id}:${newest(m.issued,m.id)}`,{message_id:m.id,group_name:m.group_name},m.expires);
           await putQueue(tx,m,e);
@@ -179,11 +195,10 @@ export function createDirectStore(db,{now=Date.now}={}) {
         for (;;) {
           const page = await tx.scan(prefix,{limit:100,...(after ? {after} : {})});
           for (const row of page) {
-            if (!outbox && row.value.group_name && actor.role !== roleFor(row.value.group_name)) continue;
             const m = await tx.get(messageKey(row.value.message_id));
-            if (!m || m.expires <= at || (outbox ? m.sender_id !== deviceId : actor.role !== roleFor(m.group_name))) continue;
+            if (!m || m.expires <= at || (outbox && m.sender_id !== deviceId)) continue;
             const e = await tx.get(entryKey(m.id,deviceId));
-            if (!outbox && !e) continue;
+            if (!outbox && !recipientAllowed(actor,m,e)) continue;
             if (!senderCache.has(m.sender_id)) senderCache.set(m.sender_id,await tx.get(memberKey(m.sender_id)));
             const sender = senderCache.get(m.sender_id);
             if (!sender) continue;
@@ -205,9 +220,8 @@ export function createDirectStore(db,{now=Date.now}={}) {
         if (actor?.state !== 'active') return status('denied');
         const m = validNonce(id) ? await tx.get(messageKey(id)) : null;
         if (!m || m.expires <= at) return status('missing');
-        if (actor.role !== roleFor(m.group_name)) return status('denied');
         const e = await tx.get(entryKey(id,deviceId));
-        if (!e) return status('denied');
+        if (!recipientAllowed(actor,m,e)) return status('denied');
         if (ack) {
           if (e.opened_at == null) {
             await tx.put(entryKey(id,deviceId),{...e,opened_at:at},m.expires);
@@ -221,7 +235,7 @@ export function createDirectStore(db,{now=Date.now}={}) {
         const payload = m.has_payload ? await tx.get(`directpayload:${id}`) : null;
         if (m.has_payload && !payload) return status('missing');
         await audit(tx,at,deviceId,'retrieved',id);
-        return {meta:{id,group:m.group_name,kind:m.kind,issued:m.issued,expires:m.expires},payload,senderApprovalProof:sender.approval_proof ?? null,
+        return {meta:{id,group:m.group_name,kind:m.kind,issued:m.issued,expires:m.expires,...(m.kind === 'reply' ? {replyTo:m.reply_to} : {})},payload,senderApprovalProof:sender.approval_proof ?? null,
           senderCard:sender.card,senderName:sender.name,senderRole:sender.role,token:e.token};
       });
     },
@@ -284,7 +298,7 @@ export function createDirectStore(db,{now=Date.now}={}) {
               await removeQueueRow(tx,prefix,row); continue;
             }
             const recipient = await tx.get(memberKey(e.recipient_id)), sender = await tx.get(memberKey(m.sender_id));
-            const eligible = recipient?.state === 'active' && recipient.role === roleFor(m.group_name) && senderAllowed(sender,m.kind);
+            const eligible = recipientAllowed(recipient,m,e) && senderAllowed(sender,m.kind);
             const sub = eligible ? await tx.get(`pushsub:${e.recipient_id}`) : null;
             if (!eligible || !sub || sub.refreshed_at < at-90*DAY) {
               // Bounded scans must make durable progress past devices without

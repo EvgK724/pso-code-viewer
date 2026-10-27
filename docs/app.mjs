@@ -30,6 +30,7 @@ let teamState={state:'unregistered',role:null,name:null}, teamMembers=[], teamBu
 let lastConfirmedTeam=null, teamConnectionMessage='';
 let appUpdates=null, appUpdateAvailable=false;
 let organizerPin=null, invitationOrganizer=null;
+let revealedReply=null, draftReply=null;
 let activeBox='inbox', inboxItems=[], inboxNext=null, inboxBusy=false, directPhoto=null, photoURL='', previewURL='', photoBusy=false, directPendingBusy=false, discardPendingConfirmed=false;
 const standalone = navigator.standalone === true || globalThis.matchMedia?.('(display-mode: standalone)').matches === true;
 
@@ -50,13 +51,21 @@ function say(text, error = false) {
 }
 function hideResult(message = '') {
   generation++; clearInterval(timer); endsAt = 0; $('result').hidden = true;
+  revealedReply=null; $('reply-message').hidden=true;
   for (const id of ['surname','department','case-code','countdown','result-comment']) $(id).textContent = '';
   $('result-photo').hidden=true;$('result-photo').removeAttribute('src');
   if(photoURL){URL.revokeObjectURL(photoURL);photoURL='';}
   if (message) say(message);
 }
 function clearPhoto(){directPhoto=null;$('compose-photo').value='';$('photo-preview').hidden=true;$('photo-preview').removeAttribute('src');$('photo-remove').hidden=true;$('photo-status').textContent='';if(previewURL){URL.revokeObjectURL(previewURL);previewURL='';}}
-function clearSensitive() { hideResult(); $('compose-surname').value = ''; $('compose-comment').value=''; clearPhoto(); }
+function clearSensitive() { hideResult(); draftReply=null; $('compose-surname').value = ''; $('compose-comment').value=''; clearPhoto(); renderReplyCompose(); }
+function renderReplyCompose() {
+  $('reply-context').hidden=!draftReply;
+  $('reply-recipient').textContent=draftReply?draftReply.recipient.name:'';
+  $('recipient-routing').hidden=!!draftReply;
+  $('recipient').required=!draftReply;
+  if(directClient)$('encrypt').textContent=draftReply?'Отправить ответ':'Отправить врачу';
+}
 function tick() {
   if (!endsAt) return;
   const seconds = Math.ceil((endsAt - performance.now()) / 1000);
@@ -70,7 +79,10 @@ function setBusy(value) {
   for (const id of ['token','compose-surname','compose-comment','compose-photo','recipient','compose-orit','message-caption','expiry','my-name','contact-input','confirm-fingerprint']) $(id).disabled = value || !ready;
   for (const id of ['demo','open','paste-open','export-card','inspect-contact']) $(id).disabled = value || !ready;
   $('copy-handoff').disabled = value || !$('handoff-link').value;
-  $('encrypt').disabled = value || photoBusy || !ready || !$('recipient').value || (teamClient && (!canReview() || teamBusy));
+  $('recipient').disabled=value||!ready||!!draftReply;
+  $('encrypt').disabled = value || photoBusy || !ready || (!draftReply&&!$('recipient').value) || (teamClient && (!canCompose() || teamBusy));
+  $('reply-message').disabled=value||teamBusy||!ready||!canReply()||!revealedReply;
+  $('cancel-reply').disabled=value;
   $('inbox-refresh').disabled=value||inboxBusy||!ready;$('inbox-more').disabled=value||inboxBusy||!inboxNext;
   $('retry-pending').disabled=value||directPendingBusy||!ready;
   $('discard-pending').disabled=value||directPendingBusy||!ready;
@@ -104,7 +116,7 @@ function suspendSensitive() {
   // Retry only an incoming link that has not yet shown its result. Once a name
   // was displayed, returning to the app must never make it reappear.
   if (activeIncoming?.pending && activeIncoming.generation === generation && !queuedIncoming) queuedIncoming = activeIncoming.hash;
-  clearSensitive();deviceUnlock?.clear();
+  clearSensitive();if(activeScreen==='write'&&teamClient&&!canCompose())activeScreen='read';renderNavigation();deviceUnlock?.clear();
 }
 const screens = {
   read: ['Сообщения', 'Входящие и исходящие сообщения вашей команды.'],
@@ -114,7 +126,7 @@ const screens = {
 };
 function allowedScreen(screen) {
   if (!(screen in screens)) return 'read';
-  if (screen === 'write' && teamClient && !canReview()) return 'read';
+  if (screen === 'write' && teamClient && !canCompose()) return 'read';
   if (screen === 'team' && !teamClient) return 'settings';
   return screen;
 }
@@ -123,14 +135,15 @@ function renderNavigation() {
     $('screen-' + screen).hidden = screen !== activeScreen;
     $('show-' + screen).setAttribute('aria-pressed', String(screen === activeScreen));
   }
-  $('show-write').hidden = !!teamClient && !canReview();
+  $('show-write').hidden = !!teamClient && !canCompose();
   $('show-team').hidden = !teamClient;
   $('read-panel').hidden = activeScreen !== 'read';
   $('write-panel').hidden = activeScreen !== 'write';
   $('direct-panel').hidden = !directClient || activeScreen !== 'read';
   $('legacy-open').hidden = activeScreen !== 'read';
-  $('page-title').textContent = screens[activeScreen][0];
-  $('page-description').textContent = screens[activeScreen][1];
+  $('page-title').textContent = activeScreen==='write'&&draftReply?'Ответ врачу':screens[activeScreen][0];
+  $('page-description').textContent = activeScreen==='write'&&draftReply?'Напишите ответ на полученное сообщение.':screens[activeScreen][1];
+  renderReplyCompose();
 }
 function showScreen(screen, {preserveNotice=false, focus=false} = {}) {
   const next = allowedScreen(screen);
@@ -564,6 +577,8 @@ addEventListener('pagehide', suspendSensitive);
 
 const roleLabels={admin:'Администратор',neurologist:'Невролог',intensivist:'Реаниматолог',cardiologist:'Кардиолог',bot:'Бот поступлений'};
 function canReview(){return teamState.state==='active'&&['admin','neurologist'].includes(teamState.role);}
+function canReply(){return !!directClient&&teamState.state==='active'&&['admin','neurologist','cardiologist','intensivist'].includes(teamState.role);}
+function canCompose(){return canReview()||!!draftReply&&canReply();}
 function canAdmin(){return teamState.state==='active'&&teamState.role==='admin';}
 function actionError(error,stage){
   const status=Number.isInteger(error?.status)&&error.status>=100&&error.status<=599?' (HTTP '+error.status+')':'';
@@ -598,8 +613,8 @@ function renderTeam(){
   const displayTeam=teamState.state==='unavailable'?lastConfirmedTeam:teamState;
   const identity=displayTeam?.state==='active'?displayTeam.name+' · '+roleLabels[displayTeam.role]:'';
   $('team-state').textContent=teamState.state==='active'?identity:teamState.state==='unavailable'?(identity?identity+'. ':'')+(teamConnectionMessage||'Нет связи с командой. Действия недоступны. Нажмите «Обновить».'):({pending:'Подключение ожидает подтверждения администратора.',revoked:'Доступ этого телефона отключён.',unregistered:'Откройте приглашение от администратора.'})[teamState.state];
-  $('show-write').hidden=!canReview();
-  if(activeScreen==='write'&&!canReview())showScreen('read',{preserveNotice:true});
+  $('show-write').hidden=!canCompose();
+  if(activeScreen==='write'&&!canCompose())showScreen('read',{preserveNotice:true});
   if(directClient)$('inbox-status').textContent=teamState.state==='active'?'':$('team-state').textContent;
   if(teamState.state==='unregistered')$('legacy-open').open=true;
   // The last confirmed role is display-only; all actions use teamState.
@@ -795,7 +810,7 @@ $('app-update').addEventListener('click',async()=>{
   try{await appUpdates.check();}finally{$('app-update').disabled=false;}
 });
 
-function messageTitle(item){return item.kind==='review'?'Проверочная история':'Новый пациент';}
+function messageTitle(item){return item.kind==='reply'?'Ответ на сообщение':item.kind==='review'?'Проверочная история':'Новый пациент';}
 function dateLabel(time){return new Date(time).toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'});}
 function renderInbox(){
   $('inbox-list').replaceChildren();
@@ -805,7 +820,7 @@ function renderInbox(){
   for(const item of inboxItems){
     const row=document.createElement('article');row.className='message-row';
     const title=document.createElement('strong');title.textContent=messageTitle(item);row.append(title);
-    const info=document.createElement('p');info.className='message-meta';info.textContent=(item.group==='orit'?'Реаниматологи':'Кардиолог')+' · '+dateLabel(item.issued);row.append(info);
+    const info=document.createElement('p');info.className='message-meta';info.textContent=(item.kind==='reply'?'Личный ответ':item.group==='orit'?'Реаниматологи':'Кардиолог')+' · '+dateLabel(item.issued);row.append(info);
     const sender=document.createElement('p');sender.className='message-meta';sender.textContent='От '+item.senderName;row.append(sender);
     if(activeBox==='inbox'){
       const button=document.createElement('button');button.type='button';button.className='button '+(item.openedAt?'button-secondary':'button-primary');button.textContent=item.openedAt?'Открыть снова':'Открыть';button.addEventListener('click',()=>revealDirect(item.id));row.append(button);
@@ -840,22 +855,28 @@ async function revealDirect(id,fromIncoming=false){
     if(current!==generation||document.hidden)return;
     if(!organizerPin)throw new Error('Сначала подключите ключ организатора через его личное приглашение.');
     let sender;
-    if(record.sender.id===organizerPin.id&&record.senderRole==='admin')sender={...organizerPin,name:record.senderName,verified:true};
+    if(record.sender.id===organizerPin.id&&record.senderRole==='admin')sender={...organizerPin,name:record.senderName,role:'admin',verified:true};
     else sender=await verifyRecipientGrant({id:record.sender.id,name:record.senderName,role:record.senderRole,card:record.senderCard,approvalProof:record.senderApprovalProof},organizerPin);
-    if(record.meta.kind==='admission'&&record.senderRole!=='bot'||record.meta.kind==='review'&&!['admin','neurologist'].includes(record.senderRole))throw new Error('Роль отправителя не разрешает это сообщение.');
+    if(record.meta.kind==='admission'&&record.senderRole!=='bot'||record.meta.kind==='review'&&!['admin','neurologist'].includes(record.senderRole)||record.meta.kind==='reply'&&!['admin','neurologist','cardiologist','intensivist'].includes(sender.role))throw new Error('Роль отправителя не разрешает это сообщение.');
     const ownRecord=(await directClient.directory(device)).find(member=>member.id===selfContact.id);
-    const ownRole=(await verifyRecipientGrant(ownRecord,organizerPin)).role;
-    if(record.meta.group!==(ownRole==='cardiologist'?'cardiology':ownRole==='intensivist'?'orit':null))throw new Error('Сообщение адресовано другой группе врачей.');
+    const ownRole=ownRecord?.id===organizerPin.id&&ownRecord.role==='admin'?'admin':(await verifyRecipientGrant(ownRecord,organizerPin)).role;
+    if(record.meta.kind==='reply'){
+      if(!record.payload||!['admin','neurologist','cardiologist','intensivist'].includes(ownRole))throw new Error('Ответ недоступен этому получателю.');
+    }else if(record.meta.group!==(ownRole==='cardiologist'?'cardiology':ownRole==='intensivist'?'orit':null))throw new Error('Сообщение адресовано другой группе врачей.');
     if(current!==generation||document.hidden)return;
     const data=record.payload?await openMessage(device,record.token,record.payload,[sender]):await openSurname(device,record.token,[sender]);
     if(current!==generation||document.hidden)return;
     if(record.payload&&(data.messageId!==id||data.group!==record.meta.group||data.kind!==record.meta.kind))throw new Error('Содержимое не соответствует сообщению.');
+    if(record.meta.kind==='reply'&&data.replyTo!==record.meta.replyTo)throw new Error('Ответ не соответствует исходному сообщению.');
     if(data.expires!==record.meta.expires||data.issued!==record.meta.issued)throw new Error('Время сообщения не совпадает с подписанным содержимым.');
-    $('surname').textContent=data.surname||'Проверочная история';$('department').textContent=data.department;
-    $('result-label').textContent=record.meta.kind==='admission'?'Новый пациент':'Проверочная история';
+    $('surname').textContent=data.surname||(record.meta.kind==='reply'?'Ответ врача':'Проверочная история');$('department').textContent=data.department;
+    $('result-label').textContent=messageTitle(record.meta);
     $('result-comment').textContent=data.comment||'';$('case-code').textContent='Отправитель: '+data.senderName;
     if(data.photo){photoURL=photoObjectURL(data.photo);$('result-photo').src=photoURL;$('result-photo').hidden=false;}
     $('result').hidden=false;$('token').value='';endsAt=performance.now()+Math.min(30000,Math.max(0,data.expires-Date.now()));tick();timer=setInterval(tick,250);
+    if(!$('result').hidden&&canReply()&&record.meta.kind!=='admission'&&['admin','neurologist','cardiologist','intensivist'].includes(sender.role)&&sender.id!==selfContact.id){
+      revealedReply={id,group:record.meta.group,expires:data.expires,recipient:sender,hasSurname:!!data.surname};$('reply-message').hidden=false;
+    }
     if(fromIncoming&&activeIncoming)activeIncoming.pending=false;
     say('Сообщение расшифровано на этом телефоне.');$('result').scrollIntoView({block:'center',behavior:'auto'});$('surname').focus({preventScroll:true});
     // Receipt is written only after successful verification/decryption and display.
@@ -863,22 +884,74 @@ async function revealDirect(id,fromIncoming=false){
   }catch(e){if(current===generation&&!document.hidden)say(e.message||'Не удалось открыть сообщение.',true);}
   finally{setBusy(false);}
 }
+function startReply(){
+  if(busy||teamBusy||!ready||!canReply()||!revealedReply||$('result').hidden)return;
+  const context=revealedReply;
+  if(context.expires<=Date.now()){hideResult('Срок исходного сообщения истёк.');return;}
+  const surname=context.hasSurname?$('surname').textContent:'',orit=$('department').textContent==='ОРИТ';
+  // Preserve the patient reference only in the editable encrypted reply draft.
+  // Never copy the received comment/photo or leave the result behind the form.
+  clearSensitive();draftReply=context;activeScreen='write';renderNavigation();setBusy(false);
+  $('compose-surname').value=surname;$('compose-orit').checked=orit;
+  say('Ответ получит '+context.recipient.name+'.');
+  $('compose-comment').scrollIntoView({block:'center',behavior:'auto'});$('compose-comment').focus({preventScroll:true});
+}
+$('reply-message').addEventListener('click',startReply);
+$('cancel-reply').addEventListener('click',()=>{
+  if(busy)return;
+  clearSensitive();activeScreen='read';renderNavigation();setBusy(false);say('Ответ отменён.');
+});
+async function composeDirectReply(){
+  if(!draftReply||!canReply()||teamBusy||photoBusy){say('Сначала откройте сообщение и нажмите «Ответить».',true);return;}
+  const context=draftReply;
+  hideResult();const current=generation,issued=Date.now(),expires=issued+Number($('expiry').value)*60000;
+  let content={surname:$('compose-surname').value,department:$('compose-orit').checked?'ОРИТ':'ПСО',comment:$('compose-comment').value,photo:directPhoto};
+  let queued=false;
+  setBusy(true);say('Шифруем ответ для отправителя…');
+  try{
+    if(context.expires<=issued)throw new Error('Срок исходного сообщения истёк. Ответ больше недоступен.');
+    if(!organizerPin)throw new Error('Сначала подтвердите ключ организатора.');
+    const record=(await directClient.directory(device)).find(member=>member.id===context.recipient.id);
+    if(!record)throw new Error('Телефон получателя больше не подключён. Ответ не отправлен.');
+    const recipient=record.id===organizerPin.id&&record.role==='admin'?{...organizerPin,name:record.name,role:'admin',verified:true}:await verifyRecipientGrant(record,organizerPin);
+    if(!['admin','neurologist','cardiologist','intensivist'].includes(recipient.role)||recipient.id!==context.recipient.id||recipient.fingerprint!==context.recipient.fingerprint)throw new Error('Доступ или ключ получателя изменился. Откройте сообщение заново.');
+    if(current!==generation||document.hidden)return;
+    const id=newMessageID(),meta={id,group:context.group,kind:'reply',replyTo:context.id,issued,expires};
+    const sealed=await sealMessage(device,[recipient],content,meta);
+    content=null;$('compose-surname').value='';$('compose-comment').value='';clearPhoto();
+    if(current!==generation||document.hidden)return;
+    const request={...meta,...sealed};await savePending(request);queued=true;
+    const result=await directClient.create(device,request);await removePending(id);queued=false;
+    if(current!==generation||document.hidden)return;
+    clearSensitive();activeScreen='read';renderNavigation();
+    say(result.push==='accepted'?'Ответ сохранён. Уведомление передано в службу доставки.':'Ответ сохранён во «Входящих» отправителя. Уведомление ожидает доставки.');
+    await refreshPending();void refreshInbox();
+  }catch(e){
+    if(current===generation&&!document.hidden){
+      if(queued){clearSensitive();activeScreen='read';renderNavigation();}
+      say(queued?'Отправка не подтверждена. Зашифрованный ответ сохранён на этом телефоне. Нажмите «Повторить отправку» во «Входящих». '+e.message:(e.message||'Не удалось отправить ответ.'),true);
+    }
+    void refreshPending();
+  }finally{content=null;setBusy(false);}
+}
 async function refreshPending(){
   if(!directClient||!ready)return;
   try{const items=await loadPending();$('pending-count').textContent=items.length?'Ожидают подтверждения: '+items.length+'. Сохранён только шифр; повтор не создаёт второе сообщение.':'';$('retry-pending').hidden=!items.length;$('discard-pending').hidden=!items.length;discardPendingConfirmed=false;$('discard-pending').textContent='Удалить очередь с телефона';}
   catch{$('pending-count').textContent='Очередь этого телефона недоступна.';}
 }
 async function retryPending(announce=true){
-  if(!directClient||!ready||busy||teamBusy||directPendingBusy||document.hidden||!canReview())return;
+  if(!directClient||!ready||busy||teamBusy||directPendingBusy||document.hidden||!canReply())return;
   directPendingBusy=true;setBusy(busy);let sent=0;
   try{for(const data of await loadPending()){
-    if(teamBusy||!canReview())break;
+    if(teamBusy||!canReply())break;
+    if(data.kind!=='reply'&&!canReview())continue;
     try{await directClient.create(device,data);await removePending(data.id);sent++;}
     catch(e){if(announce)say(e.status===409?'Состав получателей изменился. Старая зашифрованная запись не отправлена. Создайте её заново после удаления из очереди.':e.message,true);break;}
   }if(sent&&announce)say('Сохранено для получателей: '+sent+'.');await refreshPending();void refreshInbox();}
   finally{directPendingBusy=false;setBusy(busy);}
 }
 async function composeDirectReview(){
+  if(draftReply)return composeDirectReply();
   if(!canReview()||teamBusy||photoBusy){say('Проверочные истории отправляют подключённые неврологи.',true);return;}
   hideResult();const current=generation,group=$('recipient').value,issued=Date.now(),expires=issued+Number($('expiry').value)*60000;
   let content={surname:$('compose-surname').value,department:$('compose-orit').checked?'ОРИТ':'ПСО',comment:$('compose-comment').value,photo:directPhoto};

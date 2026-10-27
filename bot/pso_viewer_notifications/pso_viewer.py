@@ -21,15 +21,15 @@ from xlsx_reader import read_book, ReaderError
 from notifier import (DESTINATIONS, ApiFailure, connect, ingest, dispatch, prune,
                       recover, now, in_window, meta, set_meta)
 from team_crypto import OpenSSLIdentity, unb64, read_card
-from team_publish import (TeamClient, TeamPublisher, TeamFailure, VIEWER, service_config,
-                          reset_prepared_after_review)
+from team_publish import (TeamClient, TeamPublisher, TeamFailure, service_config,
+                          parse_invitation, reset_prepared_after_review)
 
 ROOT = Path(__file__).resolve().parent
 DATA = Path.home() / '.local' / 'share' / 'pso-viewer-bot'
 OLD_DATA = Path.home() / '.local' / 'share' / 'pso-pachca'
 MONTHS = ('Январь Февраль Март Апрель Май Июнь Июль Август Сентябрь Октябрь Ноябрь Декабрь').split()
 POLL = 60
-VERSION = '1.0 — прямые сообщения'
+VERSION = '1.1 — прямые сообщения'
 
 
 def prepare():
@@ -374,22 +374,13 @@ def encrypted_publisher(db):
     return TeamPublisher(db, TeamClient(OpenSSLIdentity(DATA / 'crypto')))
 
 
-def activation_details(value):
-    value = value.strip()
-    organizer = ''
-    if value.startswith('https://'):
-        parsed, expected = urlparse(value), urlparse(service_config()['viewer_url'])
-        if parsed.scheme != expected.scheme or parsed.netloc != expected.netloc or parsed.path != expected.path or parsed.query or parsed.username or parsed.password:
-            raise ValueError('Используйте персональную ссылку активации просмотрщика.')
-        fragments = parse_qs(parsed.fragment, strict_parsing=True)
-        if not set(fragments).issubset({'join', 'organizer'}) or 'join' not in fragments or any(len(values) != 1 for values in fragments.values()):
-            raise ValueError('Нужна ссылка активации, а не ссылка на пациента.')
-        value = fragments['join'][0]
-        organizer = fragments.get('organizer', [''])[0]
-        if organizer:
-            read_card(organizer)
-    unb64(value, 16)
-    return value, organizer
+def activation_details(value, team=None):
+    if team is not None:
+        return team.resolve_invitation(value)
+    reference = parse_invitation(value, service_config()['viewer_url'])
+    if reference['organizerHash']:
+        raise ValueError('Для короткого приглашения выберите пункт «Подключить новый бот к просмотрщику».')
+    return reference['id'], reference['organizerCard']
 
 
 def activation_id(value):
@@ -425,12 +416,13 @@ def setup_encryption():
         print('Контрольный код бота: ' + ' '.join(fingerprint[i:i+4] for i in range(0, len(fingerprint), 4)))
         invite = input('Вставьте персональную ссылку активации с ролью «Бот» (Enter — только проверить): ').strip()
         if invite:
-            invitation_id, organizer_card = activation_details(invite)
+            team = TeamClient(identity)
+            invitation_id, organizer_card = activation_details(invite, team)
             if organizer_card:
                 pin_organizer(organizer_card)
             elif not (DATA / 'organizer.card').is_file():
                 raise RuntimeError('В приглашении нет ключа организатора. Создайте новое приглашение в обновлённом просмотрщике.')
-            team = TeamClient(identity)
+            # Claim only follows the existing explicit organizer-key confirmation.
             result = team.claim(invitation_id)
             print('Заявка принята. Администратор должен подтвердить этот контрольный код.' if result['state'] == 'pending' else 'Активация подтверждена. Проверьте пункт 9.')
         else:

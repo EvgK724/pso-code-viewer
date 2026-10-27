@@ -237,6 +237,46 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(self.send([rec()], moment(hour=23)), 0)
         self.assertEqual(self.send([rec()], moment(day=15, hour=7)), 2)
 
+    def test_activation_date_is_chelyabinsk_date_even_when_clock_is_utc(self):
+        # 23:30 UTC on14October is04:30 on15October in Chelyabinsk.
+        utc = dt.datetime(2026, 10, 14, 23, 30, tzinfo=dt.timezone.utc)
+        n.ingest(self.db, book(), utc, baseline=True)
+        self.assertEqual(n.meta(self.db, 'started_date'), '2026-10-15')
+        self.assertEqual(self.send([rec(date='2026-10-14')], moment(day=15, hour=7)), 0)
+        self.assertEqual(self.send([rec(date='2026-10-15')], moment(day=15, hour=7)), 2)
+
+    def test_dispatch_uses_chelyabinsk_date_when_host_clock_has_other_zone(self):
+        # 23:00 UTC-8 on13October is12:00 on14October in Chelyabinsk.
+        other_zone = dt.datetime(2026, 10, 13, 23, tzinfo=dt.timezone(dt.timedelta(hours=-8)))
+        self.assertEqual(self.send([rec(date='2026-10-14')], other_zone), 2)
+
+    def test_month_boundary_keeps_last_night_and_new_month_queue_without_duplicates(self):
+        october = book([rec(date='2026-10-31')])
+        november = book([rec('Пробов', date='2026-11-01')], month=11)
+        night = moment(day=31, hour=23)
+        n.ingest(self.db, october, night)
+        valid = n.ingest(self.db, october, night)
+        self.assertEqual(n.dispatch(self.db, self.publisher, valid, lambda: night), 0)
+        morning = moment(day=1, hour=7, month=11)
+        for _ in range(2):
+            valid = n.ingest(self.db, october, morning) + n.ingest(self.db, november, morning)
+        self.assertEqual(n.dispatch(self.db, self.publisher, valid, lambda: morning), 4)
+        valid = n.ingest(self.db, october, morning) + n.ingest(self.db, november, morning)
+        self.assertEqual(n.dispatch(self.db, self.publisher, valid, lambda: morning), 0)
+
+    def test_filename_and_row_changes_preserve_durable_event_identity(self):
+        original = book([rec()])
+        original['filename'] = '/synthetic/10_October.xlsx'
+        n.ingest(self.db, original, moment())
+        valid = n.ingest(self.db, original, moment())
+        self.assertEqual(n.dispatch(self.db, self.publisher, valid, lambda: moment()), 2)
+        moved = book([rec(row=17)])
+        moved['filename'] = '/synthetic/Subdivisions/10_October_renamed.xlsx'
+        n.ingest(self.db, moved, moment())
+        valid = n.ingest(self.db, moved, moment())
+        self.assertEqual(n.dispatch(self.db, self.publisher, valid, lambda: moment()), 0)
+        self.assertEqual(self.db.execute('SELECT COUNT(*) FROM events').fetchone()[0], 1)
+
     def test_window_boundaries_and_timezone(self):
         self.assertFalse(n.in_window(moment(hour=6, minute=59)))
         self.assertTrue(n.in_window(moment(hour=7)))

@@ -1541,7 +1541,7 @@ async function directFixture(roles=['admin','neurologist','cardiologist']){
    if(openGate)await openGate;
    const r=records.get(envelope.data.id);if(!r)return respond({error:'not_found'},404);
    const entry=r.entries.find(e=>e.recipientId===member.id);if(!entry)return respond({error:'forbidden'},403);
-   return respond(openTransform({token:entry.token,payload:r.payload||null,senderCard:r.sender.card,senderName:r.sender.name,senderRole:r.sender.role,senderApprovalProof:r.sender.approvalProof,meta:{id:r.id,group:r.group,kind:r.kind,issued:r.issued,expires:r.expires}}));
+   return respond(openTransform({token:entry.token,payload:r.payload||null,senderCard:r.sender.card,senderName:r.sender.name,senderRole:r.sender.role,senderApprovalProof:r.sender.approvalProof,meta:{id:r.id,group:r.group,kind:r.kind,issued:r.issued,expires:r.expires,...(r.kind==='reply'?{replyTo:r.replyTo}:{})}}));
   }
   if(envelope.op==='ack'){records.get(envelope.data.id).opened.add(member.id);return respond({openedAt:Date.now()});}
   return respond({error:'unsupported'},400);
@@ -1874,4 +1874,77 @@ test('an incoming public card opens its confirmation in settings instead of a hi
  assert.equal(app.el('contact-confirm').hidden,false,app.el('notice').textContent);
  assert.equal(app.el('save-contact').disabled,true,'Verification is still required');
  assert.equal(recipient.contacts.size,0);
+});
+
+test('specialists reply with encrypted content only to the verified original sender',async t=>{
+ for(const [role,group] of [['cardiologist','cardiology'],['intensivist','orit']])await t.test(role,async()=>{
+  const s=await directFixture(['admin','neurologist',role,role]);
+  const writer=await harness(s.stores[1],'',s.options);await directSend(writer,{group});
+  const original=[...s.records.values()][0],reader=await harness(s.stores[2],'',s.options);
+  assert.equal(reader.el('show-write').hidden,true,'Specialist cannot start a new group message');
+  await reader.hashchange('#m='+original.id);await reader.idle();
+  assert.equal(reader.el('reply-message').hidden,false,reader.el('notice').textContent);
+  await reader.event('reply-message');assertScreen(reader,'write');
+  assert.equal(reader.el('reply-recipient').textContent,s.members[1].name);
+  assert.equal(reader.el('recipient-routing').hidden,true);
+  assert.equal(reader.el('compose-surname').value,'Иванов');
+  assert.equal(reader.el('compose-comment').value,'');assert.equal(reader.el('photo-preview').hidden,true);
+  reader.el('compose-comment').value='Ответ врача: прошу уточнить';
+  await reader.event('compose-form','submit');await reader.idle();
+  const reply=[...s.records.values()].find(r=>r.kind==='reply');assert.ok(reply,reader.el('notice').textContent);
+  assert.equal(reply.replyTo,original.id);assert.equal(reply.group,group);
+  assert.deepEqual(reply.entries.map(e=>e.recipientId),[s.members[1].id]);
+  const sent=s.requests.find(r=>r.op==='create'&&r.data.kind==='reply');
+  assert.ok(!JSON.stringify(sent).includes('Иванов'));assert.ok(!JSON.stringify(sent).includes('прошу уточнить'));
+  assert.equal(reader.el('compose-comment').value,'');assert.equal(reader.el('reply-context').hidden,true);
+  await writer.hashchange('#m='+reply.id);await writer.idle();
+  assert.equal(writer.el('result').hidden,false,writer.el('notice').textContent);
+  assert.equal(writer.el('result-comment').textContent,'Ответ врача: прошу уточнить');
+  assert.equal(writer.el('reply-message').hidden,false,'Original sender can continue the exchange');
+  await writer.event('reply-message');assert.equal(writer.el('reply-recipient').textContent,s.members[2].name);
+ });
+});
+
+test('reply actions and draft plaintext disappear on expiry, navigation and backgrounding',async()=>{
+ const s=await directFixture(),writer=await harness(s.stores[1],'',s.options);await directSend(writer);
+ const original=[...s.records.values()][0],reader=await harness(s.stores[2],'',s.options);
+ await reader.hashchange('#m='+original.id);await reader.idle();reader.advance(30001);
+ assert.equal(reader.el('reply-message').hidden,true);await reader.event('reply-message');assertScreen(reader,'read');
+ for(const action of ['navigation','background']){
+  await reader.hashchange('#m='+original.id);await reader.idle();await reader.event('reply-message');
+  reader.el('compose-comment').value='Черновик ответа';
+  if(action==='navigation')await reader.event('show-settings');else{await reader.hide();await reader.show();}
+  assert.equal(reader.el('compose-surname').value,'');assert.equal(reader.el('compose-comment').value,'');
+  assert.equal(reader.el('reply-context').hidden,true);assert.equal(reader.el('reply-message').hidden,true);
+  assert.equal(reader.el('show-write').hidden,true);
+  await reader.event('show-write');assert.equal(reader.el('screen-write').hidden,true);
+ }
+ assert.equal(s.requests.filter(r=>r.op==='create').length,1,'Cleared reply cannot be sent by an incidental event');
+});
+
+test('a reply with substituted parent metadata cannot reveal content or acknowledge',async()=>{
+ const s=await directFixture(),writer=await harness(s.stores[1],'',s.options);await directSend(writer);
+ const original=[...s.records.values()][0],reader=await harness(s.stores[2],'',s.options);
+ await reader.hashchange('#m='+original.id);await reader.idle();await reader.event('reply-message');
+ reader.el('compose-comment').value='Защищённый ответ';await reader.event('compose-form','submit');await reader.idle();
+ const reply=[...s.records.values()].find(r=>r.kind==='reply');assert.ok(reply,reader.el('notice').textContent);
+ const before=s.requests.filter(r=>r.op==='ack').length;
+ s.transform(r=>({...r,meta:{...r.meta,replyTo:direct.newMessageID()}}));
+ await writer.hashchange('#m='+reply.id);await writer.idle();
+ assert.equal(writer.el('result').hidden,true);assert.equal(writer.el('result-comment').textContent,'');
+ assert.equal(writer.el('reply-message').hidden,true);assert.equal(s.requests.filter(r=>r.op==='ack').length,before);
+ assert.equal(writer.el('notice').attributes.get('role'),'alert');
+});
+
+test('a specialist retries a durable encrypted reply after a lost response without duplication',async()=>{
+ const s=await directFixture(),writer=await harness(s.stores[1],'',s.options);await directSend(writer);
+ const original=[...s.records.values()][0],reader=await harness(s.stores[2],'',s.options);
+ await reader.hashchange('#m='+original.id);await reader.idle();await reader.event('reply-message');
+ reader.el('compose-comment').value='Ответ для повтора';s.setFailure(true);
+ await reader.event('compose-form','submit');await reader.idle();
+ assert.equal(s.stores[2].pending.size,1,reader.el('notice').textContent);
+ const queued=[...s.stores[2].pending.values()][0];assert.equal(queued.kind,'reply');assert.ok(!JSON.stringify(queued).includes('Ответ для повтора'));
+ const restarted=await harness(s.stores[2],'',s.options);await waitUntil(()=>!restarted.el('retry-pending').hidden,'reply retry available');
+ s.setFailure(false);await restarted.event('retry-pending');await waitUntil(()=>s.stores[2].pending.size===0,'reply retry delivered');
+ assert.equal(s.records.size,2);assert.equal(s.requests.filter(r=>r.op==='create'&&r.data.id===queued.id).length,2);
 });

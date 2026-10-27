@@ -10,7 +10,7 @@ export const MAX_MESSAGE_TTL = 86400000;
 export const MESSAGE_SIGN_DOMAIN = 'PSO-MESSAGE-v2\0';
 export const MESSAGE_KEY_LABEL = 'PSO-MESSAGE-KEY-v2';
 const enc = new TextEncoder(), dec = new TextDecoder('utf-8', {fatal:true});
-const GROUPS = ['cardiology','orit'], KINDS = ['admission','review'];
+const GROUPS = ['cardiology','orit'], KINDS = ['admission','review','reply'];
 const BAD = /[\p{Cc}\p{Cf}]/u;
 const exact = (v,k) => v && typeof v === 'object' && !Array.isArray(v) && Object.keys(v).sort().join(',') === k;
 
@@ -29,14 +29,15 @@ export function messageUnbase64url(value, expected=0, max=MAX_MESSAGE_CIPHERTEXT
   return result;
 }
 function metaValue(meta,now) {
-  if (!exact(meta,'expires,group,id,issued,kind,v') || meta.v !== 2 || !GROUPS.includes(meta.group) || !KINDS.includes(meta.kind)) throw new Error('Неверные параметры сообщения.');
+  if (!exact(meta,meta?.kind==='reply'?'expires,group,id,issued,kind,replyTo,v':'expires,group,id,issued,kind,v') || meta.v !== 2 || !GROUPS.includes(meta.group) || !KINDS.includes(meta.kind)) throw new Error('Неверные параметры сообщения.');
   messageUnbase64url(meta.id,16,22);
+  if(meta.kind==='reply'){messageUnbase64url(meta.replyTo,16,22);if(meta.replyTo===meta.id)throw new Error('Ответ не может ссылаться на себя.');}
   if (!Number.isSafeInteger(now) || !Number.isSafeInteger(meta.issued) || !Number.isSafeInteger(meta.expires) || meta.issued <= 0 || meta.expires <= meta.issued || meta.expires-meta.issued > MAX_MESSAGE_TTL || meta.expires-meta.issued < 60000 || meta.issued > now+30000 || meta.expires <= now) throw new Error('Срок сообщения истёк или время создания неверно.');
-  return {v:2,id:meta.id,group:meta.group,kind:meta.kind,issued:meta.issued,expires:meta.expires};
+  return {v:2,id:meta.id,group:meta.group,kind:meta.kind,issued:meta.issued,expires:meta.expires,...(meta.kind==='reply'?{replyTo:meta.replyTo}:{})};
 }
 export function validateMessagePayload(payload,now=Date.now()) {
-  if (!exact(payload,'ciphertext,expires,group,id,issued,iv,kind,v')) throw new Error('Неверный формат зашифрованного сообщения.');
-  const meta=metaValue({v:payload.v,id:payload.id,group:payload.group,kind:payload.kind,issued:payload.issued,expires:payload.expires},now);
+  if (!exact(payload,payload?.kind==='reply'?'ciphertext,expires,group,id,issued,iv,kind,replyTo,v':'ciphertext,expires,group,id,issued,iv,kind,v')) throw new Error('Неверный формат зашифрованного сообщения.');
+  const meta=metaValue({v:payload.v,id:payload.id,group:payload.group,kind:payload.kind,issued:payload.issued,expires:payload.expires,...(payload.kind==='reply'?{replyTo:payload.replyTo}:{})},now);
   messageUnbase64url(payload.iv,12,16);
   const bytes=messageUnbase64url(payload.ciphertext,0,MAX_MESSAGE_CIPHERTEXT_CHARS);
   if (bytes.length < 16 || bytes.length > MAX_MESSAGE_PLAINTEXT_BYTES+16) throw new Error('Зашифрованное сообщение слишком большое.');
@@ -178,12 +179,12 @@ export async function openMessage(device,token,payload,contactsArray,now=Date.no
     keyBytes=new Uint8Array(await crypto.subtle.decrypt({name:'RSA-OAEP',label:enc.encode(MESSAGE_KEY_LABEL)},device.encryption.privateKey,p.wrappedKey));
     if(keyBytes.length!==32)throw new Error('key');
     const key=await crypto.subtle.importKey('raw',keyBytes,{name:'AES-GCM'},false,['decrypt']);
-    const aad=metaValue({v:m.v,id:m.id,group:m.group,kind:m.kind,issued:m.issued,expires:m.expires},now);
+    const aad=metaValue({v:m.v,id:m.id,group:m.group,kind:m.kind,issued:m.issued,expires:m.expires,...(m.kind==='reply'?{replyTo:m.replyTo}:{})},now);
     plaintext=await crypto.subtle.decrypt({name:'AES-GCM',iv:messageUnbase64url(m.iv,12),additionalData:enc.encode(JSON.stringify(aad)),tagLength:128},key,messageUnbase64url(m.ciphertext));
     data=JSON.parse(dec.decode(plaintext));
     const value=contentValue(data,m.kind);
     if(JSON.stringify(value)!==JSON.stringify(data))throw new Error('noncanonical');
-    return {...value,messageId:m.id,kind:m.kind,group:m.group,issued:m.issued,expires:m.expires,senderName:verifiedSender.name,code:'ПСО-'+m.id};
+    return {...value,messageId:m.id,kind:m.kind,group:m.group,issued:m.issued,expires:m.expires,...(m.kind==='reply'?{replyTo:m.replyTo}:{}),senderName:verifiedSender.name,code:'ПСО-'+m.id};
   } catch {throw new Error('Не удалось расшифровать или проверить содержание сообщения.');}
   finally {if(keyBytes)keyBytes.fill(0);if(plaintext)new Uint8Array(plaintext).fill(0);}
 }

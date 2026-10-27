@@ -1,6 +1,7 @@
 """Offline direct-delivery tests; invented records and local keys only."""
 import ast
 import datetime as dt
+import hashlib
 import io
 import json
 import os
@@ -15,8 +16,10 @@ from unittest import mock
 import notifier as n
 import pso_viewer as app
 from team_crypto import OpenSSLIdentity, b64, compact
-from team_publish import TeamClient, TeamFailure, TeamPublisher, ENDPOINT, DIRECT_ENDPOINT, VIEWER, verify_recipient, GRANT_DOMAIN, service_config
+from team_publish import TeamClient, TeamFailure, TeamPublisher, verify_recipient, GRANT_DOMAIN, service_config, parse_invitation
 from test_notifier import book, rec, moment
+
+ENDPOINT, DIRECT_ENDPOINT, VIEWER = (service_config()[key] for key in ('team_endpoint', 'direct_endpoint', 'viewer_url'))
 
 
 def viewer_docs():
@@ -309,6 +312,101 @@ class DeliveryTests(unittest.TestCase):
         fixture=json.loads(process.stdout)
         card=verify_recipient(fixture['member'],fixture['organizerCard'],self.identity,fixture['now'])
         self.assertEqual(card['id'],fixture['member']['id'])
+        client=TeamClient(self.identity,clock=lambda:fixture['now'],organizer_card='')
+        client.services=dict(client.services,viewer_url='https://viewer.example/')
+        client.request=mock.Mock(return_value={'id':fixture['invitationId'],'expires':fixture['now']+60000,'organizerCard':fixture['organizerCard']})
+        self.assertEqual(client.resolve_invitation(fixture['invitationURL']),(fixture['invitationId'],fixture['organizerCard']))
+
+    def short_invitation(self, card=None):
+        card = card or self.identity.card
+        raw_id = os.urandom(16)
+        return (VIEWER + '#i=' + b64(raw_id + hashlib.sha256(card.encode('utf-8')).digest()), b64(raw_id))
+
+    def test_short_invitation_matches_hash_and_uses_readonly_signed_team_lookup(self):
+        at = 1791961200000
+        link, invitation_id = self.short_invitation()
+        opener = mock.Mock()
+        opener.open.return_value = Response({'id': invitation_id, 'expires': at + 60000, 'organizerCard': self.identity.card})
+        client = TeamClient(self.recipient, opener=opener, clock=lambda: at, organizer_card='')
+        self.assertEqual(client.resolve_invitation(link), (invitation_id, self.identity.card))
+        request = opener.open.call_args[0][0]
+        envelope = json.loads(request.data.decode('utf-8'))['envelope']
+        self.assertEqual(request.full_url, ENDPOINT)
+        self.assertEqual(envelope['op'], 'invite_info')
+        self.assertEqual(envelope['data'], {'id': invitation_id})
+        self.assertNotIn('organizerHash', compact(envelope))
+        self.assertEqual(client.organizer_card, '')
+        self.assertFalse((self.recipient.directory.parent / 'organizer.card').exists())
+        self.assertEqual(opener.open.call_count, 1)
+
+    def test_short_invitation_rejects_replaced_key_id_expiry_and_extra_fields(self):
+        at = 1791961200000
+        link, invitation_id = self.short_invitation()
+        client = TeamClient(self.recipient, clock=lambda: at, organizer_card='')
+        good = {'id': invitation_id, 'expires': at + 60000, 'organizerCard': self.identity.card}
+        for patch in ({'organizerCard': self.recipient.card}, {'id': b64(os.urandom(16))},
+                      {'expires': at}, {'expires': True}, {'expires': 9007199254740992},
+                      {'organizerCard': 'broken'}, {'unexpected': 'value'}):
+            client.request = mock.Mock(return_value=dict(good, **patch))
+            with self.assertRaises(TeamFailure):
+                client.resolve_invitation(link)
+            client.request.assert_called_once_with('invite_info', {'id': invitation_id})
+
+    def test_short_invitation_refuses_wrong_host_path_query_and_truncated_tokens_before_network(self):
+        link, invitation_id = self.short_invitation()
+        client = TeamClient(self.recipient, organizer_card='')
+        client.request = mock.Mock()
+        token = link.split('#i=', 1)[1]
+        for invalid in (link.replace(VIEWER, 'https://other.example/'), VIEWER + 'extra/#i=' + token,
+                        VIEWER + '?tracking=1#i=' + token, link[:-1], link + '&i=' + token,
+                        VIEWER + '#i=' + token + '&join=' + invitation_id,
+                        VIEWER + '#i=%' + format(ord(token[0]), '02X') + token[1:],
+                        VIEWER + '#m=' + invitation_id):
+            with self.assertRaises(ValueError):
+                client.resolve_invitation(invalid)
+        client.request.assert_not_called()
+
+    def test_old_invitation_formats_remain_local_and_match_configured_viewer(self):
+        from urllib.parse import urlencode
+        join = b64(os.urandom(16))
+        client = TeamClient(self.recipient, organizer_card='')
+        client.request = mock.Mock()
+        legacy = VIEWER + '#' + urlencode({'join': join, 'organizer': self.identity.card})
+        packed = VIEWER + '#invite=' + b64(compact({'v': 1, 'id': join, 'organizer': self.identity.card}).encode('utf-8'))
+        for link in (legacy, packed):
+            self.assertEqual(client.resolve_invitation(link), (join, self.identity.card))
+        self.assertEqual(client.resolve_invitation(join), (join, ''))
+        self.assertEqual(client.resolve_invitation(VIEWER + '#join=' + join), (join, ''))
+        client.request.assert_not_called()
+
+    def test_short_invitation_enrollment_keeps_explicit_confirmation_before_claim(self):
+        link, join = self.short_invitation(self.recipient.card)
+        client = mock.Mock()
+        client.resolve_invitation.return_value = (join, self.recipient.card)
+        client.claim.return_value = {'state': 'pending'}
+        fake_identity = mock.Mock(id=self.identity.id)
+        fake_identity.run.return_value = b'OpenSSL synthetic test'
+        data = Path(self.temp.name)
+        with mock.patch.object(app, 'DATA', data), mock.patch.object(app, 'OpenSSLIdentity', return_value=fake_identity), \
+                mock.patch.object(app, 'TeamClient', return_value=client), mock.patch('builtins.print'), \
+                mock.patch('builtins.input', side_effect=[link, 'нет']):
+            with self.assertRaises(RuntimeError):
+                app.setup_encryption()
+        client.claim.assert_not_called()
+        self.assertFalse((data / 'organizer.card').exists())
+        with mock.patch.object(app, 'DATA', data), mock.patch.object(app, 'OpenSSLIdentity', return_value=fake_identity), \
+                mock.patch.object(app, 'TeamClient', return_value=client), mock.patch('builtins.print'), \
+                mock.patch('builtins.input', side_effect=[link, 'д']):
+            app.setup_encryption()
+        client.claim.assert_called_once_with(join)
+        self.assertEqual((data / 'organizer.card').read_text().strip(), self.recipient.card)
+
+    def test_missing_or_invalid_service_config_never_uses_old_host(self):
+        for error in (OSError('missing'), ValueError('invalid')):
+            fake = mock.Mock()
+            fake.with_name.return_value.read_text.side_effect = error
+            with mock.patch('team_publish.Path', return_value=fake), self.assertRaises(RuntimeError):
+                service_config()
 
     def test_service_configuration_requires_https_without_credentials_or_redirects(self):
         valid={'team_endpoint':'https://medical.example/api/team','direct_endpoint':'https://medical.example/api/direct','viewer_url':'https://viewer.medical.example/'}

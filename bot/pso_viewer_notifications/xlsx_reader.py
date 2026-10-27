@@ -97,7 +97,13 @@ def extract_surname(value):
 
 def is_orit(origin):
     value = normalize(origin).upper().replace("Ё", "Е")
-    return bool(re.search(r"(?:^|[^А-ЯA-Z])ОРИТ(?:$|[^А-ЯA-Z])", value))
+    # The same ICU is written as ОРИТ, ОРиИТ, ОАРИТ or by its full name in
+    # daily reports. Do not notify specialists again on an internal ICU→PSO
+    # transfer merely because the source ward uses a different spelling.
+    return bool(re.search(
+        r"(?:^|[^А-ЯA-Z])(?:ОРИТ|ОРИИТ|ОАРИТ)(?:$|[^А-ЯA-Z])"
+        r"|(?:^|[^А-ЯA-Z])РЕАНИМАЦ(?:ИЯ|ИИ|ИЮ|ИОННОЕ|ИОННОГО|ИОННЫЙ|ИОННОЙ)(?:$|[^А-ЯA-Z])",
+        value))
 
 
 def _stamp(stat):

@@ -1,9 +1,10 @@
 """Encrypted, idempotent viewer delivery. No Pachca API is used."""
 import hashlib
+import hmac
 import json
 import os
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs
 import unicodedata
 import time
 import urllib.error
@@ -12,10 +13,6 @@ import urllib.request
 from notifier import ApiFailure, NoRedirect
 from team_crypto import OpenSSLIdentity, b64, compact, read_card, unb64
 
-ENDPOINT = 'https://spugfikalpihorcwcdqc.supabase.co/functions/v1/pso-team'
-DIRECT_ENDPOINT = 'https://spugfikalpihorcwcdqc.supabase.co/functions/v1/pso-direct'
-VIEWER = 'https://evgk724.github.io/pso-code-viewer/'
-ORIGIN = 'https://evgk724.github.io'
 GRANT_DOMAIN = 'PSO-RECIPIENT-GRANT-v1\0'
 MAX_GRANT_TTL = 365 * 86400000
 GROUPS = {'cardio': ('cardiology', 'cardiologist'), 'orit': ('orit', 'intensivist')}
@@ -23,12 +20,11 @@ GROUPS = {'cardio': ('cardiology', 'cardiologist'), 'orit': ('orit', 'intensivis
 
 def service_config():
     path = Path(__file__).with_name('service-config.json')
-    default = {'team_endpoint': ENDPOINT, 'direct_endpoint': DIRECT_ENDPOINT, 'viewer_url': VIEWER}
     try:
-        data = json.loads(path.read_text(encoding='utf-8')) if path.exists() else default
+        data = json.loads(path.read_text(encoding='utf-8'))
     except (OSError, ValueError):
         raise RuntimeError('Не удалось прочитать service-config.json. Сообщения не отправляются.') from None
-    if not isinstance(data, dict) or set(data) != set(default):
+    if not isinstance(data, dict) or set(data) != {'team_endpoint', 'direct_endpoint', 'viewer_url'}:
         raise RuntimeError('Неверный формат адресов service-config.json.')
     for key, value in data.items():
         if not isinstance(value, str) or any(c.isspace() for c in value):
@@ -43,6 +39,47 @@ def service_config():
     if not data['viewer_url'].endswith('/'):
         raise RuntimeError('Адрес просмотрщика должен завершаться символом /.')
     return data
+
+
+def parse_invitation(value, viewer_url):
+    """Parse only the configured viewer's links; a short link needs verification."""
+    if not isinstance(value, str) or len(value) > 12000:
+        raise ValueError('Не удалось прочитать приглашение. Скопируйте ссылку целиком.')
+    value = value.strip()
+    if not value.startswith('https://'):
+        unb64(value, 16)
+        return {'id': value, 'organizerCard': '', 'organizerHash': ''}
+    parsed, expected = urlparse(value), urlparse(viewer_url)
+    if (parsed.scheme != 'https' or parsed.netloc != expected.netloc or
+            parsed.path not in (expected.path, expected.path + 'index.html') or
+            parsed.query or parsed.params or parsed.username or parsed.password):
+        raise ValueError('Используйте персональную ссылку из вашего просмотрщика.')
+    parts = parse_qs(parsed.fragment, strict_parsing=True, keep_blank_values=True)
+    if any(len(values) != 1 for values in parts.values()):
+        raise ValueError('Приглашение содержит повторные параметры. Скопируйте ссылку целиком.')
+    if set(parts) == {'i'}:
+        token = parts['i'][0]
+        # Unlike legacy URL parameters this compact token is canonical verbatim.
+        if parsed.fragment != 'i=' + token or len(token) != 64:
+            raise ValueError('Короткое приглашение повреждено. Скопируйте ссылку целиком.')
+        raw = unb64(token, 48)
+        return {'id': b64(raw[:16]), 'organizerCard': '', 'organizerHash': b64(raw[16:])}
+    if set(parts) in ({'join'}, {'join', 'organizer'}):
+        invitation_id = parts['join'][0]
+        card = parts.get('organizer', [''])[0]
+    elif set(parts) == {'invite'}:
+        packed = json.loads(unb64(parts['invite'][0], maximum=12000).decode('utf-8'))
+        if not isinstance(packed, dict) or set(packed) != {'v', 'id', 'organizer'} or type(packed['v']) is not int or packed['v'] != 1:
+            raise ValueError('Приглашение повреждено. Скопируйте ссылку целиком.')
+        invitation_id, card = packed['id'], packed['organizer']
+    else:
+        raise ValueError('Нужна ссылка приглашения, а не ссылка на пациента.')
+    unb64(invitation_id, 16)
+    if card:
+        read_card(card)
+    elif set(parts) != {'join'}:
+        raise ValueError('В приглашении отсутствует ключ организатора.')
+    return {'id': invitation_id, 'organizerCard': card, 'organizerHash': ''}
 
 
 def source_digest(row):
@@ -155,6 +192,26 @@ class TeamClient:
         if value.get('state') not in ('pending', 'active'):
             raise TeamFailure('blocked', 'Активация не подтверждена сервисом.')
         return value
+
+    def resolve_invitation(self, value):
+        """Resolve #i without claiming it or changing the locally pinned key."""
+        reference = parse_invitation(value, self.services['viewer_url'])
+        if not reference['organizerHash']:
+            return reference['id'], reference['organizerCard']
+        info = self.request('invite_info', {'id': reference['id']})
+        at = self.clock()
+        try:
+            if (not isinstance(info, dict) or set(info) != {'id', 'expires', 'organizerCard'} or
+                    info['id'] != reference['id'] or type(at) is not int or not 0 < at <= 9007199254740991 or
+                    type(info['expires']) is not int or not at < info['expires'] <= 9007199254740991):
+                raise ValueError('invalid invitation response')
+            card = read_card(info['organizerCard'])
+            digest = b64(hashlib.sha256(card['card'].encode('utf-8')).digest())
+            if not hmac.compare_digest(digest, reference['organizerHash']):
+                raise ValueError('organizer substituted')
+        except (ValueError, TypeError, KeyError, UnicodeError):
+            raise TeamFailure('blocked', 'Приглашение истекло или не совпало со ссылкой. Попросите организатора отправить новое.') from None
+        return reference['id'], card['card']
 
     def recipients(self, destination):
         value = self.request('directory', {}, direct=True)

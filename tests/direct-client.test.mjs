@@ -49,3 +49,15 @@ test('HTTP428 is distinguished for a single explicit device unlock retry',async(
   const client=new DirectClient('https://service.example/api',{fetch:async()=>response({error:'unlock_required'},428)});
   await assert.rejects(client.open(device,newMessageID()),e=>e.status===428&&e.code==='unlock_required');
 });
+
+test('reply retries retain signed parent binding and reject altered or plaintext data',async()=>{
+  const issued=Date.now(),meta={id:newMessageID(),group:'orit',kind:'reply',replyTo:newMessageID(),issued,expires:issued+60000};
+  const sealed=await sealMessage(device,[rc],{comment:'Ответ реаниматолога'},meta),data={...meta,...sealed};
+  assert.equal(validatePending(data),data);assert.ok(!JSON.stringify(data).includes('Ответ реаниматолога'));
+  for(const patch of [{replyTo:newMessageID()},{replyTo:undefined},{kind:'review'},{comment:'plain'}])assert.throws(()=>validatePending({...data,...patch}));
+  const opened={meta,payload:sealed.payload,token:sealed.entries[0].token,senderName:'Автор',senderCard:card.card,senderRole:'cardiologist',senderApprovalProof:null};
+  let body=opened;const client=new DirectClient('https://service.example/api',{fetch:async()=>response(body)});
+  assert.equal((await client.open(device,meta.id)).meta.replyTo,meta.replyTo);
+  for(const replyTo of [undefined,'bad',meta.id]){body={...opened,meta:{...meta,replyTo}};await assert.rejects(client.open(device,meta.id));}
+  body={...opened,payload:null};await assert.rejects(client.open(device,meta.id));
+});
