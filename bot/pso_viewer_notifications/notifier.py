@@ -75,6 +75,7 @@ def cutoff_date(moment):
 
 def ingest(db, book, moment, baseline=False):
     """Reconcile one complete, validated snapshot. Never read external links."""
+    moment = moment.astimezone(LOCAL_TZ)
     month = '{:04d}-{:02d}-%'.format(book['year'], book['month'])
     old = list(db.execute('SELECT * FROM events WHERE date LIKE ? ORDER BY active DESC,id', (month,)))
     records = sorted((dict(x, name_key=identity_hash(db, x['name_key'])) for x in book['records']),
@@ -210,7 +211,7 @@ def dispatch(db, publisher, valid_ids, clock=now, should_stop=lambda: False):
         FROM deliveries d JOIN events e ON e.id=d.event_id
         WHERE d.status='pending' ORDER BY e.date,e.id,d.id"""))
     for row in rows:
-        moment = clock()
+        moment = clock().astimezone(LOCAL_TZ)
         if should_stop() or not in_window(moment):
             break
         if (row['event_id'] not in valid or not row['active'] or row['baseline'] or

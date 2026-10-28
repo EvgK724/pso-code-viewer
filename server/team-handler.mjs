@@ -6,7 +6,7 @@ import {createVapidKeys, sendWebPush} from './web-push.mjs';
 export const MAX_TEAM_BODY_BYTES = 32768;
 const DOMAIN = 'PSO-TEAM-v1\0', TOKEN_DOMAIN = 'PSO-SURNAME-LINK-v1\0';
 const MAX_TTL = 86400000, MAX_RECIPIENTS = 25;
-const OPS = ['status','directory','invite','claim','pending','approve','revoke','create','resolve'];
+const OPS = ['status','directory','invite','invite_info','claim','pending','approve','revoke','create','resolve'];
 const ROLES = ['admin','neurologist','cardiologist','intensivist','bot'];
 const DIAGNOSTIC_STAGES = new Set(['validation','accept',...OPS,'configuration','database_connect','organizer_check','handler_setup','dispatch']);
 const DIAGNOSTIC_CODES = new Set(['database_conflict','database_deadline','database_unavailable','invalid_record','invalid_result','result_limit','database_closed','transaction_closed','operation_limit']);
@@ -151,9 +151,16 @@ export function createTeamHandler({store,allowedOrigin,crypto=globalThis.crypto,
       if(['status','directory','pending'].includes(e.op)) {
         if(!exact(data,''))throw new Rejected();
       } else if(e.op==='invite') {
-        if(!exact(data,'id,name,role')||!['neurologist','cardiologist','intensivist','bot'].includes(data.role))throw new Rejected();
+        if(!(exact(data,'id,name,role')||exact(data,'id,name,organizerCard,role'))||!['neurologist','cardiologist','intensivist','bot'].includes(data.role))throw new Rejected();
         name(data.name);idHash=await hash(crypto,bytes(data.id,16));
-      } else if(['claim','resolve'].includes(e.op)) {
+        if(Object.hasOwn(data,'organizerCard')) {
+          let organizer;try{organizer=await importPublicCard(data.organizerCard);}catch{throw new Rejected();}
+          if(organizer.card!==data.organizerCard)throw new Rejected();
+          if(organizer.id!==owner.id)throw new Rejected(403);
+          // An old adapter must not issue an invitation it cannot later resolve.
+          if(typeof store.inviteInfo!=='function')throw new Error('Invitation lookup unavailable');
+        }
+      } else if(['invite_info','claim','resolve'].includes(e.op)) {
         if(!exact(data,'id'))throw new Rejected();idHash=await hash(crypto,bytes(data.id,16));
       } else if(['approve','revoke'].includes(e.op)) {
         if(!exact(data,'deviceId'))throw new Rejected();bytes(data.deviceId,32);
@@ -189,10 +196,18 @@ export function createTeamHandler({store,allowedOrigin,crypto=globalThis.crypto,
         return response(200,{members:members(result?.members)});
       }
       if(e.op==='invite') {
-        const result=await store.invite(owner.id,idHash,data.name,data.role);
+        const result=await store.invite(owner.id,idHash,data.name,data.role,data.organizerCard);
         if(!['created','exists'].includes(result?.status))failure(result?.status);
         if(!Number.isSafeInteger(result.expires)||result.expires<=at)throw new Error('Invalid invitation');
         return response(200,{id:data.id,expires:result.expires});
+      }
+      if(e.op==='invite_info') {
+        const result=await store.inviteInfo(owner.id,idHash);
+        if(result?.status!=='ok')failure(result?.status);
+        if(!Number.isSafeInteger(result.expires)||result.expires<=at)throw new Rejected(404);
+        let organizer;try{organizer=await importPublicCard(result.organizerCard);}catch{throw new Error('Invalid stored organizer');}
+        if(organizer.card!==result.organizerCard)throw new Error('Invalid stored organizer');
+        return response(200,{id:data.id,expires:result.expires,organizerCard:result.organizerCard});
       }
       if(e.op==='claim') {
         const state=await store.claim(owner.id,idHash,e.card,signingSPKI);if(!['pending','active'].includes(state))failure(state);

@@ -18,7 +18,7 @@ function bytes(v,len){
 }
 function text(v){if(typeof v!=='string'||!v||v!==v.normalize('NFC').trim()||[...v].length>60||/[\p{Cc}\p{Cf}]/u.test(v))throw new Rejected();return v;}
 function validMeta(v,at){
- if(!Number.isSafeInteger(v.issued)||v.issued<=0||v.issued>at+30000||!Number.isSafeInteger(v.expires)||v.expires<=at||v.expires<=v.issued||v.expires-v.issued>TTL||!['cardiology','orit'].includes(v.group)||!['admission','review'].includes(v.kind))throw new Rejected();bytes(v.id,16);
+ if(!Number.isSafeInteger(v.issued)||v.issued<=0||v.issued>at+30000||!Number.isSafeInteger(v.expires)||v.expires<=at||v.expires<=v.issued||v.expires-v.issued>TTL||!['cardiology','orit'].includes(v.group)||!['admission','review','reply'].includes(v.kind))throw new Rejected();bytes(v.id,16);
 }
 function failure(result){
  const state=typeof result==='string'?result:result?.status;
@@ -108,9 +108,10 @@ export function createDirectHandler({store,allowedOrigin,crypto=globalThis.crypt
    }else if(e.op==='admin_replace'){
     if(!exact(data,'approvalProof,newId,oldId'))throw new Rejected();bytes(data.oldId,32);bytes(data.newId,32);if(data.oldId===data.newId)throw new Rejected();
    }else{
-    if(!exact(data,'entries,expires,group,id,issued,kind')&&!exact(data,'entries,expires,group,id,issued,kind,payload'))throw new Rejected();
+    if(data?.kind==='reply'){if(!exact(data,'entries,expires,group,id,issued,kind,payload,replyTo'))throw new Rejected();bytes(data.replyTo,16);if(data.replyTo===data.id)throw new Rejected();}
+    else if(!exact(data,'entries,expires,group,id,issued,kind')&&!exact(data,'entries,expires,group,id,issued,kind,payload'))throw new Rejected();
     validMeta(data,at);if(!Array.isArray(data.entries)||data.entries.length<1||data.entries.length>25)throw new Rejected();
-    if('payload'in data){if(!data.payload||data.payload.id!==data.id||data.payload.group!==data.group||data.payload.kind!==data.kind||data.payload.issued!==data.issued||data.payload.expires!==data.expires)throw new Rejected();}
+    if('payload'in data){if(!data.payload||data.payload.id!==data.id||data.payload.group!==data.group||data.payload.kind!==data.kind||data.payload.issued!==data.issued||data.payload.expires!==data.expires||data.payload.replyTo!==data.replyTo)throw new Rejected();}
    }
    const spki=b64(await crypto.subtle.exportKey('spki',sender.signingPublicKey));
    const ok=await store.accept(sender.id,e.nonce,e.op,e.issued,e.card,spki);if(ok!=='ok')failure(ok);
@@ -118,12 +119,12 @@ export function createDirectHandler({store,allowedOrigin,crypto=globalThis.crypt
     const directory=result(await store.directory(sender.id));if(!Array.isArray(directory?.members))throw new Error('Missing directory');
     const actor=directory.members.find(m=>m.id===sender.id);if(!actor)throw new Rejected(403);
     const admins=directory.members.filter(m=>m.role==='admin');
-    async function approved(member){if(member.role==='admin'&&member.id===sender.id)return;const issuer=admins.find(a=>a.id===member.approvalProof?.grant?.issuerId);if(!issuer)throw new Rejected(403);try{await verifyRecipientGrant(member,issuer.card,at);}catch{throw new Rejected(403);}}
+    async function approved(member){if(member.role==='admin')return;const issuer=admins.find(a=>a.id===member.approvalProof?.grant?.issuerId);if(!issuer)throw new Rejected(403);try{await verifyRecipientGrant(member,issuer.card,at);}catch{throw new Rejected(403);}}
     await approved(actor);
     const seen=new Set(),entries=[];
     for(const entry of data.entries){if(!exact(entry,'recipientId,token'))throw new Rejected();bytes(entry.recipientId,32);if(seen.has(entry.recipientId))throw new Rejected();seen.add(entry.recipientId);const member=directory.members.find(m=>m.id===entry.recipientId);if(!member)throw new Rejected(403);await approved(member);await validateToken(entry.token,data.payload??null,sender,entry.recipientId,crypto,at);entries.push({recipientId:entry.recipientId,token:entry.token});}
     entries.sort((a,b)=>a.recipientId<b.recipientId?-1:a.recipientId>b.recipientId?1:0);
-    normalized={id:data.id,group:data.group,kind:data.kind,issued:data.issued,expires:data.expires,entries};if(data.payload)normalized.payload=data.payload;
+    normalized={id:data.id,group:data.group,kind:data.kind,issued:data.issued,expires:data.expires,entries};if(data.payload)normalized.payload=data.payload;if(data.kind==='reply')normalized.replyTo=data.replyTo;
     const hash=[...new Uint8Array(await crypto.subtle.digest('SHA-256',enc.encode(JSON.stringify(normalized))))].map(x=>x.toString(16).padStart(2,'0')).join('');
     const created=await store.create(sender.id,hash,normalized);if(!['created','exists'].includes(created))failure(created);
     const delivery=await notify(sender.id,data.id,at);
@@ -137,9 +138,9 @@ export function createDirectHandler({store,allowedOrigin,crypto=globalThis.crypt
    }
    if(e.op==='open'){
     if(!await store.unlockCheck(sender.id,data.unlockToken||''))throw new Rejected(428,'unlock_required');
-    const r=result(await store.open(sender.id,data.id,false));if(!exact(r,'meta,payload,senderApprovalProof,senderCard,senderName,senderRole,token')||!exact(r.meta,'expires,group,id,issued,kind')||r.meta.id!==data.id)throw new Error('Invalid message');validMeta(r.meta,at);text(r.senderName);
+    const r=result(await store.open(sender.id,data.id,false));if(!exact(r,'meta,payload,senderApprovalProof,senderCard,senderName,senderRole,token')||!exact(r.meta,r.meta?.kind==='reply'?'expires,group,id,issued,kind,replyTo':'expires,group,id,issued,kind')||r.meta.id!==data.id)throw new Error('Invalid message');validMeta(r.meta,at);if(r.meta.kind==='reply'){bytes(r.meta.replyTo,16);if(r.meta.replyTo===r.meta.id||!r.payload)throw new Error('Invalid reply');}text(r.senderName);
     let owner;try{owner=await importPublicCard(r.senderCard);}catch{throw new Error('Invalid sender');}await validateToken(r.token,r.payload,owner,sender.id,crypto,at);
-    if(r.payload&&(r.payload.id!==r.meta.id||r.payload.group!==r.meta.group||r.payload.kind!==r.meta.kind||r.payload.issued!==r.meta.issued||r.payload.expires!==r.meta.expires))throw new Error('Invalid message binding');
+    if(r.payload&&(r.payload.id!==r.meta.id||r.payload.group!==r.meta.group||r.payload.kind!==r.meta.kind||r.payload.issued!==r.meta.issued||r.payload.expires!==r.meta.expires||r.payload.replyTo!==r.meta.replyTo))throw new Error('Invalid message binding');
     return response(200,r);
    }
    if(e.op==='ack'){

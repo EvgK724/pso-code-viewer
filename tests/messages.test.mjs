@@ -63,3 +63,14 @@ test('canonical metadata/hash and plaintext normalization with strict schema',as
   assert.throws(()=>validateMessagePhoto({...photo,mime:'image/svg+xml'}));
   assert.throws(()=>validateMessagePhoto({...photo,data:'_9j_2Q'}));
 });
+
+test('reply body and parent binding are encrypted and signed for the exact recipient',async()=>{
+  const parent=meta().id,m={...meta(),kind:'reply',replyTo:parent};
+  const r=await sealMessage(recipient,[sc],{comment:'Ответ кардиолога'},m);
+  const result=await openMessage(sender,r.entries[0].token,r.payload,[rc]);
+  assert.equal(result.kind,'reply');assert.equal(result.replyTo,parent);assert.equal(result.comment,'Ответ кардиолога');
+  assert.ok(!JSON.stringify(r).includes('Ответ кардиолога'));
+  await assert.rejects(openMessage(stranger,r.entries[0].token,r.payload,[rc]));
+  for(const patch of [{replyTo:meta().id},{kind:'review'},{replyTo:undefined}])await assert.rejects(openMessage(sender,r.entries[0].token,{...r.payload,...patch},[rc]));
+  for(const patch of [{replyTo:undefined},{replyTo:m.id},{replyTo:'bad'},{kind:'review'}])await assert.rejects(sealMessage(recipient,[sc],{comment:'Ответ'},{...m,...patch}));
+});

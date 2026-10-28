@@ -5,6 +5,7 @@ import {readFile, access} from 'node:fs/promises';
 import {linkForToken, tokenFromInput} from '../docs/crypto.mjs';
 import {cardLinkFor, cardFromInput, compactLinkContents} from '../docs/sharing.mjs';
 import {SHORTLINK_ENDPOINT, PUSH_ENDPOINT, TEAM_ENDPOINT} from '../docs/shortlink-config.mjs';
+import {createHttpRouter} from '../server/yandex/http.mjs';
 
 const token = 'PSO1.recipient.sender.cipher.signature';
 const origin = 'https://viewer.example';
@@ -131,7 +132,7 @@ test('service worker serves its own offline shell and leaves sibling app request
   for (const path of ['/', '/pso-code-viewer/']) {
     const handlers = new Map(), deleted = [], installed = [], lifecycle = [];
     const prefix = 'pso-viewer-' + encodeURIComponent(path) + '-shell-';
-    const current = prefix + 'github-v13-ydb-reliable';
+    const current = prefix + 'github-v21-install-help';
     const unrelated = 'pso-viewer-%2Fanother-app%2F-shell-github-v1';
     const cached = {status:200, body:'offline-shell'};
     const cache = {
@@ -190,3 +191,14 @@ test('an incomplete update never replaces the working service worker', async () 
   let pending; handlers.get('install')({waitUntil(p){pending=p;}});
   await assert.rejects(pending,/offline/);
 });
+
+test('same-origin hosting gives this release a separate service worker cache', async () => {
+  const router = createHttpRouter({allowedOrigin:origin, handlers:{}});
+  const response = await router({path:'/sw.js', httpMethod:'GET', headers:{host:new URL(origin).host}});
+  assert.equal(response.statusCode, 200);
+  const source = Buffer.from(response.body, 'base64').toString('utf8');
+  assert.match(source, /const CACHE = PREFIX \+ 'yandex-v12-install-help';/);
+  assert.ok(!source.includes('github-v21-install-help'));
+  assert.equal(response.headers['Cache-Control'], 'no-cache');
+});
+

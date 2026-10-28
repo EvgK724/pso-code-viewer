@@ -4,7 +4,7 @@
 import {revokeDeviceAuthTx} from './device-auth-store.mjs';
 
 const MINUTE = 60000, DAY = 86400000;
-const TEAM_OPS = new Set(['status','directory','invite','claim','pending','approve','revoke','create','resolve']);
+const TEAM_OPS = new Set(['status','directory','invite','invite_info','claim','pending','approve','revoke','create','resolve']);
 const INVITE_ROLES = new Set(['neurologist','cardiologist','intensivist','bot']);
 export const validId = value => typeof value === 'string' && /^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/.test(value);
 export const validNonce = value => typeof value === 'string' && /^[A-Za-z0-9_-]{21}[AQgw]$/.test(value);
@@ -118,12 +118,12 @@ export function createTeamStore(db,{now=Date.now}={}) {
           .sort((a,b) => compare(a.role,b.role)||compare(a.name,b.name)||compare(a.device_id,b.device_id)).map(memberView)};
       });
     },
-    invite(adminId,idHash,name,role) {
+    invite(adminId,idHash,name,role,organizerCard) {
       return transaction(async (tx,at) => {
-        if (!validHash(idHash) || !validName(name) || !INVITE_ROLES.has(role)) return {status:'invalid'};
+        if (!validHash(idHash) || !validName(name) || !INVITE_ROLES.has(role) || (organizerCard !== undefined && !validCard(organizerCard))) return {status:'invalid'};
         if (!await isAdmin(tx,adminId)) return {status:'denied'};
         const key = `invite:${idHash}`, old = await tx.get(key);
-        if (old) return old.inviter_id === adminId && old.name === name && old.role === role && old.expires > at && old.claimed_by == null
+        if (old) return old.inviter_id === adminId && old.name === name && old.role === role && old.organizer_card === organizerCard && old.expires > at && old.claimed_by == null
           ? {status:'exists',expires:old.expires} : {status:'conflict'};
         // Retention is bounded by the daily cap; page to avoid truncating a roster.
         let live = 0, after;
@@ -136,8 +136,20 @@ export function createTeamStore(db,{now=Date.now}={}) {
         }
         if (!await consumeTeamQuotas(tx,[{scope:'invite-day',id:adminId,windowMs:DAY,limit:100}],at)) return {status:'limited'};
         const expires = at+2*DAY;
-        await tx.put(key,{id_hash:idHash,inviter_id:adminId,name,role,expires,claimed_by:null,created_at:at},expires+7*DAY);
+        await tx.put(key,{id_hash:idHash,inviter_id:adminId,name,role,expires,claimed_by:null,created_at:at,
+          ...(organizerCard === undefined ? {} : {organizer_card:organizerCard})},expires+7*DAY);
         return {status:'created',expires};
+      });
+    },
+    inviteInfo(deviceId,idHash) {
+      return transaction(async (tx,at) => {
+        if (!validId(deviceId) || !validHash(idHash)) return {status:'missing'};
+        if ((await tx.get(memberKey(deviceId)))?.state === 'revoked') return {status:'denied'};
+        const invite = await tx.get(`invite:${idHash}`);
+        if (!invite || !Number.isSafeInteger(invite.expires) || invite.expires <= at || invite.claimed_by != null ||
+            !validCard(invite.organizer_card) || !await isAdmin(tx,invite.inviter_id)) return {status:'missing'};
+        // Reading the public snapshot never allocates a member or consumes the invitation.
+        return {status:'ok',expires:invite.expires,organizerCard:invite.organizer_card};
       });
     },
     claim(deviceId,idHash,card,signingSpki) {
@@ -260,3 +272,4 @@ export function createTeamStore(db,{now=Date.now}={}) {
     },
   };
 }
+

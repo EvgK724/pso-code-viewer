@@ -1,6 +1,6 @@
 // Authenticated team directory and per-recipient encrypted group links.
 // Only the server assigns roles; invitations merely request administrator review.
-import {exportPublicCard, importPublicCard} from './exchange.mjs';
+import {exportPublicCard, importPublicCard, deviceIdentity} from './exchange.mjs';
 import {runApiRequest,readApiError,apiDiagnosticText,API_REQUEST_TIMEOUT_MS} from './api-queue.mjs';
 const DOMAIN='PSO-TEAM-v1\0', enc=new TextEncoder();
 const ROLES=['admin','neurologist','intensivist','cardiologist','bot'];
@@ -17,7 +17,7 @@ export function joinIDFromInput(input,base){
   const id=url.hash.startsWith('#join=')?url.hash.slice(6):'';return LINK.test(id)?id:null;
 }
 export async function teamEnvelope(device,op,data={},issued=Date.now()){
-  if(!['status','directory','invite','claim','pending','approve','revoke','create','resolve'].includes(op)||!Number.isSafeInteger(issued))throw new Error('Неверный запрос команды.');
+  if(!['status','directory','invite','invite_info','claim','pending','approve','revoke','create','resolve'].includes(op)||!Number.isSafeInteger(issued))throw new Error('Неверный запрос команды.');
   const card=await exportPublicCard(device,'Устройство');
   const unsigned={v:1,op,issued,nonce:randomTeamID(),card,data};
   const signature=b64(await crypto.subtle.sign({name:'ECDSA',hash:'SHA-256'},device.signing.privateKey,enc.encode(DOMAIN+JSON.stringify(unsigned))));
@@ -52,7 +52,27 @@ export class TeamClient {
   }
   directory(device){return this.members(device);}
   pending(device){return this.members(device,'pending');}
-  async invite(device,name,role){if(typeof name==='string')name=name.normalize('NFC');if(!text(name)||!['neurologist','intensivist','cardiologist','bot'].includes(role))throw new Error('Укажите имя и специальность.');const id=randomTeamID(),r=await this.request(device,'invite',{name,role,id});if(!exact(r,'expires,id')||r.id!==id||!Number.isSafeInteger(r.expires)||r.expires<=this.now())throw new Error('Приглашение не подтверждено.');return r;}
+  async invite(device,name,role,organizerCard){
+    if(typeof name==='string')name=name.normalize('NFC');
+    if(!text(name)||!['neurologist','intensivist','cardiologist','bot'].includes(role))throw new Error('Укажите имя и специальность.');
+    const id=randomTeamID(),data={name,role,id};
+    if(organizerCard!==undefined){
+      const root=await importPublicCard(organizerCard),own=await deviceIdentity(device);
+      if(root.card!==organizerCard||root.id!==own.id)throw new Error('Карточка организатора не совпадает с этим устройством.');
+      data.organizerCard=organizerCard;
+    }
+    const r=await this.request(device,'invite',data);
+    if(!exact(r,'expires,id')||r.id!==id||!Number.isSafeInteger(r.expires)||r.expires<=this.now())throw new Error('Приглашение не подтверждено.');
+    return r;
+  }
+  async invitationInfo(device,id){
+    if(!LINK.test(id))throw new Error('Приглашение неполное.');
+    const r=await this.request(device,'invite_info',{id});
+    if(!exact(r,'expires,id,organizerCard')||r.id!==id||!Number.isSafeInteger(r.expires)||r.expires<=this.now()||typeof r.organizerCard!=='string')throw new Error('Приглашение недоступно или срок его действия истёк.');
+    const root=await importPublicCard(r.organizerCard);
+    if(root.card!==r.organizerCard)throw new Error('Не удалось проверить приглашение.');
+    return r;
+  }
   async claim(device,id){if(!LINK.test(id))throw new Error('Приглашение неполное.');const r=await this.request(device,'claim',{id});if(!exact(r,'state')||!['pending','active'].includes(r.state))throw new Error('Заявка не подтверждена.');return r;}
   async change(device,op,deviceId){if(!['approve','revoke'].includes(op)||!ID.test(deviceId))throw new Error('Неверное подключение.');const r=await this.request(device,op,{deviceId});if(!exact(r,'state')||!['active','revoked'].includes(r.state))throw new Error('Изменение не подтверждено.');return r;}
   async create(device,{group,ttlMinutes,entries},base){

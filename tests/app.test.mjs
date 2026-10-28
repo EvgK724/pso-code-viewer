@@ -38,6 +38,7 @@ class Element {
     this.scrollCalls = [];
     this.focusCalls = [];
     this.checked = /\bchecked\b/.test(attrs);
+    this.open = /\bopen\b/.test(attrs);
     this.disabled = /\bdisabled\b/.test(attrs);
     this.hidden = /\bhidden\b/.test(attrs);
   }
@@ -85,7 +86,7 @@ async function persistentDevice() {
 async function harness(persistent, initialHash = '', {
   richClipboard = false, rejectRich = false, rejectText = false,
   readText = '', rejectRead = false, deferRead = false, standalone = false, legacyStandalone = false, initialHidden = false,
-  nativeCopy = undefined, shortlinkEndpoint = '', shortlinkFetch = undefined,
+  nativeCopy = undefined, nativeShare = undefined, shortlinkEndpoint = '', shortlinkFetch = undefined,
   directEndpoint = '', directFetch = undefined,
   deviceAuthEndpoint = '', deviceAuthFetch = undefined,
   teamEndpoint = '', teamFetch = undefined, pushEndpoint = '', pushFetch = undefined, notificationPermission = 'default', pushSubscription = null, permissionResult = 'granted', rejectSubscribe = false, rejectUnsubscribe = false
@@ -188,7 +189,7 @@ async function harness(persistent, initialHash = '', {
   const context = vm.createContext({
     document, location, getSelection:() => selection,
     history:{replaceState() { location.hash = ''; }},
-    navigator:{clipboard:clipboardAPI, standalone:legacyStandalone,...(pushEndpoint?{serviceWorker:{register:async()=>registration,ready:Promise.resolve(registration)}}:{})},
+    navigator:{clipboard:clipboardAPI, standalone:legacyStandalone,...(nativeShare?{share:nativeShare}:{}),...(pushEndpoint?{serviceWorker:{register:async()=>registration,ready:Promise.resolve(registration)}}:{})},
     ...(pushEndpoint?{Notification:notification,PushManager:class {}}:{}),
     matchMedia(query) { return {matches:query === '(display-mode: standalone)' && standalone}; },
     crypto:webcrypto, URL, console, Blob,
@@ -245,6 +246,11 @@ async function harness(persistent, initialHash = '', {
       const read = pendingReads.shift();
       assert.ok(read, 'A clipboard read is awaiting resolution');
       read.resolve(value);
+    },
+    rejectClipboardRead() {
+      const read = pendingReads.shift();
+      assert.ok(read, 'A clipboard read is awaiting rejection');
+      read.reject(new Error('Clipboard read permission denied'));
     },
     async event(id, type = 'click') { await el(id).fire(type); },
     async idle() { await waitUntil(() => !el('open').disabled, 'async operation completion'); },
@@ -1128,7 +1134,7 @@ test('composition notifies only the created short-link capability; push failure 
 });
 
 async function teamFixture(stores,roles,{pushResult='unavailable',resolveStatus=0}={}){
-  const records=new Map(),requests=[],members=[];
+  const records=new Map(),invitations=new Map(),requests=[],members=[];
   for(let i=0;i<stores.length;i++){const card=await exchange.exportPublicCard(stores[i].device,'Врач '+i),c=await exchange.importPublicCard(card);members.push({id:c.id,name:'Врач '+i,role:roles[i],card});}
   let pending=[];
   const fetcher=async(url,options)=>{
@@ -1139,7 +1145,14 @@ async function teamFixture(stores,roles,{pushResult='unavailable',resolveStatus=
     if(e.op==='pending')return response({members:pending});
     if(e.op==='claim'){pending.push({id:own.id,name:'Заявка',role:'neurologist',card:e.card});return response({state:'pending'});}
     if(e.op==='approve'){const entry=pending.find(v=>v.id===e.data.deviceId);if(entry){members.push(entry);pending=pending.filter(v=>v!==entry);}return response({state:'active'});}
-    if(e.op==='invite')return response({id:e.data.id,expires:Date.now()+60000});
+    if(e.op==='invite'){
+      const invitation={id:e.data.id,expires:Date.now()+60000,...(e.data.organizerCard?{organizerCard:e.data.organizerCard}:{})};
+      invitations.set(e.data.id,invitation);return response({id:invitation.id,expires:invitation.expires});
+    }
+    if(e.op==='invite_info'){
+      const invitation=invitations.get(e.data.id);
+      return invitation?.organizerCard?response(invitation):response({error:'request_rejected'},404);
+    }
     if(e.op==='create'){records.set(e.data.id,{...e.data,sender:m});return response({id:e.data.id,expires:e.data.expires,push:pushResult});}
     if(e.op==='resolve'){
       if(resolveStatus)return response({error:'request_rejected'},resolveStatus);
@@ -1149,7 +1162,7 @@ async function teamFixture(stores,roles,{pushResult='unavailable',resolveStatus=
     }
     return response({error:'request_rejected'},403);
   };
-  return {members,records,requests,setPending(value){pending=value;},options:{teamEndpoint:'https://team.example/api',teamFetch:fetcher,shortlinkEndpoint:'https://legacy.example/api',shortlinkFetch:async()=>new Response('{}',{status:404,headers:{'Content-Type':'application/json'}})}};
+  return {members,records,invitations,requests,setPending(value){pending=value;},options:{teamEndpoint:'https://team.example/api',teamFetch:fetcher,shortlinkEndpoint:'https://legacy.example/api',shortlinkFetch:async()=>new Response('{}',{status:404,headers:{'Content-Type':'application/json'}})}};
 }
 
 test('team UI exposes manual review only to neurologists/admin and never offers self/individual recipients',async()=>{
@@ -1189,6 +1202,278 @@ test('activation never submits on opening invitation or in ordinary browser; exp
  const store=await persistentDevice(),service=await teamFixture([],[]),id=team.randomTeamID();
  const browser=await harness(store,'#join='+id,service.options);await waitUntil(()=>!browser.el('join-panel').hidden,'join visible');assert.equal(service.requests.filter(e=>e.op==='claim').length,0);assert.equal(browser.el('team-claim').disabled,true);await browser.event('team-claim');assert.equal(service.requests.filter(e=>e.op==='claim').length,0);
  const app=await harness(store,'#join='+id,{...service.options,standalone:true});await waitUntil(()=>!app.el('join-panel').hidden,'join visible installed');assert.equal(app.el('team-claim').disabled,false);await app.event('team-claim');assert.equal(service.requests.filter(e=>e.op==='claim').length,1);assert.equal(app.el('show-write').hidden,true,'A claim alone never grants a sender role');
+});
+
+async function invitationFixture(){
+ const organizer=await persistentDevice(),store=await persistentDevice(),service=await teamFixture([],[]);
+ const card=await exchange.exportPublicCard(organizer.device,'Тестовый организатор');
+ const id=team.randomTeamID(),url=await recipientTrust.trustedInvitationURL(origin+appPath,id,card);
+ const options={...service.options,directEndpoint:'https://direct.example/api',directFetch:async()=>{throw new Error('No direct call expected before enrollment');}};
+ return {store,service,card,id,url,options};
+}
+
+async function shortInvitationFixture(){
+ const s=await invitationFixture();
+ const url=await recipientTrust.shortTrustedInvitationURL(origin+appPath,s.id,s.card);
+ s.service.invitations.set(s.id,{id:s.id,expires:Date.now()+60000,organizerCard:s.card});
+ return {...s,url};
+}
+
+test('short invitation loads its public card without claiming or pinning and survives browser reload',async()=>{
+ const s=await shortInvitationFixture(),hash=new URL(s.url).hash;
+ assert.match(hash,/^#i=[A-Za-z0-9_-]{64}$/);
+ const browser=await harness(s.store,hash,s.options);
+ await waitUntil(()=>!browser.el('join-panel').hidden,'short invitation visible');
+ assert.equal(browser.el('join-link').value,s.url);assert.equal(browser.location.hash,hash);
+ assert.equal(browser.el('organizer-trust').hidden,false);assert.equal(browser.el('team-claim').disabled,true);
+ const lookups=s.service.requests.filter(r=>r.op==='invite_info');
+ assert.equal(lookups.length,1);assert.deepEqual(lookups[0].data,{id:s.id});
+ assert.equal(s.store.pins.size,0);assert.equal(s.service.requests.filter(r=>r.op==='claim').length,0);
+ const reloaded=await harness(s.store,browser.location.hash,s.options);
+ await waitUntil(()=>!reloaded.el('join-panel').hidden,'short invitation restored');
+ assert.equal(reloaded.el('join-link').value,s.url);assert.equal(reloaded.location.hash,hash);
+ assert.equal(s.service.requests.filter(r=>r.op==='invite_info').length,2);
+ assert.equal(s.store.pins.size,0);assert.equal(s.service.requests.filter(r=>r.op==='claim').length,0);
+});
+
+test('pasted short invitation requires explicit organizer confirmation and installed-device claim',async()=>{
+ const s=await shortInvitationFixture(),app=await harness(s.store,'',{...s.options,standalone:true,readText:s.url});
+ await app.event('paste-open');await app.idle();
+ assert.equal(app.el('join-link').value,s.url);assert.equal(app.el('join-panel').hidden,false);
+ assert.equal(s.service.requests.filter(r=>r.op==='invite_info').length,1);
+ assert.equal(s.store.pins.size,0);assert.equal(s.service.requests.filter(r=>r.op==='claim').length,0);
+ await app.event('team-claim');assert.equal(s.service.requests.filter(r=>r.op==='claim').length,0);
+ app.el('organizer-confirm').checked=true;await app.event('organizer-confirm','change');
+ await app.event('organizer-save');await app.idle();assert.equal(s.store.pins.size,1);
+ await app.event('team-claim');
+ assert.equal(s.service.requests.filter(r=>r.op==='claim').length,1);
+ assert.equal(s.service.requests.find(r=>r.op==='claim').data.id,s.id);
+ assert.equal(app.el('join-panel').hidden,true);
+});
+
+test('short invitation rejects a substituted public card without pinning or submitting a claim',async()=>{
+ const s=await shortInvitationFixture(),other=await persistentDevice();
+ const substituted=await exchange.exportPublicCard(other.device,'Другой организатор');
+ s.service.invitations.set(s.id,{id:s.id,expires:Date.now()+60000,organizerCard:substituted});
+ const app=await harness(s.store,'',{...s.options,standalone:true,readText:s.url});
+ await app.event('paste-open');await app.idle();
+ assert.equal(s.service.requests.filter(r=>r.op==='invite_info').length,1);
+ assert.equal(app.el('join-panel').hidden,true);assert.equal(app.el('organizer-trust').hidden,true);
+ assert.equal(app.el('team-claim').disabled,true);assert.match(app.el('notice').textContent,/ключ|карточк|приглашени/i);
+ await app.event('team-claim');
+ assert.equal(s.store.pins.size,0);assert.equal(s.service.requests.filter(r=>r.op==='claim').length,0);
+});
+
+test('a short invitation cannot replace a confirmed organizer with another root key',async()=>{
+ const s=await shortInvitationFixture(),other=await persistentDevice();
+ const app=await harness(s.store,'',{...s.options,standalone:true,readText:s.url});
+ await app.event('paste-open');await app.idle();
+ app.el('organizer-confirm').checked=true;await app.event('organizer-confirm','change');
+ await app.event('organizer-save');await app.idle();
+ const storedPin=[...s.store.pins.entries()];assert.equal(storedPin.length,1);
+ const otherCard=await exchange.exportPublicCard(other.device,'Другой организатор'),otherID=team.randomTeamID();
+ const otherURL=await recipientTrust.shortTrustedInvitationURL(origin+appPath,otherID,otherCard);
+ s.service.invitations.set(otherID,{id:otherID,expires:Date.now()+60000,organizerCard:otherCard});
+ app.setReadText(otherURL);await app.event('paste-open');await app.idle();
+ assert.equal(app.el('join-panel').hidden,true);assert.equal(app.el('team-claim').disabled,true);
+ assert.match(app.el('notice').textContent,/Ключ организатора.*не совпадает.*сохранённым/);
+ await app.event('team-claim');
+ assert.deepEqual([...s.store.pins.entries()],storedPin);
+ assert.equal(s.service.requests.filter(r=>r.op==='claim').length,0);
+ const reloaded=await harness(s.store,new URL(otherURL).hash,{...s.options,standalone:true});
+ await waitUntil(()=>/Ключ организатора.*не совпадает.*сохранённым/.test(reloaded.el('notice').textContent),'saved pin checked after reload');
+ assert.equal(reloaded.el('join-panel').hidden,true);assert.equal(reloaded.el('team-claim').disabled,true);
+ await reloaded.event('team-claim');
+ assert.deepEqual([...s.store.pins.entries()],storedPin);
+ assert.equal(s.service.requests.filter(r=>r.op==='claim').length,0);
+});
+
+test('a delayed short-invitation response cannot replace a newer incoming invitation',async()=>{
+ const s=await shortInvitationFixture(),other=await persistentDevice();
+ const nextCard=await exchange.exportPublicCard(other.device,'Следующий организатор'),nextID=team.randomTeamID();
+ const nextURL=await recipientTrust.shortTrustedInvitationURL(origin+appPath,nextID,nextCard);
+ s.service.invitations.set(nextID,{id:nextID,expires:Date.now()+60000,organizerCard:nextCard});
+ let release,started=false,finished=false;
+ const gate=new Promise(resolve=>release=resolve);
+ const app=await harness(s.store,'',{...s.options,standalone:true,teamFetch:async(url,options)=>{
+  const e=JSON.parse(options.body).envelope;
+  if(e.op==='invite_info'&&e.data.id===s.id){started=true;await gate;const response=await s.options.teamFetch(url,options);finished=true;return response;}
+  return s.options.teamFetch(url,options);
+ }});
+ await app.hashchange(new URL(s.url).hash);await waitUntil(()=>started,'first lookup started');
+ await app.hashchange(new URL(nextURL).hash);
+ release();await waitUntil(()=>finished,'old lookup finished');
+ await waitUntil(()=>app.el('join-link').value===nextURL&&!app.el('join-panel').hidden,'new invitation displayed');
+ assert.equal(app.location.hash,new URL(nextURL).hash);
+ const next=await exchange.importPublicCard(nextCard);assert.equal(app.el('organizer-code').textContent,next.fingerprint);
+ assert.equal(s.store.pins.size,0);assert.equal(s.service.requests.filter(r=>r.op==='claim').length,0);
+ assert.deepEqual(s.service.requests.filter(r=>r.op==='invite_info').map(r=>r.data.id).sort(),[s.id,nextID].sort());
+});
+
+test('compact invitation opens and survives reload without enrolling or trusting a device automatically',async()=>{
+ const s=await invitationFixture(),hash=new URL(s.url).hash;
+ const browser=await harness(s.store,hash,s.options);
+ await waitUntil(()=>!browser.el('join-panel').hidden,'compact invitation visible');
+ assert.equal(browser.location.hash,hash,'Public invitation remains available after refresh');
+ assert.equal(browser.el('organizer-trust').hidden,false);
+ assert.equal(browser.el('join-link').value,s.url);
+ assert.equal(browser.el('team-claim').disabled,true,'Ordinary browser cannot silently bind a different device store');
+ assert.equal(s.store.pins.size,0);assert.equal(s.service.requests.filter(r=>r.op==='claim').length,0);
+ const reloaded=await harness(s.store,browser.location.hash,s.options);
+ await waitUntil(()=>!reloaded.el('join-panel').hidden,'invitation restored from address on reload');
+ assert.equal(reloaded.el('join-link').value,s.url);assert.equal(reloaded.location.hash,hash);
+ assert.equal(s.store.pins.size,0);assert.equal(s.service.requests.filter(r=>r.op==='claim').length,0);
+});
+
+test('compact invitation paste is recognized, requires trust confirmation and clears address only after successful claim',async()=>{
+ const s=await invitationFixture(),hash=new URL(s.url).hash;
+ const app=await harness(s.store,'',{...s.options,standalone:true,readText:s.url});
+ await app.event('paste-open');await app.idle();
+ assert.equal(app.el('join-panel').hidden,false);assert.equal(app.el('organizer-trust').hidden,false);
+ assert.equal(s.store.pins.size,0);assert.equal(s.service.requests.filter(r=>r.op==='claim').length,0);
+ app.el('join-link').value='';
+ await app.hashchange(hash);await waitUntil(()=>app.el('join-link').value===s.url,'incoming invitation parsed');
+ assert.equal(app.location.hash,hash);
+ await app.event('team-claim');assert.equal(s.service.requests.filter(r=>r.op==='claim').length,0);
+ app.el('organizer-confirm').checked=true;await app.event('organizer-confirm','change');
+ await app.event('organizer-save');await app.idle();
+ assert.equal(s.store.pins.size,1);assert.equal(app.location.hash,hash);
+ await app.event('team-claim');
+ assert.equal(s.service.requests.filter(r=>r.op==='claim').length,1);
+ assert.equal(s.service.requests.find(r=>r.op==='claim').data.id,s.id);
+ assert.equal(app.location.hash,'');assert.equal(app.el('join-panel').hidden,true);
+});
+
+test('truncated legacy organizer-card invitation reports the actual error without claiming or pinning',async()=>{
+ const s=await invitationFixture(),broken=origin+appPath+'#join='+s.id+'&organizer=PSO-CARD1';
+ const app=await harness(s.store,new URL(broken).hash,{...s.options,standalone:true});
+ await waitUntil(()=>/Ссылка приглашения обрезана/.test(app.el('notice').textContent),'specific incomplete invitation message');
+ assert.equal(app.el('join-panel').hidden,true);assert.equal(app.el('organizer-trust').hidden,true);
+ assert.equal(s.store.pins.size,0);assert.equal(s.service.requests.filter(r=>r.op==='claim').length,0);
+ app.el('token').value=broken;await app.event('open-form','submit');await app.idle();
+ assert.match(app.el('notice').textContent,/Ссылка приглашения обрезана/);
+ assert.equal(s.store.pins.size,0);assert.equal(s.service.requests.filter(r=>r.op==='claim').length,0);
+});
+
+test('retaining invitation hashes does not retain patient-message hashes on startup or hash change',async()=>{
+ const store=await persistentDevice(),id=team.randomTeamID();
+ const app=await harness(store,'#m='+id);
+ assert.equal(app.location.hash,'');
+ await app.hashchange('#pso=PSO1.invalid');assert.equal(app.location.hash,'');
+});
+
+test('invite sharing sends only the full URL from the click gesture; cancel never falls back to clipboard',async()=>{
+ const s=await directFixture(['admin']),payloads=[];
+ let cancel=false;
+ const app=await harness(s.stores[0],'',{...s.options,standalone:true,nativeShare(payload){
+  payloads.push(JSON.parse(JSON.stringify(payload)));
+  if(cancel){const error=new Error('Share dismissed');error.name='AbortError';return Promise.reject(error);}
+  return Promise.resolve();
+ }});
+ app.el('invite-name').value='Тестовый кардиолог';app.el('invite-role').value='cardiologist';
+ await app.event('invite-form','submit');
+ const url=app.el('invite-link').value;assert.match(new URL(url).hash,/^#i=[A-Za-z0-9_-]{64}$/);
+ const first=app.event('share-invite');
+ assert.deepEqual(payloads,[{url}],'Native share must run during the button gesture, with no additional text/card');
+ await first;assert.deepEqual(app.clipboardAttempts(),{rich:0,plain:0});
+ cancel=true;await app.event('share-invite');
+ assert.deepEqual(payloads,[{url},{url}]);assert.deepEqual(app.clipboardAttempts(),{rich:0,plain:0});
+});
+
+test('without native sharing the invitation copy fallback retains the complete URL',async()=>{
+ const s=await directFixture(['admin']),app=await harness(s.stores[0],'',{...s.options,standalone:true});
+ app.el('invite-name').value='Тестовый кардиолог';app.el('invite-role').value='cardiologist';
+ await app.event('invite-form','submit');const url=app.el('invite-link').value;assert.match(new URL(url).hash,/^#i=[A-Za-z0-9_-]{64}$/);
+ await app.event('share-invite');assert.equal(app.clipboard(),url);
+ assert.deepEqual(app.clipboardAttempts(),{rich:0,plain:1});
+});
+
+test('failed replacement invitation removes the previous doctors link and disables sharing',async()=>{
+ const s=await directFixture(['admin']);let fail=false;
+ const app=await harness(s.stores[0],'',{...s.options,standalone:true,teamFetch:async(url,options)=>{
+  if(fail&&JSON.parse(options.body).envelope.op==='invite')return new Response(JSON.stringify({error:'request_rejected'}),{status:403,headers:{'Content-Type':'application/json'}});
+  return s.options.teamFetch(url,options);
+ }});
+ app.el('invite-name').value='Первый врач';app.el('invite-role').value='cardiologist';
+ await app.event('invite-form','submit');assert.ok(app.el('invite-link').value);
+ fail=true;app.el('invite-name').value='Другой врач';
+ const creation=app.event('invite-form','submit');
+ assert.equal(app.el('invite-output').hidden,true,'Old invitation disappears before the new request starts');
+ assert.equal(app.el('invite-link').value,'');
+ await creation;
+ assert.equal(app.el('invite-output').hidden,true);
+ assert.equal(app.el('invite-link').value,'');
+ assert.equal(app.el('share-invite').disabled,true);
+ assert.equal(app.el('copy-invite').disabled,true);
+ await app.event('share-invite');await app.event('copy-invite');
+ assert.deepEqual(app.clipboardAttempts(),{rich:0,plain:0});
+ assert.ok(app.el('notice').textContent);
+});
+
+test('backgrounded invitation creation cannot display a stale result or error on return',async t=>{
+ for(const reject of [false,true])await t.test(reject?'late failure':'late success',async()=>{
+  const s=await directFixture(['admin']);let release;
+  const app=await harness(s.stores[0],'',{...s.options,standalone:true,teamFetch:async(url,options)=>{
+   if(JSON.parse(options.body).envelope.op==='invite'){
+    await new Promise(resolve=>{release=resolve;});
+    if(reject)return new Response(JSON.stringify({error:'request_rejected'}),{status:403,headers:{'Content-Type':'application/json'}});
+   }
+   return s.options.teamFetch(url,options);
+  }});
+  app.el('invite-name').value='Тестовый врач';app.el('invite-role').value='cardiologist';
+  const creation=app.event('invite-form','submit');await waitUntil(()=>release,'invite request started');
+  await app.hide();await app.show();app.el('notice').textContent='Текущий экран';
+  release();await creation;
+  assert.equal(app.el('invite-output').hidden,true);
+  assert.equal(app.el('invite-link').value,'');
+  assert.equal(app.el('share-invite').disabled,true);
+  assert.equal(app.el('notice').textContent,'Текущий экран');
+ });
+});
+
+test('share without native sharing or clipboard access exposes the full invitation for manual copying',async()=>{
+ const s=await directFixture(['admin']),app=await harness(s.stores[0],'',{...s.options,standalone:true,rejectText:true});
+ app.el('invite-name').value='Тестовый кардиолог';app.el('invite-role').value='cardiologist';
+ await app.event('invite-form','submit');const url=app.el('invite-link').value;
+ assert.equal(app.el('invite-full-link').open,false);
+ await app.event('share-invite');
+ assert.equal(app.el('invite-full-link').open,true);
+ assert.equal(app.el('invite-link').value,url);
+ assert.equal(app.el('invite-link').focusCalls.length,1);
+ assert.deepEqual(app.clipboardAttempts(),{rich:0,plain:1});
+ assert.match(app.el('notice').textContent,/Удерживайте выделенный текст/);
+});
+
+test('new installed device shows invitation paste and denied clipboard access supports manual opening',async()=>{
+ const s=await shortInvitationFixture(),app=await harness(s.store,'',{...s.options,standalone:true,rejectRead:true});
+ assert.equal(app.el('legacy-open').open,true,'The instructed paste button must be visible on a new phone');
+ assert.equal(app.clipboardReadAttempts(),0);
+ let focusedWhileDisabled;
+ const focus=app.el('token').focus.bind(app.el('token'));
+ app.el('token').focus=options=>{focusedWhileDisabled=app.el('token').disabled;focus(options);};
+ app.el('token').value=s.url;
+ await app.event('paste-open');
+ assert.equal(app.el('legacy-open').open,true);
+ assert.equal(app.el('token').value,s.url,'Denied clipboard must preserve a manually pasted invitation');
+ assert.equal(app.el('token').focusCalls.length,1);
+ assert.equal(focusedWhileDisabled,false,'The field is enabled before it receives focus');
+ assert.match(app.el('notice').textContent,/Вставить/);
+ await app.event('open-form','submit');
+ assert.equal(app.el('join-link').value,s.url);
+ assert.equal(app.el('join-panel').hidden,false);
+ assert.equal(s.store.pins.size,0);
+ assert.equal(s.service.requests.filter(e=>e.op==='claim').length,0);
+});
+
+test('a late clipboard rejection cannot move focus or replace the newer invitation notice',async()=>{
+ const s=await shortInvitationFixture(),app=await harness(s.store,'',{...s.options,standalone:true,deferRead:true});
+ const paste=app.event('paste-open');
+ await app.hashchange(new URL(s.url).hash);app.el('notice').textContent='Новое приглашение';
+ app.rejectClipboardRead();await paste;
+ await waitUntil(()=>!app.el('join-panel').hidden,'new invitation ready');
+ assert.equal(app.el('join-link').value,s.url);
+ assert.equal(app.el('token').focusCalls.length,0);
+ assert.equal(app.el('notice').textContent,'Новое приглашение');
 });
 
 test('admin approval requires explicit fingerprint checkbox even after ordinary busy updates',async()=>{
@@ -1256,7 +1541,7 @@ async function directFixture(roles=['admin','neurologist','cardiologist']){
    if(openGate)await openGate;
    const r=records.get(envelope.data.id);if(!r)return respond({error:'not_found'},404);
    const entry=r.entries.find(e=>e.recipientId===member.id);if(!entry)return respond({error:'forbidden'},403);
-   return respond(openTransform({token:entry.token,payload:r.payload||null,senderCard:r.sender.card,senderName:r.sender.name,senderRole:r.sender.role,senderApprovalProof:r.sender.approvalProof,meta:{id:r.id,group:r.group,kind:r.kind,issued:r.issued,expires:r.expires}}));
+   return respond(openTransform({token:entry.token,payload:r.payload||null,senderCard:r.sender.card,senderName:r.sender.name,senderRole:r.sender.role,senderApprovalProof:r.sender.approvalProof,meta:{id:r.id,group:r.group,kind:r.kind,issued:r.issued,expires:r.expires,...(r.kind==='reply'?{replyTo:r.replyTo}:{})}}));
   }
   if(envelope.op==='ack'){records.get(envelope.data.id).opened.add(member.id);return respond({openedAt:Date.now()});}
   return respond({error:'unsupported'},400);
@@ -1486,4 +1771,180 @@ test('a queued notification survives a failed team refresh and opens only after 
  await waitUntil(()=>reader.el('surname').textContent==='Иванов','notification retained through outage');
  await waitUntil(()=>s.requests.filter(e=>e.op==='ack').length===1,'retained notification acknowledged');
  assert.equal(s.requests.filter(e=>e.op==='open').length,1);
+});
+
+function assertScreen(app,selected){
+ for(const screen of ['read','write','team','settings']){
+  assert.equal(app.el('screen-'+screen).hidden,screen!==selected,'Only the '+selected+' screen is visible: '+screen);
+  assert.equal(app.el('show-'+screen).attributes.get('aria-pressed'),String(screen===selected),'Navigation selection follows visible screen: '+screen);
+ }
+}
+
+test('bottom navigation shows one topic at a time and keeps the writer role restriction',async()=>{
+ const stores=await Promise.all([persistentDevice(),persistentDevice()]);
+ const service=await teamFixture(stores,['neurologist','cardiologist']);
+ const writer=await harness(stores[0],'',service.options);
+ for(const screen of ['write','team','settings','read']){
+  await writer.event('show-'+screen);assertScreen(writer,screen);
+ }
+ const reader=await harness(stores[1],'',service.options);
+ assert.equal(reader.el('show-write').hidden,true);
+ for(const screen of ['team','settings','read']){
+  await reader.event('show-'+screen);assertScreen(reader,screen);
+ }
+ await reader.event('show-write');
+ assert.equal(reader.el('screen-write').hidden,true,'A synthetic click cannot grant writing access');
+ assert.equal(reader.el('write-panel').hidden,true);
+ assert.equal(service.requests.filter(e=>e.op==='create').length,0);
+});
+
+test('selecting the current write tab keeps the draft while leaving it clears plaintext',async()=>{
+ const app=await harness(await persistentDevice());
+ await app.event('show-write');
+ app.el('compose-surname').value='Тестовая';app.el('compose-comment').value='Пояснение врачу';
+ await app.event('show-write');assertScreen(app,'write');
+ assert.equal(app.el('compose-surname').value,'Тестовая');
+ assert.equal(app.el('compose-comment').value,'Пояснение врачу');
+ await app.event('show-settings');assertScreen(app,'settings');
+ assert.equal(app.el('compose-surname').value,'');assert.equal(app.el('compose-comment').value,'');
+ assert.equal(app.el('photo-preview').hidden,true);
+ await app.event('show-write');assertScreen(app,'write');
+ assert.equal(app.el('compose-surname').value,'');assert.equal(app.el('compose-comment').value,'');
+});
+
+test('team status refresh keeps the selected topic and an authorized writer draft',async()=>{
+ const stores=await Promise.all([persistentDevice(),persistentDevice()]);
+ const service=await teamFixture(stores,['neurologist','cardiologist']);
+ const reader=await harness(stores[1],'',service.options);
+ for(const screen of ['team','settings']){
+  await reader.event('show-'+screen);await reader.event('team-refresh');await reader.idle();
+  assertScreen(reader,screen);
+ }
+ const writer=await harness(stores[0],'',service.options);
+ await writer.event('show-write');writer.el('compose-surname').value='Тестовая';writer.el('compose-comment').value='Не потерять при обновлении';
+ await writer.event('team-refresh');await writer.idle();assertScreen(writer,'write');
+ assert.equal(writer.el('compose-surname').value,'Тестовая');
+ assert.equal(writer.el('compose-comment').value,'Не потерять при обновлении');
+});
+
+test('changing topics hides decrypted patient content and revokes its photo without redisplaying on return',async()=>{
+ const s=await directFixture(),issued=Date.now(),id=direct.newMessageID(),meta={id,group:'cardiology',kind:'review',issued,expires:issued+60000};
+ const data=(await readFile(new URL('./fixtures/review.jpg',import.meta.url))).toString('base64url');
+ const photo={mime:'image/jpeg',data,width:3,height:2},recipient={...await exchange.importPublicCard(s.members[2].card),verified:true};
+ const sealed=await messages.sealMessage(s.stores[1].device,[recipient],{surname:'Тестовая',comment:'Защищённый комментарий',photo},meta);
+ s.records.set(id,{...meta,...sealed,sender:s.members[1],opened:new Set()});
+ const reader=await harness(s.stores[2],'',s.options);await reader.event('show-settings');
+ await reader.hashchange('#m='+id);await reader.idle();assertScreen(reader,'read');
+ assert.equal(reader.el('surname').textContent,'Тестовая');assert.equal(reader.el('result-comment').textContent,'Защищённый комментарий');
+ const url=reader.el('result-photo').src;assert.match(url,/^blob:/);assert.equal((await fetch(url)).status,200);
+ await reader.event('show-team');assertScreen(reader,'team');
+ assert.equal(reader.el('result').hidden,true);assert.equal(reader.el('surname').textContent,'');assert.equal(reader.el('result-comment').textContent,'');
+ assert.equal(reader.el('result-photo').hidden,true);await assert.rejects(fetch(url));
+ await reader.event('show-read');assertScreen(reader,'read');assert.equal(reader.el('result').hidden,true);
+ assert.equal(reader.el('surname').textContent,'');assert.equal(reader.el('result-comment').textContent,'');
+});
+
+test('changing topics while a message opens prevents its delayed plaintext and acknowledgement',async()=>{
+ const s=await directFixture(),writer=await harness(s.stores[1],'',s.options);await directSend(writer);
+ const record=[...s.records.values()][0];let release;s.gate(new Promise(resolve=>release=resolve));
+ const reader=await harness(s.stores[2],'',s.options),operation=reader.hashchange('#m='+record.id);
+ await waitUntil(()=>s.requests.some(r=>r.op==='open'),'message opening before navigation');
+ await reader.event('show-settings');assertScreen(reader,'settings');release();await operation;await reader.idle();
+ assertScreen(reader,'settings');assert.equal(reader.el('result').hidden,true);
+ assert.equal(reader.el('surname').textContent,'');assert.equal(reader.el('result-comment').textContent,'');
+ assert.equal(s.requests.filter(r=>r.op==='ack').length,0);
+});
+
+test('an incoming invitation selects the team topic without bypassing explicit enrollment',async()=>{
+ const fixture=await invitationFixture(),app=await harness(fixture.store,'',fixture.options);
+ await app.event('show-settings');assertScreen(app,'settings');
+ await app.hashchange(new URL(fixture.url).hash);await app.idle();
+ assertScreen(app,'team');assert.equal(app.el('join-panel').hidden,false,app.el('notice').textContent);
+ assert.equal(app.el('organizer-trust').hidden,false);assert.equal(app.el('organizer-save').disabled,true);
+ assert.equal(app.el('team-claim').disabled,true,'Ordinary browser cannot enroll');
+ assert.equal(fixture.service.requests.filter(e=>e.op==='claim').length,0);
+});
+
+test('an incoming public card opens its confirmation in settings instead of a hidden topic',async()=>{
+ const sender=await persistentDevice(),recipient=await persistentDevice(),app=await harness(recipient);
+ await app.event('show-read');
+ const card=await exchange.exportPublicCard(sender.device,'Коллега');
+ await app.hashchange(new URL(sharing.cardLinkFor(card,origin+appPath)).hash);await app.idle();
+ assertScreen(app,'settings');assert.equal(app.el('contacts-details').open,true);
+ assert.equal(app.el('contact-confirm').hidden,false,app.el('notice').textContent);
+ assert.equal(app.el('save-contact').disabled,true,'Verification is still required');
+ assert.equal(recipient.contacts.size,0);
+});
+
+test('specialists reply with encrypted content only to the verified original sender',async t=>{
+ for(const [role,group] of [['cardiologist','cardiology'],['intensivist','orit']])await t.test(role,async()=>{
+  const s=await directFixture(['admin','neurologist',role,role]);
+  const writer=await harness(s.stores[1],'',s.options);await directSend(writer,{group});
+  const original=[...s.records.values()][0],reader=await harness(s.stores[2],'',s.options);
+  assert.equal(reader.el('show-write').hidden,true,'Specialist cannot start a new group message');
+  await reader.hashchange('#m='+original.id);await reader.idle();
+  assert.equal(reader.el('reply-message').hidden,false,reader.el('notice').textContent);
+  await reader.event('reply-message');assertScreen(reader,'write');
+  assert.equal(reader.el('reply-recipient').textContent,s.members[1].name);
+  assert.equal(reader.el('recipient-routing').hidden,true);
+  assert.equal(reader.el('compose-surname').value,'Иванов');
+  assert.equal(reader.el('compose-comment').value,'');assert.equal(reader.el('photo-preview').hidden,true);
+  reader.el('compose-comment').value='Ответ врача: прошу уточнить';
+  await reader.event('compose-form','submit');await reader.idle();
+  const reply=[...s.records.values()].find(r=>r.kind==='reply');assert.ok(reply,reader.el('notice').textContent);
+  assert.equal(reply.replyTo,original.id);assert.equal(reply.group,group);
+  assert.deepEqual(reply.entries.map(e=>e.recipientId),[s.members[1].id]);
+  const sent=s.requests.find(r=>r.op==='create'&&r.data.kind==='reply');
+  assert.ok(!JSON.stringify(sent).includes('Иванов'));assert.ok(!JSON.stringify(sent).includes('прошу уточнить'));
+  assert.equal(reader.el('compose-comment').value,'');assert.equal(reader.el('reply-context').hidden,true);
+  await writer.hashchange('#m='+reply.id);await writer.idle();
+  assert.equal(writer.el('result').hidden,false,writer.el('notice').textContent);
+  assert.equal(writer.el('result-comment').textContent,'Ответ врача: прошу уточнить');
+  assert.equal(writer.el('reply-message').hidden,false,'Original sender can continue the exchange');
+  await writer.event('reply-message');assert.equal(writer.el('reply-recipient').textContent,s.members[2].name);
+ });
+});
+
+test('reply actions and draft plaintext disappear on expiry, navigation and backgrounding',async()=>{
+ const s=await directFixture(),writer=await harness(s.stores[1],'',s.options);await directSend(writer);
+ const original=[...s.records.values()][0],reader=await harness(s.stores[2],'',s.options);
+ await reader.hashchange('#m='+original.id);await reader.idle();reader.advance(30001);
+ assert.equal(reader.el('reply-message').hidden,true);await reader.event('reply-message');assertScreen(reader,'read');
+ for(const action of ['navigation','background']){
+  await reader.hashchange('#m='+original.id);await reader.idle();await reader.event('reply-message');
+  reader.el('compose-comment').value='Черновик ответа';
+  if(action==='navigation')await reader.event('show-settings');else{await reader.hide();await reader.show();}
+  assert.equal(reader.el('compose-surname').value,'');assert.equal(reader.el('compose-comment').value,'');
+  assert.equal(reader.el('reply-context').hidden,true);assert.equal(reader.el('reply-message').hidden,true);
+  assert.equal(reader.el('show-write').hidden,true);
+  await reader.event('show-write');assert.equal(reader.el('screen-write').hidden,true);
+ }
+ assert.equal(s.requests.filter(r=>r.op==='create').length,1,'Cleared reply cannot be sent by an incidental event');
+});
+
+test('a reply with substituted parent metadata cannot reveal content or acknowledge',async()=>{
+ const s=await directFixture(),writer=await harness(s.stores[1],'',s.options);await directSend(writer);
+ const original=[...s.records.values()][0],reader=await harness(s.stores[2],'',s.options);
+ await reader.hashchange('#m='+original.id);await reader.idle();await reader.event('reply-message');
+ reader.el('compose-comment').value='Защищённый ответ';await reader.event('compose-form','submit');await reader.idle();
+ const reply=[...s.records.values()].find(r=>r.kind==='reply');assert.ok(reply,reader.el('notice').textContent);
+ const before=s.requests.filter(r=>r.op==='ack').length;
+ s.transform(r=>({...r,meta:{...r.meta,replyTo:direct.newMessageID()}}));
+ await writer.hashchange('#m='+reply.id);await writer.idle();
+ assert.equal(writer.el('result').hidden,true);assert.equal(writer.el('result-comment').textContent,'');
+ assert.equal(writer.el('reply-message').hidden,true);assert.equal(s.requests.filter(r=>r.op==='ack').length,before);
+ assert.equal(writer.el('notice').attributes.get('role'),'alert');
+});
+
+test('a specialist retries a durable encrypted reply after a lost response without duplication',async()=>{
+ const s=await directFixture(),writer=await harness(s.stores[1],'',s.options);await directSend(writer);
+ const original=[...s.records.values()][0],reader=await harness(s.stores[2],'',s.options);
+ await reader.hashchange('#m='+original.id);await reader.idle();await reader.event('reply-message');
+ reader.el('compose-comment').value='Ответ для повтора';s.setFailure(true);
+ await reader.event('compose-form','submit');await reader.idle();
+ assert.equal(s.stores[2].pending.size,1,reader.el('notice').textContent);
+ const queued=[...s.stores[2].pending.values()][0];assert.equal(queued.kind,'reply');assert.ok(!JSON.stringify(queued).includes('Ответ для повтора'));
+ const restarted=await harness(s.stores[2],'',s.options);await waitUntil(()=>!restarted.el('retry-pending').hidden,'reply retry available');
+ s.setFailure(false);await restarted.event('retry-pending');await waitUntil(()=>s.stores[2].pending.size===0,'reply retry delivered');
+ assert.equal(s.records.size,2);assert.equal(s.requests.filter(r=>r.op==='create'&&r.data.id===queued.id).length,2);
 });

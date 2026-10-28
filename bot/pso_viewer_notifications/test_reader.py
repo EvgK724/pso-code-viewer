@@ -153,10 +153,25 @@ class ReaderTests(unittest.TestCase):
             self.assertIsNone(extract_surname(value))
 
     def test_orit_variants(self):
-        for value in ["ОРИТ", "орит-2", "ОРИТ 1", "Из ОРИТ-2", "ОРИТ–2", "ОРИТ2"]:
+        for value in ["ОРИТ", "орит-2", "ОРИТ 1", "Из ОРИТ-2", "ОРИТ–2", "ОРИТ2",
+                      "ОРиИТ №2", "ОАРИТ-1", "из реанимации", "Реанимация",
+                      "Отделение реанимации и интенсивной терапии № 2",
+                      "Реанимационное отделение"]:
             self.assertTrue(is_orit(value))
-        for value in ["Хирургия", "Неврология", "КАРО"]:
+        for value in ["Хирургия", "Неврология", "КАРО", "приоритетная терапия"]:
             self.assertFalse(is_orit(value))
+
+    def test_icu_full_name_transfer_has_no_routes_but_admission_still_has_cardio(self):
+        fixture(self.path, {1: {
+            "B21": ("str", "Тестов"),
+            "B27": ("str", "Пробов"), "D27": ("str", "ОРиИТ №2"),
+            "B28": ("str", "Макетов"), "D28": ("str", "Отделение реанимации и интенсивной терапии"),
+            "B29": ("str", "Образцов"), "D29": ("str", "Кардиология"),
+        }})
+        b = read_book(self.path)
+        self.assertEqual([r["routes"] for r in b["records"]],
+                         [["cardio"], [], [], ["cardio", "orit"]])
+        self.assertEqual(b["issues"], [])
 
 
 if __name__ == "__main__":
