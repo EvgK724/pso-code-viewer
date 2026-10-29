@@ -19,6 +19,7 @@ import * as direct from '../docs/direct.mjs';
 import * as messages from '../docs/messages.mjs';
 import * as photos from '../docs/photos.mjs';
 import * as recipientTrust from '../docs/recipient-trust.mjs';
+import * as appUpdatesModule from '../docs/updates.mjs';
 import * as deviceUnlock from '../docs/device-unlock.mjs';
 import {createShortlinkHandler} from '../server/shortlink-handler.mjs';
 
@@ -93,7 +94,7 @@ async function harness(persistent, initialHash = '', {
   richClipboard = false, rejectRich = false, rejectText = false,
   readText = '', rejectRead = false, deferRead = false, standalone = false, legacyStandalone = false, initialHidden = false,
   nativeCopy = undefined, nativeShare = undefined, shortlinkEndpoint = '', shortlinkFetch = undefined,
-  directEndpoint = '', directFetch = undefined,
+  directEndpoint = '', directFetch = undefined, useRealUpdates = false, registrationFailures = 0,
   deviceAuthEndpoint = '', deviceAuthFetch = undefined, deviceUnlockEnsure = undefined,
   teamEndpoint = '', teamFetch = undefined, pushEndpoint = '', pushFetch = undefined, notificationPermission = 'default', pushSubscription = null, permissionResult = 'granted', rejectSubscribe = false, rejectUnsubscribe = false
 } = {}) {
@@ -122,7 +123,8 @@ async function harness(persistent, initialHash = '', {
   const pendingReads = [];
   let permissionCalls=0,subscribeCalls=0,unsubscribeCalls=0,currentSubscription=pushSubscription;
   const subscription = {toJSON(){return {endpoint:'https://web.push.apple.com/test-device',keys:{p256dh:'test-key',auth:'test-auth'}};},async unsubscribe(){unsubscribeCalls++;if(rejectUnsubscribe)throw new Error('unsubscribe failed');currentSubscription=null;return true;}};
-  const registration = {pushManager:{async getSubscription(){return currentSubscription;},async subscribe(options){subscribeCalls++;assert.equal(options.userVisibleOnly,true);assert.equal(options.applicationServerKey.length,65);if(rejectSubscribe)throw new Error('Subscribe failed');currentSubscription=subscription;return subscription;}}};
+  let workerRegistrations=0;
+  const registration = {update:async()=>{},pushManager:{async getSubscription(){return currentSubscription;},async subscribe(options){subscribeCalls++;assert.equal(options.userVisibleOnly,true);assert.equal(options.applicationServerKey.length,65);if(rejectSubscribe)throw new Error('Subscribe failed');currentSubscription=subscription;return subscription;}}};
   if(pushSubscription===true)currentSubscription=subscription;
   const notification = {permission:notificationPermission,requestPermission(){permissionCalls++;notification.permission=permissionResult;return Promise.resolve(permissionResult);}};
 
@@ -195,7 +197,7 @@ async function harness(persistent, initialHash = '', {
   const context = vm.createContext({
     document, location, getSelection:() => selection,
     history:{replaceState() { location.hash = ''; }},
-    navigator:{clipboard:clipboardAPI, standalone:legacyStandalone,...(nativeShare?{share:nativeShare}:{}),...(pushEndpoint?{serviceWorker:{register:async()=>registration,ready:Promise.resolve(registration)}}:{})},
+    navigator:{clipboard:clipboardAPI, standalone:legacyStandalone,...(nativeShare?{share:nativeShare}:{}),...(pushEndpoint?{serviceWorker:{register:async()=>{workerRegistrations++;if(workerRegistrations<=registrationFailures)throw Error('SW download failed');return registration;},ready:Promise.resolve(registration)}}:{})},
     ...(pushEndpoint?{Notification:notification,PushManager:class {}}:{}),
     matchMedia(query) { return {matches:query === '(display-mode: standalone)' && standalone}; },
     crypto:webcrypto, URL, console, Blob,
@@ -224,7 +226,7 @@ async function harness(persistent, initialHash = '', {
     './direct.mjs':{...direct,DirectClient:InjectedDirectClient,savePending:async data=>persistent.pending.set(data.id,data),loadPending:async()=>[...persistent.pending.values()],removePending:async id=>persistent.pending.delete(id)},
     './messages.mjs':messages,'./photos.mjs':photos,'./device-unlock.mjs':{...deviceUnlock,DeviceUnlockClient:InjectedDeviceUnlockClient},
     './recipient-trust.mjs':{...recipientTrust,loadOrganizerCard:options=>recipientTrust.loadOrganizerCard({...options,storage:pinStorage}),pinOrganizerCard:(card,options)=>recipientTrust.pinOrganizerCard(card,{...options,storage:pinStorage})},
-    './updates.mjs':{installAppUpdates(){return {ready:Promise.resolve(registration),check:async()=>{}};}}
+    './updates.mjs':{installAppUpdates:useRealUpdates?appUpdatesModule.installAppUpdates:()=>({ready:Promise.resolve(registration),check:async()=>{}})}
   };
   const module = new vm.SourceTextModule(appSource, {context, identifier:origin + appPath + 'app.mjs', initializeImportMeta(meta) { meta.url = origin + appPath + 'app.mjs'; }});
   await module.link(specifier => {
@@ -246,6 +248,7 @@ async function harness(persistent, initialHash = '', {
     nativeCopyAttempts:() => nativeAttempts,
     nativePayload:() => nativePayload,
     clipboardReadAttempts:() => readAttempts,
+    workerRegistrations:()=>workerRegistrations,
     pushCounts:()=>({permission:permissionCalls,subscribe:subscribeCalls,unsubscribe:unsubscribeCalls}),
     async pushIdle(){await waitUntil(()=>!el('push-enable').disabled || el('push-test').disabled===false || /выключены|запрещены|значок|Не удалось/.test(el('push-status').textContent),'push completion');},
     setReadText(value) { nextReadText = value; },
@@ -2254,4 +2257,14 @@ test('caption insertion counts the phrase and added spaces at2000codepoints and 
  field.value='🙂'.repeat(2000-[...pair].length-1);field.setSelectionRange(field.value.length,field.value.length);await chip.fire('click');assert.equal([...field.value].length,2000);assert.ok(field.value.endsWith(' '+pair));assert.equal(field.validationMessage,'');assert.equal(app.el('comment-length').textContent,'2000 / 2000 символов');
  const before=field.value,preview=app.el('comment-preview-text').textContent,caret=field.selectionStart;await chip.fire('click');assert.equal(field.value,before);assert.equal(field.selectionStart,caret);assert.equal(app.el('comment-preview-text').textContent,preview);assert.match(app.el('notice').textContent,/не более 2000/);
  field.value='a'.repeat(2001);await app.event('compose-comment','input');assert.equal(field.attributes.get('aria-invalid'),'true');assert.match(field.validationMessage,/2000/);assert.equal(app.el('comment-preview').hidden,true);assert.equal(app.el('comment-preview-text').children.length,0);
+});
+
+
+test('failed service worker download shows a retryable update error and recovered check restores push readiness',async()=>{
+ const persistent=await persistentDevice(),device=persistent.device,notifications=await notificationService({enabled:true});
+ const app=await harness(persistent,'',{standalone:true,pushEndpoint:'https://push.example/api',pushFetch:notifications.fetch,notificationPermission:'granted',pushSubscription:true,useRealUpdates:true,registrationFailures:1});
+ await waitUntil(()=>app.el('app-update-status').textContent.includes('Не удалось загрузить обновление'),'download failure status');await app.pushIdle();
+ assert.doesNotMatch(app.el('app-update-status').textContent,/не поддерживает|недоступна в этом браузере/);assert.equal(app.workerRegistrations(),1);
+ await app.event('app-update');assert.equal(app.workerRegistrations(),2);assert.equal(app.el('app-update-status').textContent,'Установлена актуальная версия.');
+ await app.event('push-enable');await app.pushIdle();assert.match(app.el('push-status').textContent,/Уведомления включены/);assert.equal(persistent.device,device);assert.equal(app.workerRegistrations(),2);
 });

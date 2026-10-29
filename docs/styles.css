@@ -368,7 +368,7 @@ summary:focus-visible { border-radius: 8px; }
 .emoji-chips button:focus-visible { outline: 3px solid #83c5ff; outline-offset: 2px; }
 .emoji-chips button:disabled { opacity: .45; cursor: default; }
 
-@font-face { font-family: 'PSO Comic'; src: url('./fonts/pso-comic-cyrillic.woff2') format('woff2'); font-weight: 400; font-style: normal; font-display: swap; }
+@font-face { font-family: 'PSO Comic'; src: url('./pso-comic-cyrillic.woff2') format('woff2'); font-weight: 400; font-style: normal; font-display: swap; }
 .emoji-symbol { font-family: system-ui, 'Apple Color Emoji', 'Segoe UI Emoji', sans-serif; font-size: 25px; line-height: 1.2; }
 .emoji-caption, .comic-phrase { font-family: 'PSO Comic', 'Comic Sans MS', cursive; font-weight: 400; font-style: normal; letter-spacing: 0; }
 .emoji-caption { display: block; font-size: 17px; line-height: 1.2; text-align: center; overflow-wrap: anywhere; }

@@ -1,6 +1,6 @@
 const PREFIX = 'pso-viewer-' + encodeURIComponent(new URL('./', self.location).pathname) + '-shell-';
-const CACHE = PREFIX + 'github-v24-emoji-captions';
-const SHELL = ['./','./index.html','./styles.css','./fonts/pso-comic-cyrillic.woff2','./app.mjs','./care-routing.mjs','./api-queue.mjs','./updates.mjs','./direct.mjs','./messages.mjs','./photos.mjs','./device-unlock.mjs','./recipient-trust.mjs','./crypto.mjs','./exchange.mjs','./storage.mjs','./sharing.mjs','./push.mjs','./team.mjs','./shortlinks.mjs','./shortlink-config.mjs','./manifest.webmanifest','./icon-pso-v2-192.png','./icon-pso-v2-512.png','./apple-touch-icon-pso-v2.png','./favicon-pso-v2.png','./icon-192.png','./icon-512.png','./apple-touch-icon.png'];
+const CACHE = PREFIX + 'github-v25-update-recovery';
+const SHELL = ['./','./index.html','./styles.css','./pso-comic-cyrillic.woff2','./app.mjs','./care-routing.mjs','./api-queue.mjs','./updates.mjs','./direct.mjs','./messages.mjs','./photos.mjs','./device-unlock.mjs','./recipient-trust.mjs','./crypto.mjs','./exchange.mjs','./storage.mjs','./sharing.mjs','./push.mjs','./team.mjs','./shortlinks.mjs','./shortlink-config.mjs','./manifest.webmanifest','./icon-pso-v2-192.png','./icon-pso-v2-512.png','./apple-touch-icon-pso-v2.png','./favicon-pso-v2.png','./icon-192.png','./icon-512.png','./apple-touch-icon.png'];
 // Activate only after the complete shell is fetched without stale HTTP cache.
 // Existing pages are never navigated: drafts and in-progress operations survive.
 self.addEventListener('install', event => event.waitUntil((async () => {

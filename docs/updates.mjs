@@ -10,7 +10,7 @@ export function installAppUpdates({
   setTimeout: later = globalThis.setTimeout,
   clearTimeout: cancel = globalThis.clearTimeout
 } = {}) {
-  const sw = nav?.serviceWorker;
+  const sw = nav?.serviceWorker, supported = typeof sw?.register === 'function';
   let activeCheck, lastCheck = -Infinity, announced = false;
   let baselineWorker = sw?.controller || null;
   const watched = new WeakSet();
@@ -34,19 +34,26 @@ export function installAppUpdates({
     changed();
   };
   sw?.addEventListener?.('controllerchange', () => announce(sw.controller));
-  const registered = sw
-    ? Promise.resolve().then(() => sw.register('./sw.js', {updateViaCache:'none'})).then(value => {
+  let registered = null, ready;
+  function register() {
+    if (registered) return registered;
+    const attempt = Promise.resolve().then(() => sw.register('./sw.js', {updateViaCache:'none'})).then(value => {
       const observe = () => { watch(value.installing); watch(value.waiting); };
       value.addEventListener?.('updatefound', observe);
       observe();
       return value;
-    })
-    : Promise.reject(new Error('Service workers are unavailable'));
-  const ready = registered.then(() => sw.ready);
-  // Both promises remain rejectable for callers, without unhandled rejections
-  // when the caller only uses the visible update controls.
-  registered.catch(() => {});
-  ready.catch(() => {});
+    });
+    registered = attempt;
+    ready = attempt.then(() => sw.ready);
+    // A failed registration must release push callers and permit a later
+    // explicit/foreground check to register again. Consumers can read the
+    // refreshed ready promise after recovery; no device data is touched.
+    attempt.catch(() => { if (registered === attempt) registered = null; });
+    ready.catch(() => {});
+    return attempt;
+  }
+  if (supported) register();
+  else { ready = Promise.reject(new Error('Service workers are unavailable')); ready.catch(() => {}); }
 
   function waitForInstallation(value) {
     const worker = value.installing || value.waiting;
@@ -67,6 +74,7 @@ export function installAppUpdates({
     });
   }
   function check(automatic = false) {
+    if (!supported) { status('unsupported'); return Promise.resolve(); }
     if (activeCheck) return activeCheck;
     if (automatic && now() - lastCheck < 60000) return Promise.resolve();
     if (nav?.onLine === false) { status('offline'); return Promise.resolve(); }
@@ -77,14 +85,14 @@ export function installAppUpdates({
     const timeout = new Promise((_, reject) => {
       timer = later(() => reject(new Error('Update check timed out')), timeoutMs);
     });
-    const operation = registered.then(async value => {
+    const operation = register().then(async value => {
       await value.update();
       watch(value.installing); watch(value.waiting);
       await waitForInstallation(value);
     });
     activeCheck = Promise.race([operation, timeout]).then(() => {
       status(announced ? 'ready' : 'current');
-    }).catch(() => status(nav?.onLine === false ? 'offline' : 'unavailable'))
+    }).catch(() => status(nav?.onLine === false ? 'offline' : 'failed'))
       .finally(() => { cancel(timer); activeCheck = null; });
     return activeCheck;
   }
@@ -93,5 +101,5 @@ export function installAppUpdates({
   });
   globalThis.addEventListener?.('online', () => { void check(true); });
   void check(true);
-  return {ready, check:() => check(false)};
+  return {get ready() { return ready; }, check:() => check(false)};
 }

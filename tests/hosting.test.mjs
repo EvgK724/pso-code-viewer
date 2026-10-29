@@ -132,7 +132,7 @@ test('service worker serves its own offline shell and leaves sibling app request
   for (const path of ['/', '/pso-code-viewer/']) {
     const handlers = new Map(), deleted = [], installed = [], lifecycle = [];
     const prefix = 'pso-viewer-' + encodeURIComponent(path) + '-shell-';
-    const current = prefix + 'github-v24-emoji-captions';
+    const current = prefix + 'github-v25-update-recovery';
     const unrelated = 'pso-viewer-%2Fanother-app%2F-shell-github-v1';
     const cached = {status:200, body:'offline-shell'};
     const cache = {
@@ -160,7 +160,7 @@ test('service worker serves its own offline shell and leaves sibling app request
     assert.ok(installed.includes('./api-queue.mjs'), 'The request queue must update with all API clients');
     assert.ok(installed.includes('./updates.mjs'), 'Update controls are part of the same shell');
     assert.ok(installed.includes('./push.mjs'), 'Notification client must update with its shell');
-    assert.ok(installed.includes('./fonts/pso-comic-cyrillic.woff2'), 'Comic captions remain available offline');
+    assert.ok(installed.includes('./pso-comic-cyrillic.woff2'), 'Comic captions remain available offline');
     assert.ok(installed.every(file => new URL(file, origin + path + 'sw.js').pathname.startsWith(path)));
     let activation;
     handlers.get('activate')({waitUntil(promise) { activation = promise; }});
@@ -198,8 +198,39 @@ test('same-origin hosting gives this release a separate service worker cache', a
   const response = await router({path:'/sw.js', httpMethod:'GET', headers:{host:new URL(origin).host}});
   assert.equal(response.statusCode, 200);
   const source = Buffer.from(response.body, 'base64').toString('utf8');
-  assert.match(source, /const CACHE = PREFIX \+ 'yandex-v15-emoji-captions';/);
-  assert.ok(!source.includes('github-v24-emoji-captions'));
+  assert.match(source, /const CACHE = PREFIX \+ 'yandex-v16-update-recovery';/);
+  assert.ok(!source.includes('github-v25-update-recovery'));
   assert.equal(response.headers['Cache-Control'], 'no-cache');
+});
+
+test('the complete update shell installs through the single-segment static gateway, including its CSS font', async () => {
+  const router=createHttpRouter({allowedOrigin:origin,handlers:{}}),handlers=new Map(),cached=new Map();
+  let activated=false;
+  async function gateway(path){
+    // Production accepts / and /{file}; a nested static path never reaches the function.
+    if(!/^\/(?:[^/]+)?$/.test(path))return {statusCode:404,body:'not found on this server'};
+    return router({path,httpMethod:'GET',headers:{host:new URL(origin).host}});
+  }
+  assert.equal((await gateway('/fonts/pso-comic-cyrillic.woff2')).statusCode,404);
+  const source=Buffer.from((await gateway('/sw.js')).body,'base64').toString();
+  vm.runInNewContext(source,{
+    URL,Request,
+    self:{location:new URL(origin+'/sw.js'),addEventListener(name,fn){handlers.set(name,fn);},async skipWaiting(){activated=true;}},
+    caches:{async open(){return {async addAll(requests){
+      for(const request of requests){
+        const path=new URL(request.url).pathname,response=await gateway(path);
+        assert.equal(response.statusCode,200,'Every mandatory asset must pass the gateway: '+path);
+        cached.set(path,Buffer.from(response.body,'base64'));
+      }
+    }};}}
+  });
+  let pending;handlers.get('install')({waitUntil(p){pending=p;}});await pending;
+  assert.equal(activated,true,'Only a fully fetched shell can activate');
+  const css=cached.get('/styles.css').toString();
+  for(const match of css.matchAll(/url\(['"]?([^)'"\s]+)['"]?\)/g)){
+    const url=new URL(match[1],origin+'/styles.css');assert.equal(url.origin,origin);
+    assert.ok(cached.has(url.pathname),'CSS dependencies must install with the offline shell: '+url.pathname);
+  }
+  assert.equal(cached.get('/pso-comic-cyrillic.woff2').subarray(0,4).toString(),'wOF2');
 });
 
