@@ -2,7 +2,7 @@
 // no arbitrary file access, no API caching, no plaintext/request logging.
 import {readFile} from 'node:fs/promises';
 const MAX_BODY=2100000;
-const files=['index.html','styles.css','fonts/pso-comic-cyrillic.woff2','fonts/Pangolin-OFL.txt','app.mjs','care-routing.mjs','api-queue.mjs','updates.mjs','direct.mjs','messages.mjs','photos.mjs','device-unlock.mjs','recipient-trust.mjs','crypto.mjs','exchange.mjs','storage.mjs','sharing.mjs','push.mjs','team.mjs','shortlinks.mjs','shortlink-config.mjs','manifest.webmanifest','sw.js','icon-pso-v2-192.png','icon-pso-v2-512.png','apple-touch-icon-pso-v2.png','favicon-pso-v2.png','icon-192.png','icon-512.png','apple-touch-icon.png','robots.txt'];
+const files=['index.html','styles.css','pso-comic-cyrillic.woff2','Pangolin-OFL.txt','app.mjs','care-routing.mjs','api-queue.mjs','updates.mjs','direct.mjs','messages.mjs','photos.mjs','device-unlock.mjs','recipient-trust.mjs','crypto.mjs','exchange.mjs','storage.mjs','sharing.mjs','push.mjs','team.mjs','shortlinks.mjs','shortlink-config.mjs','manifest.webmanifest','sw.js','icon-pso-v2-192.png','icon-pso-v2-512.png','apple-touch-icon-pso-v2.png','favicon-pso-v2.png','icon-192.png','icon-512.png','apple-touch-icon.png','robots.txt'];
 const APIs=new Set(['pso-team','pso-direct','pso-push','pso-device-auth']);
 export function validateOrigin(value) {
   const u=new URL(value);
@@ -28,7 +28,7 @@ export function createHttpRouter({allowedOrigin,handlers,assets=new URL('../../d
     const html=data.toString('utf8'),pattern=/<meta\s+http-equiv=["']Content-Security-Policy["']\s+content=(["'])(.*?)\1\s*\/?\s*>/gis;
     if([...html.matchAll(pattern)].length!==1)throw new Error('CSP missing');
     data=Buffer.from(html.replace(pattern,`<meta http-equiv="Content-Security-Policy" content="${policy.replace(/; frame-ancestors 'none'/,'')}">`));
-  }else if(name==='sw.js')data=Buffer.from(data.toString('utf8').replace('github-v24-emoji-captions','yandex-v15-emoji-captions'));
+  }else if(name==='sw.js')data=Buffer.from(data.toString('utf8').replace('github-v25-update-recovery','yandex-v16-update-recovery'));
    else if(name==='manifest.webmanifest'){
     const manifest=JSON.parse(data);Object.assign(manifest,{id:'./',start_url:'./',scope:'./'});data=Buffer.from(JSON.stringify(manifest));
    }

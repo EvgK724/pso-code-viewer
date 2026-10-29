@@ -884,9 +884,9 @@ async function init() {
   if ('serviceWorker' in navigator) {
     appUpdates = installAppUpdates({navigator,document,
       onReady(){appUpdateAvailable=true;$('app-update').textContent='Открыть новую версию';},
-      onStatus(state){$('app-update-status').textContent=appUpdateAvailable?
+      onStatus(state){if(appUpdates&&['current','ready'].includes(state)){workerReady=appUpdates.ready;workerReady.catch(()=>{});}$('app-update-status').textContent=appUpdateAvailable?
         'Обновление загружено. Скопируйте готовые ссылки и нажмите кнопку.':
-        ({checking:'Проверяем обновление…',offline:'Не удалось проверить обновление. Проверьте интернет и повторите.',current:'Установлена актуальная версия.',ready:'Обновление загружено.',unavailable:'Проверка обновлений недоступна в этом браузере.'})[state]||'';}
+        ({checking:'Проверяем обновление…',offline:'Не удалось проверить обновление. Проверьте интернет и повторите.',current:'Установлена актуальная версия.',ready:'Обновление загружено.',failed:'Не удалось загрузить обновление. Проверьте подключение и повторите.',unsupported:'Этот браузер не поддерживает обновления приложения.'})[state]||'';}
     });
     workerReady = appUpdates.ready;
     // Keep registration failures separate from existing key/decryption operations.
@@ -920,7 +920,7 @@ async function init() {
 $('app-update').addEventListener('click',async()=>{
   if(busy||teamBusy||pushBusy){$('app-update-status').textContent='Дождитесь завершения текущей операции.';return;}
   if(appUpdateAvailable){clearSensitive();location.reload();return;}
-  if(!appUpdates){$('app-update-status').textContent='Проверка обновлений недоступна в этом браузере.';return;}
+  if(!appUpdates){$('app-update-status').textContent='Этот браузер не поддерживает обновления приложения.';return;}
   $('app-update').disabled=true;
   try{await appUpdates.check();}finally{$('app-update').disabled=false;}
 });
