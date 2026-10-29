@@ -29,7 +29,7 @@ DATA = Path.home() / '.local' / 'share' / 'pso-viewer-bot'
 OLD_DATA = Path.home() / '.local' / 'share' / 'pso-pachca'
 MONTHS = ('Январь Февраль Март Апрель Май Июнь Июль Август Сентябрь Октябрь Ноябрь Декабрь').split()
 POLL = 60
-VERSION = '1.2 — история и доступ 48 часов'
+VERSION = '1.3 — независимая отправка по направлениям'
 
 
 def prepare():
@@ -261,7 +261,7 @@ def worker():
             report = counts(db)
             review = db.execute("SELECT COUNT(*) FROM events WHERE review<>'' AND active=1 AND baseline=0").fetchone()[0]
             if report.get('blocked', 0):
-                problems.append('Просмотрщик не разрешил отправки. Проверьте подключение бота, получателей и пункт «Разобрать вопросы».')
+                problems.append('Часть отправок требует проверки. Проверьте получателей в пункте 9 и записи в пункте «Разобрать вопросы».')
             if review:
                 problems.append('Есть изменённые строки: пункт «Разобрать вопросы».')
             atomic_json(DATA / 'status.json', {'updated': now().isoformat(), 'mode': 'работает' if in_window(now()) else 'пауза до 07:00',
@@ -441,7 +441,14 @@ def encryption_status():
     print('Бот: ' + labels[value['state']])
     if value['state'] == 'active' and value.get('role') == 'bot':
         for destination, label in [('cardio', 'Кардиолог'), ('orit', 'Реаниматологи')]:
-            print('{}: активных получателей {}'.format(label, len(team.recipients(destination))))
+            try:
+                recipients = team.recipients(destination)
+            except TeamFailure as exc:
+                if exc.kind != 'blocked' or exc.code != 'no_recipients':
+                    raise
+                print('{}: активных получателей 0. Отсутствие получателей этого направления не задерживает другое.'.format(label))
+            else:
+                print('{}: активных получателей {}'.format(label, len(recipients)))
     elif value['state'] == 'active':
         print('Устройство имеет другую роль. Отправка поступлений заблокирована.')
     print('Проверка не отправляет сообщения пациентам или врачам.')

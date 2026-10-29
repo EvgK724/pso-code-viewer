@@ -90,6 +90,52 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual(self.db.execute('SELECT message_id FROM deliveries').fetchone()[0], data['id'])
         self.assertEqual(self.send(), 0)
 
+    def assert_available_direction_sends_without_other_direction(self, available_role, available_group):
+        records = book([rec(), rec('Пробов', row=14)])
+        n.ingest(self.db, records, moment())
+        self.valid = n.ingest(self.db, records, moment())
+        at = int(moment().timestamp() * 1000)
+        member = self.grant_member(issuer=self.organizer, at=at, role=available_role)
+        directory = TeamClient(self.identity, clock=lambda: at, organizer_card=self.organizer.card)
+        directory.request = mock.Mock(return_value={'members': [member]})
+        self.team.recipients.side_effect = directory.recipients
+        self.assertEqual(self.send(), 2)
+        requests = [call[0][0] for call in self.team.create.call_args_list]
+        self.assertEqual([data['group'] for data in requests], [available_group, available_group])
+        self.assertEqual(len({data['id'] for data in requests}), 2)
+        for data in requests:
+            self.assertEqual([entry['recipientId'] for entry in data['entries']], [member['id']])
+            self.assertTrue(data['entries'][0]['token'].startswith('PSO1.'))
+            self.assertNotIn('Тестов', compact(data))
+            self.assertNotIn('Пробов', compact(data))
+        statuses = [tuple(row) for row in self.db.execute('''SELECT d.destination,d.status
+            FROM deliveries d JOIN events e ON e.id=d.event_id WHERE e.active=1 ORDER BY d.id''')]
+        available_destination = 'orit' if available_role == 'intensivist' else 'cardio'
+        self.assertEqual(statuses, [(dest, 'sent' if dest == available_destination else 'blocked')
+                                    for _ in range(2) for dest in ('cardio', 'orit')])
+        self.assertEqual(self.db.execute('SELECT COUNT(*) FROM encrypted_outbox').fetchone()[0], 2)
+        self.assertEqual(self.send(), 0)
+        self.assertEqual(self.team.create.call_count, 2)
+
+    def test_missing_cardiologist_does_not_delay_any_intensivist_delivery(self):
+        self.assert_available_direction_sends_without_other_direction('intensivist', 'orit')
+
+    def test_missing_intensivist_does_not_delay_later_cardiology_deliveries(self):
+        self.assert_available_direction_sends_without_other_direction('cardiologist', 'cardiology')
+
+    def test_bot_authorization_failure_stops_before_all_recipient_checks(self):
+        records = book([rec(), rec('Пробов', row=14)])
+        n.ingest(self.db, records, moment())
+        self.valid = n.ingest(self.db, records, moment())
+        self.team.require_bot.side_effect = TeamFailure('blocked', 'Бот не активирован')
+        self.assertEqual(self.send(), 0)
+        self.assertEqual(self.team.require_bot.call_count, 1)
+        self.team.recipients.assert_not_called()
+        self.team.create.assert_not_called()
+        statuses = [row[0] for row in self.db.execute('''SELECT d.status FROM deliveries d
+            JOIN events e ON e.id=d.event_id WHERE e.active=1 ORDER BY d.id''')]
+        self.assertEqual(statuses, ['blocked', 'pending', 'pending', 'pending'])
+
     def test_timeout_after_commit_retries_identical_record_after_restart(self):
         committed = {}
         calls = []
@@ -360,13 +406,13 @@ class DeliveryTests(unittest.TestCase):
             if process.poll() is None:
                 process.kill();process.communicate()
 
-    def grant_member(self, issuer=None, at=1791961200000):
+    def grant_member(self, issuer=None, at=1791961200000, role='cardiologist'):
         issuer = issuer or self.identity
-        grant = {'v':1,'subjectId':self.member['id'],'role':'cardiologist','name':self.member['name'],
+        grant = {'v':1,'subjectId':self.member['id'],'role':role,'name':self.member['name'],
                  'issued':at,'expires':at+86400000,'issuerId':issuer.id}
         proof = {'grant':grant,'signature':b64(issuer.sign((GRANT_DOMAIN+compact(grant)).encode('utf-8'))),
                  'issuerCard':issuer.card}
-        return dict(self.member, approvalProof=proof)
+        return dict(self.member, role=role, approvalProof=proof)
 
     def test_pinned_organizer_signature_accepts_exact_recipient(self):
         at=1791961200000
@@ -405,6 +451,26 @@ class DeliveryTests(unittest.TestCase):
         client.request.assert_called_with('directory',{},direct=True)
         client.organizer_card=''
         with self.assertRaises(TeamFailure):client.recipients('cardio')
+
+    def test_only_valid_directory_without_matching_role_reports_no_recipients(self):
+        at = 1791961200000
+        client = TeamClient(self.identity, clock=lambda: at, organizer_card=self.identity.card)
+        member = self.grant_member(at=at, role='intensivist')
+        client.request = mock.Mock(return_value={'members': [member]})
+        with self.assertRaises(TeamFailure) as missing:
+            client.recipients('cardio')
+        self.assertEqual((missing.exception.kind, missing.exception.code), ('blocked', 'no_recipients'))
+        for invalid in [{'members': []}, {'members': 'invalid'},
+                        {'members': [dict(member, role='unknown')]},
+                        {'members': [dict(member, card='invalid')]},
+                        {'members': [member, member]},
+                        {'members': [dict(member, role='cardiologist')]}]:
+            with self.subTest(directory=invalid):
+                client.request.return_value = invalid
+                with self.assertRaises(TeamFailure) as failure:
+                    client.recipients('cardio')
+                self.assertEqual(failure.exception.kind, 'blocked')
+                self.assertNotEqual(failure.exception.code, 'no_recipients')
 
     def test_invitation_carries_pinned_organizer_without_server_lookup(self):
         from urllib.parse import urlencode
