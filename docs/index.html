@@ -58,14 +58,23 @@
           <svg width="19" height="19" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.7"/><path d="M12 7v5l3 2" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
           <span id="countdown"></span>
         </div>
-        <div class="result-actions"><button id="reply-message" type="button" class="button button-primary" hidden>Ответить</button><button id="hide" type="button" class="button button-secondary">Скрыть сейчас</button></div>
+        <div class="result-actions"><button id="reply-message" type="button" class="button button-primary" hidden>Ответить группе</button><button id="hide" type="button" class="button button-secondary">Скрыть сейчас</button></div>
         <p class="fine-print">Скрытие с экрана не запрещает сделать скриншот.</p>
       </section>
 
       <div class="input-card">
         <section id="direct-panel" class="direct-panel" aria-label="Сообщения" hidden>
-          <div class="inbox-toolbar"><div class="box-switch"><button id="box-inbox" type="button" aria-pressed="true">Входящие <span id="inbox-count" class="count-badge"></span></button><button id="box-outbox" type="button" aria-pressed="false">Исходящие</button></div><button id="inbox-refresh" class="text-button" type="button">Обновить</button></div>
+          <div class="inbox-toolbar"><div class="box-switch"><button id="box-inbox" type="button" aria-pressed="true">Входящие <span id="inbox-count" class="count-badge"></span></button><button id="box-outbox" type="button" aria-pressed="false">Моя история</button></div><button id="inbox-refresh" class="text-button" type="button">Обновить</button></div>
+          <div id="history-source" class="history-source" role="group" aria-label="Источник отправлений" hidden><button id="history-own" type="button" aria-pressed="true">Мои отправки</button><button id="history-bot" type="button" aria-pressed="false">Отправки бота</button></div>
+          <div id="history-controls" class="history-controls" hidden><button id="history-recent" type="button" class="text-button">Недавние исходящие</button></div>
           <p id="inbox-status" class="field-help compact-help" role="status">Подключитесь по приглашению организатора.</p>
+          <section id="history-detail" class="history-detail" aria-labelledby="history-title" hidden>
+            <div class="history-heading"><h2 id="history-title" tabindex="-1"></h2><button id="history-close" class="text-button" type="button">Закрыть</button></div>
+            <p id="history-id" class="history-id"></p><p id="history-saved" class="message-meta"></p><p id="history-expiry" class="field-help"></p>
+            <p id="history-content-note" class="field-help"></p><button id="history-show" type="button" class="button button-primary" hidden>Показать содержимое на 30 секунд</button>
+            <h3>Получатели</h3><ul id="history-recipients" class="history-recipients"></ul>
+            <p class="field-help">Принятие службой уведомлений не подтверждает показ на телефоне. Открытие сообщения не означает выполненную консультацию.</p>
+          </section>
           <div id="inbox-list" class="message-list"></div>
           <button id="inbox-more" type="button" class="button button-secondary" hidden>Показать ещё</button>
           <p id="pending-count" class="field-help compact-help" role="status"></p>
@@ -94,10 +103,11 @@
       <section id="screen-write" class="app-screen" aria-labelledby="page-title" hidden>
         <section class="input-card" id="write-panel" aria-labelledby="compose-label" hidden>
           <section id="reply-context" class="reply-context" aria-label="Ответ на сообщение" hidden>
-            <p class="eyebrow">Ответ отправителю</p><p id="reply-recipient"></p>
-            <p class="field-help compact-help">Ответ получит только этот врач. Комментарий и фото будут зашифрованы.</p>
+            <p class="eyebrow">Ответ группе</p><p id="reply-recipient"></p>
+            <p id="reply-audience" class="field-help compact-help"></p><p class="field-help compact-help">Фамилия, комментарий и фото будут зашифрованы. Бот ответ не получает.</p>
             <button id="cancel-reply" type="button" class="text-button">Отменить ответ</button>
           </section>
+          <section id="discussion-context" class="discussion-context" aria-label="Группа ранней реабилитации" hidden><h2>Группа ранней реабилитации</h2><p class="field-help">Новое обсуждение специалистов I этапа и неврологов ПСО.</p></section>
           <form id="compose-form" autocomplete="off">
             <section id="care-directions" class="care-directions" aria-labelledby="care-direction-label" hidden>
               <h2 id="care-direction-label">Направление</h2>
@@ -125,13 +135,14 @@
               <img id="photo-preview" class="message-photo" alt="Фото, подготовленное к шифрованию" hidden>
               <p id="photo-status" class="field-help compact-help" role="status"></p>
               <button id="photo-remove" class="button button-secondary" type="button" hidden>Убрать фото</button>
-              <label for="compose-comment">Комментарий</label>
+              <div class="comment-heading"><label for="compose-comment">Комментарий</label><button id="emoji-toggle" type="button" class="text-button" aria-expanded="false" aria-controls="emoji-picker">🙂 Эмодзи</button></div>
+              <div id="emoji-picker" class="emoji-picker" aria-label="Эмодзи для комментария" hidden></div>
               <textarea id="compose-comment" rows="6" maxlength="2000" autocomplete="off" spellcheck="false" autocorrect="off" placeholder="Напишите, что нужно уточнить или проверить"></textarea>
             </div>
             </div>
             <div class="compose-routing">
             <label class="check-label" for="compose-orit"><input id="compose-orit" type="checkbox"><span>Пациент в ОРИТ</span></label>
-            <label for="expiry">Срок доступа к сообщению</label>
+            <label for="expiry">Доступ для получателей</label>
             <select id="expiry" name="expiry">
               <option value="60">1 час</option>
               <option value="240">4 часа</option>
@@ -140,6 +151,7 @@
             </div>
             <input id="message-caption" type="hidden" value="test">
             <button id="encrypt" type="submit" class="button button-primary">Создать ссылку</button>
+            <p id="archive-compose-help" class="fine-print" hidden>Ваша зашифрованная копия хранится в «Моей истории» 90 дней и открывается только с этого телефона. Срок для получателей выбирается отдельно.</p>
             <p id="push-compose-help" class="fine-print" hidden>Сообщение появится во «Входящих» получателей. Уведомление не содержит фамилии или фото.</p>
           </form>
           <div id="legacy-output"><div id="compose-output" class="output-block" hidden>

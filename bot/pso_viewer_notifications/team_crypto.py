@@ -212,11 +212,24 @@ class OpenSSLIdentity:
         obj['signature'] = b64(self.sign((TEAM_DOMAIN + compact(obj)).encode('utf-8')))
         return obj
 
-    def seal(self, contact, surname, department, issued, expires):
+    def seal(self, contact, surname, department, issued, expires, message_id=None, group=None):
         card = read_card(contact['card'])
-        if contact['id'] != card['id'] or department not in ('', 'ПСО', 'ОРИТ') or not 60000 <= expires - issued <= 86400000:
+        bound = message_id is not None or group is not None
+        if bound:
+            unb64(message_id, 16)
+            if group not in ('cardiology', 'orit'):
+                raise ValueError('Неизвестное направление поступления.')
+        if (contact['id'] != card['id'] or department not in ('', 'ПСО', 'ОРИТ') or
+                type(issued) is not int or type(expires) is not int or not 0 < issued < expires <= 9007199254740991 or
+                not 60000 <= expires - issued <= (172800000 if bound else 86400000)):
             raise ValueError('Не удалось проверить получателя или срок ссылки.')
-        payload = {'n': surname_value(surname), 'd': department, 'j': b64(os.urandom(12)), 'i': issued, 'x': expires}
+        # For new admissions the signed ciphertext binds the exact message ID,
+        # group and recipient expiry. The organizer copy uses the same payload
+        # fields, so history cannot substitute another admission's metadata.
+        payload = {'n': surname_value(surname), 'd': department,
+                   'j': message_id if bound else b64(os.urandom(12)), 'i': issued, 'x': expires}
+        if bound:
+            payload['g'] = group
         plain = compact(payload).encode('utf-8')
         if len(plain) > 318:
             raise ValueError('Фамилия превышает допустимую длину зашифрованной записи.')

@@ -118,6 +118,16 @@ test('direct inbox notification preserves its version and contains only opaque r
   assert.equal(f.calls.length,1);
 });
 
+test('direct notifications support two days while legacy notifications retain their one-day bound', async () => {
+  const f=captured(201), direct={...payload,v:2,expires:NOW+172800000};
+  assert.deepEqual(await sendWebPush(subscription,vapid,direct,{fetch:f.fetch,now:NOW,ttl:172800}),{status:'accepted'});
+  assert.equal(f.calls[0].options.headers.TTL,'172800');
+  assert.deepEqual(JSON.parse(decryptBody(f.calls[0].options.body)),direct);
+  for(const changed of [{...direct,expires:direct.expires+1},{...direct,v:1}])
+    assert.deepEqual(await sendWebPush(subscription,vapid,changed,{fetch:f.fetch,now:NOW}),{status:'failed'});
+  assert.equal(f.calls.length,1);
+});
+
 test('each notification gets fresh ephemeral ECDH material and salt', async () => {
   const f = captured(202);
   for (let i=0;i<2;i++) assert.deepEqual(await sendWebPush(subscription,vapid,payload,{fetch:f.fetch,now:NOW}),{status:'accepted'});

@@ -329,3 +329,41 @@ summary:focus-visible { border-radius: 8px; }
   .direction-buttons button[aria-pressed="true"] { background: Highlight; border-color: Highlight; }
   .direction-buttons button[aria-pressed="true"] strong, .direction-buttons button[aria-pressed="true"] span { color: HighlightText; }
 }
+
+/* Sender history keeps clinical content behind a deliberate timed reveal. */
+.history-detail { margin: 18px 0 24px; padding: 20px; border: 1px solid #60748c; border-radius: 20px; background: #1e2630; }
+.history-heading { display: flex; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
+.history-heading h2 { flex: 1 1 180px; font-size: 21px; line-height: 1.3; margin: 0; overflow-wrap: anywhere; }
+.history-heading .text-button { min-height: 44px; margin: -8px 0 0; }
+.history-detail h3 { font-size: 18px; margin: 24px 0 12px; }
+.history-recipients { padding: 0; margin: 0; list-style: none; }
+.history-recipients li { padding: 16px 0; border-bottom: 1px solid #394451; overflow-wrap: anywhere; }
+.history-recipients li:first-child { padding-top: 0; }
+.history-recipients strong { display: block; font-size: 17px; line-height: 1.4; }
+.history-recipients p { margin: 7px 0 0; }
+#history-show { white-space: normal; }
+@media (max-width: 360px) { .history-detail { padding: 16px; } .box-switch { width: 100%; } }
+
+.history-id { font-size: 13px; line-height: 1.5; color: #b8c3d0; overflow-wrap: anywhere; }
+
+.history-controls { margin: 2px 0 10px; }
+.history-controls .text-button { min-height: 44px; white-space: normal; text-align: left; }
+
+.history-source { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 6px; margin: 12px 0 4px; padding: 5px; border: 1px solid #455466; border-radius: 15px; background: #161c23; }
+.history-source button { min-height: 48px; border: 1px solid transparent; border-radius: 10px; background: transparent; color: #b8c3d0; padding: 8px 10px; font: inherit; font-size: 15px; font-weight: 600; line-height: 1.3; cursor: pointer; }
+.history-source button[aria-pressed="true"] { background: #2c3c4c; border-color: #829db6; color: #e1eaf3; }
+.history-source button:focus-visible { outline: 3px solid #83c5ff; outline-offset: 2px; }
+
+.discussion-context { margin-bottom: 20px; }
+.discussion-context h2 { font-size: 22px; line-height: 1.3; margin: 0 0 10px; }
+
+.comment-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
+.comment-heading label { margin: 0; }
+.comment-heading .text-button { min-height: 44px; margin: 0; white-space: nowrap; }
+.emoji-picker { margin: 8px 0 14px; padding: 14px; border: 1px solid #455466; border-radius: 18px; background: #171e26; }
+.emoji-picker section + section { margin-top: 12px; }
+.emoji-picker h3 { margin: 0 0 6px; font-size: 14px; font-weight: 600; color: #b8c3d0; }
+.emoji-chips { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 6px; }
+.emoji-chips button { min-width: 44px; min-height: 46px; border: 1px solid #46576a; border-radius: 12px; background: #253342; color: #e3ebf2; font-size: 24px; line-height: 1.2; cursor: pointer; }
+.emoji-chips button:focus-visible { outline: 3px solid #83c5ff; outline-offset: 2px; }
+.emoji-chips button:disabled { opacity: .45; cursor: default; }

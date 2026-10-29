@@ -161,12 +161,16 @@ class TeamClient:
             try:
                 raw = exc.read(2048)
                 obj = json.loads(raw.decode('utf-8'))
-                if isinstance(obj, dict) and obj.get('error') in ('roster_changed', 'id_conflict', 'replay', 'expired'):
+                if isinstance(obj, dict) and obj.get('error') in ('roster_changed', 'id_conflict', 'replay', 'expired', 'history_full', 'history_unavailable'):
                     code = obj['error']
             except Exception:
                 pass
             if exc.code == 409 and code == 'roster_changed':
                 raise TeamFailure('retry', 'Состав получателей изменился; список будет обновлён.', code)
+            if exc.code == 429 and code == 'history_full':
+                raise TeamFailure('retry', 'Архив сообщений заполнен. Отправка не подтверждена; зашифрованная запись сохранена в очереди.', code)
+            if code == 'history_unavailable':
+                raise TeamFailure('retry', 'Сначала обновите pso-api в Yandex Cloud для истории бота. Зашифрованная запись сохранена в очереди.', code)
             if exc.code == 429 or exc.code >= 500 or (exc.code == 409 and code == 'replay'):
                 raise TeamFailure('retry', 'Сервис шифрованных ссылок временно недоступен. Повтор с тем же кодом через минуту.', code)
             raise TeamFailure('blocked', 'Сервис не разрешил отправку. Проверьте активацию бота и получателей.', code)
@@ -271,12 +275,23 @@ class TeamPublisher:
                 data = json.loads(saved['request'])
             else:
                 recipients = self.team.recipients(row['destination'])
+                # Only the locally pinned organizer key receives the archive
+                # copy. Never select its key from an untrusted remote directory.
+                organizer = read_card(self.team.organizer_card)
+                if organizer['id'] == self.team.identity.id:
+                    raise ValueError('Ключ организатора совпал с ключом бота.')
+                message_id = b64(os.urandom(16))
+                group = GROUPS[row['destination']][0]
                 issued = int(moment.timestamp() * 1000)
-                expires = issued + 86400000
+                expires = issued + 172800000
                 department = 'ОРИТ' if row['section'] == 'orit' else 'ПСО'
-                entries = [{'recipientId': member['id'], 'token': self.team.identity.seal(member, row['surname'], department, issued, expires)} for member in recipients]
-                data = {'id': b64(os.urandom(16)), 'group': GROUPS[row['destination']][0],
-                        'kind': 'admission', 'issued': issued, 'expires': expires, 'entries': entries}
+                entries = [{'recipientId': member['id'], 'token': self.team.identity.seal(
+                    member, row['surname'], department, issued, expires, message_id=message_id, group=group)} for member in recipients]
+                organizer_token = self.team.identity.seal(organizer, row['surname'], department, issued, expires,
+                                                          message_id=message_id, group=group)
+                data = {'id': message_id, 'group': group, 'kind': 'admission',
+                        'issued': issued, 'expires': expires, 'entries': entries,
+                        'organizerId': organizer['id'], 'organizerToken': organizer_token}
                 with db:
                     db.execute('INSERT INTO encrypted_outbox(delivery_id,source_hash,request) VALUES (?,?,?)',
                                (row['id'], source_hash, compact(data)))

@@ -15,7 +15,7 @@ from unittest import mock
 
 import notifier as n
 import pso_viewer as app
-from team_crypto import OpenSSLIdentity, b64, compact
+from team_crypto import OpenSSLIdentity, b64, compact, unb64
 from team_publish import TeamClient, TeamFailure, TeamPublisher, verify_recipient, GRANT_DOMAIN, service_config, parse_invitation
 from test_notifier import book, rec, moment
 
@@ -44,6 +44,7 @@ class DeliveryTests(unittest.TestCase):
         cls.keys = tempfile.TemporaryDirectory()
         cls.identity = OpenSSLIdentity(Path(cls.keys.name) / 'sender', create=True)
         cls.recipient = OpenSSLIdentity(Path(cls.keys.name) / 'recipient', create=True)
+        cls.organizer = OpenSSLIdentity(Path(cls.keys.name) / 'organizer', create=True)
         cls.member = {'id': cls.recipient.id, 'name': 'Врач тестовый', 'role': 'cardiologist', 'card': cls.recipient.card}
 
     @classmethod
@@ -59,6 +60,7 @@ class DeliveryTests(unittest.TestCase):
         self.valid = n.ingest(self.db, book([rec(section='orit')]), moment())
         self.team = mock.Mock()
         self.team.identity = self.identity
+        self.team.organizer_card = self.organizer.card
         self.team.require_bot.return_value = None
         self.team.recipients.return_value = [self.member]
         self.team.create.side_effect = lambda data: {'id': data['id'], 'expires': data['expires'], 'push': 'queued'}
@@ -81,6 +83,10 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual(data['kind'], 'admission')
         self.assertEqual(data['group'], 'cardiology')
         self.assertTrue(data['entries'][0]['token'].startswith('PSO1.'))
+        self.assertEqual(data['expires'] - data['issued'], 172800000)
+        self.assertEqual(data['organizerId'], self.organizer.id)
+        self.assertTrue(data['organizerToken'].startswith('PSO1.' + self.organizer.id + '.' + self.identity.id + '.'))
+        self.assertNotIn(self.organizer.id, [item['recipientId'] for item in data['entries']])
         self.assertEqual(self.db.execute('SELECT message_id FROM deliveries').fetchone()[0], data['id'])
         self.assertEqual(self.send(), 0)
 
@@ -146,10 +152,70 @@ class DeliveryTests(unittest.TestCase):
         self.team.create.side_effect = TeamFailure('retry', 'Потерян ответ')
         self.send()
         before = self.saved()
-        self.assertEqual(self.send(moment(day=15, minute=1)), 0)
+        self.assertEqual(self.send(moment(day=16, minute=1)), 0)
         self.assertEqual(self.saved(), before)
         self.assertEqual(self.team.create.call_count, 1)
         self.assertEqual(self.db.execute('SELECT status FROM deliveries').fetchone()[0], 'blocked')
+
+    def test_missing_pinned_organizer_blocks_before_any_outbox_or_send(self):
+        self.team.organizer_card = ''
+        self.assertEqual(self.send(), 0)
+        self.team.create.assert_not_called()
+        self.assertEqual(self.db.execute('SELECT count(*) FROM encrypted_outbox').fetchone()[0], 0)
+        self.assertEqual(self.db.execute('SELECT status FROM deliveries').fetchone()[0], 'blocked')
+
+    def test_existing_legacy_prepared_request_is_retried_without_reencryption_or_archive(self):
+        self.team.create.side_effect = TeamFailure('retry', 'Потерян ответ')
+        self.assertEqual(self.send(), 0)
+        saved = self.saved()
+        issued = saved['issued']
+        old = {'id': saved['id'], 'group': 'cardiology', 'kind': 'admission',
+               'issued': issued, 'expires': issued + 86400000,
+               'entries': [{'recipientId': self.member['id'], 'token': self.identity.seal(
+                   self.member, 'Тестов', 'ОРИТ', issued, issued + 86400000)}]}
+        with self.db:
+            self.db.execute('UPDATE encrypted_outbox SET request=?', (compact(old),))
+        # An update must not replace an uncertain already-committed request,
+        # even if the pinned organizer becomes unavailable before the retry.
+        self.team.organizer_card = ''
+        self.team.recipients.reset_mock()
+        self.team.create.side_effect = lambda data: {'id': data['id'], 'expires': data['expires'], 'push': 'queued'}
+        self.assertEqual(self.send(moment(minute=2)), 1)
+        self.assertEqual(self.saved(), old)
+        self.team.recipients.assert_not_called()
+        self.assertNotIn('organizerToken', self.team.create.call_args.args[0])
+
+    def test_bound_admission_copies_bind_same_message_group_and_expiry(self):
+        self.assertEqual(self.send(), 1)
+        data = self.saved()
+        def decrypt(identity, token):
+            parts = token.split('.')
+            raw = identity.run(['pkeyutl', '-decrypt', '-inkey', str(identity.rsa_file),
+                                '-pkeyopt', 'rsa_padding_mode:oaep', '-pkeyopt', 'rsa_oaep_md:sha256',
+                                '-pkeyopt', 'rsa_mgf1_md:sha256',
+                                '-pkeyopt', 'rsa_oaep_label:' + b'PSO-SURNAME-LINK-v1'.hex()], unb64(parts[3], 384))
+            return json.loads(raw)
+        received = decrypt(self.recipient, data['entries'][0]['token'])
+        archived = decrypt(self.organizer, data['organizerToken'])
+        self.assertEqual(received, archived)
+        self.assertEqual(set(received), {'n', 'd', 'j', 'i', 'x', 'g'})
+        self.assertEqual((received['j'], received['g'], received['i'], received['x']),
+                         (data['id'], data['group'], data['issued'], data['expires']))
+        with self.assertRaises(RuntimeError):
+            decrypt(self.recipient, data['organizerToken'])
+
+    def test_bound_seal_only_supports_exact_admission_groups_and_48_hours(self):
+        issued, message_id = 1791961200000, b64(os.urandom(16))
+        for args in [dict(message_id=message_id), dict(group='orit'),
+                     dict(message_id='invalid', group='orit'), dict(message_id=message_id, group='rehab1')]:
+            with self.assertRaises(ValueError):
+                self.identity.seal(self.member, 'Тестов', 'ПСО', issued, issued + 60000, **args)
+        for ttl in [59999, 172800001]:
+            with self.assertRaises(ValueError):
+                self.identity.seal(self.member, 'Тестов', 'ПСО', issued, issued + ttl,
+                                   message_id=message_id, group='orit')
+        with self.assertRaises(ValueError):
+            self.identity.seal(self.member, 'Тестов', 'ПСО', issued, issued + 86400001)
 
     def test_retention_scrubs_names_and_reread_does_not_rehydrate(self):
         self.send()
@@ -198,6 +264,19 @@ class DeliveryTests(unittest.TestCase):
             TeamClient(self.identity, opener=opener).request('retry', {}, direct=True)
         self.assertNotIn('private', str(cm.exception))
 
+    def test_archive_errors_are_explicit_and_keep_same_encrypted_retry(self):
+        for status, code, note in [(429, 'history_full', 'Архив сообщений заполнен'),
+                                   (503, 'history_unavailable', 'Сначала обновите pso-api')]:
+            opener = mock.Mock()
+            opener.open.side_effect = urllib.error.HTTPError(DIRECT_ENDPOINT, status, 'server', {},
+                io.BytesIO(compact({'error': code, 'private': 'patient secret'}).encode('utf-8')))
+            with self.assertRaises(TeamFailure) as cm:
+                TeamClient(self.identity, opener=opener).request('create', {}, direct=True)
+            self.assertEqual(cm.exception.kind, 'retry')
+            self.assertEqual(cm.exception.code, code)
+            self.assertIn(note, str(cm.exception))
+            self.assertNotIn('secret', str(cm.exception))
+
     def test_sources_config_import_reads_no_token_or_queue(self):
         old = Path(self.temp.name) / 'old'
         old.mkdir()
@@ -242,6 +321,41 @@ class DeliveryTests(unittest.TestCase):
             self.assertTrue(result['wrong'])
             self.assertTrue(result['tampered'])
             self.assertTrue(result['verified'])
+        finally:
+            if process.poll() is None:
+                process.kill();process.communicate()
+
+    def test_bound_admission_and_organizer_archive_interoperate_with_browser(self):
+        module = viewer_docs() / 'exchange.mjs'
+        if not module.is_file() or not shutil.which('node'):
+            self.skipTest('Node and viewer source required for cross-runtime test')
+        env = dict(os.environ, PSO_EXCHANGE_MODULE=module.as_uri())
+        process = subprocess.Popen(['node', str(Path(__file__).with_name('test_history_interop.mjs'))],
+                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   text=True, env=env)
+        try:
+            from team_crypto import read_card
+            cards = [read_card(c) for c in json.loads(process.stdout.readline())['cards']]
+            now_ms, message_id = 1791961200000, b64(os.urandom(16))
+            meta = {'id': message_id, 'group': 'cardiology', 'kind': 'admission',
+                    'issued': now_ms, 'expires': now_ms + 172800000}
+            seal = lambda card, mid: self.identity.seal(card, 'Тестов-Пробный', 'ОРИТ', now_ms,
+                meta['expires'], message_id=mid, group=meta['group'])
+            request = {'botCard': self.identity.card, 'meta': meta,
+                       'recipientToken': seal(cards[0], message_id),
+                       'organizerToken': seal(cards[1], message_id),
+                       'organizerOtherToken': seal(cards[1], b64(os.urandom(16))),
+                       'unboundToken': self.identity.seal(cards[1], 'Тестов-Пробный', 'ОРИТ', now_ms, now_ms + 86400000)}
+            output, errors = process.communicate(compact(request) + '\n', timeout=45)
+            self.assertEqual(process.returncode, 0, errors)
+            result = json.loads(output)
+            for key in ('first', 'late', 'archive', 'last'):
+                self.assertEqual(result[key]['surname'], 'Тестов-Пробный')
+                self.assertEqual(result[key]['messageId'], message_id)
+                self.assertEqual(result[key]['group'], 'cardiology')
+            for key in ('expired', 'archiveExpired', 'wrongRecipient', 'wrongOrganizer',
+                        'substitutedID', 'substitutedGroup', 'unboundRejected'):
+                self.assertTrue(result[key], key)
         finally:
             if process.poll() is None:
                 process.kill();process.communicate()

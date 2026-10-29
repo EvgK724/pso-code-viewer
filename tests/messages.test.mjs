@@ -51,7 +51,7 @@ test('expired/future messages, invalid groups and overlong requests rejected',as
   const r=await sealMessage(sender,[rc],content,meta());
   await assert.rejects(openMessage(recipient,r.entries[0].token,r.payload,[sc],r.payload.expires),/истёк/);
   await assert.rejects(openMessage(recipient,r.entries[0].token,r.payload,[sc],r.payload.issued-31000),/время/);
-  for(const patch of [{group:'public'},{kind:'photo'},{id:'a'},{issued:0},{expires:Date.now()-1},{expires:Date.now()+86400001*2}])await assert.rejects(sealMessage(sender,[rc],content,{...meta(),...patch}));
+  for(const patch of [{group:'public'},{kind:'photo'},{id:'a'},{issued:0},{expires:Date.now()-1},{expires:Date.now()+2*86400000+60000}])await assert.rejects(sealMessage(sender,[rc],content,{...meta(),...patch}));
   assert.throws(()=>validateMessagePayload({...r.payload,ciphertext:'A'.repeat(MAX_MESSAGE_CIPHERTEXT_CHARS+1)}));
   for(const t of ['',r.entries[0].token+'.x',r.entries[0].token.replace('PSO2','PSO1')])assert.throws(()=>inspectMessageToken(t));
 });
@@ -73,4 +73,35 @@ test('reply body and parent binding are encrypted and signed for the exact recip
   await assert.rejects(openMessage(stranger,r.entries[0].token,r.payload,[rc]));
   for(const patch of [{replyTo:meta().id},{kind:'review'},{replyTo:undefined}])await assert.rejects(openMessage(sender,r.entries[0].token,{...r.payload,...patch},[rc]));
   for(const patch of [{replyTo:undefined},{replyTo:m.id},{replyTo:'bad'},{kind:'review'}])await assert.rejects(sealMessage(recipient,[sc],{comment:'Ответ'},{...m,...patch}));
+});
+
+test('group replies bind parent and direction for all four groups without weakening old private replies',async()=>{
+  for(const group of ['cardiology','orit','rehab1','rehab2']){
+    const m={...meta(),group,kind:'group_reply',replyTo:meta().id};
+    const sealed=await sealMessage(sender,[rc,xc],{comment:'Ответ всей группе'},m,{archive:true});
+    for(const [device,index] of [[recipient,0],[stranger,1]]){
+      const value=await openMessage(device,sealed.entries[index].token,sealed.payload,[sc]);
+      assert.equal(value.kind,'group_reply');assert.equal(value.replyTo,m.replyTo);assert.equal(value.group,group);
+    }
+    for(const patch of [{replyTo:meta().id},{kind:'reply'},{kind:'review'},{group:group==='rehab1'?'rehab2':'rehab1'}])await assert.rejects(openMessage(recipient,sealed.entries[0].token,{...sealed.payload,...patch},[sc]));
+    for(const patch of [{replyTo:undefined},{replyTo:m.id},{replyTo:'bad'}])await assert.rejects(sealMessage(sender,[rc],{comment:'Ответ'},{...m,...patch}));
+  }
+  for(const group of ['rehab1','rehab2'])await assert.rejects(sealMessage(sender,[rc],{comment:'Старый личный ответ'},{...meta(),group,kind:'reply',replyTo:meta().id}));
+});
+
+test('new first-stage discussions require no parent and signed metadata cannot change their kind or group',async()=>{
+  const m={...meta(),group:'rehab1',kind:'discussion'},sealed=await sealMessage(sender,[rc],{comment:'Обсудим реабилитационный план'},m,{archive:true});
+  const value=await openMessage(recipient,sealed.entries[0].token,sealed.payload,[sc]);
+  assert.equal(value.kind,'discussion');assert.equal(value.replyTo,undefined);assert.equal(value.comment,'Обсудим реабилитационный план');
+  for(const patch of [{kind:'review'},{kind:'group_reply',replyTo:meta().id},{group:'rehab2'},{replyTo:meta().id}])await assert.rejects(openMessage(recipient,sealed.entries[0].token,{...sealed.payload,...patch},[sc]));
+  for(const group of ['cardiology','orit','rehab2'])await assert.rejects(sealMessage(sender,[rc],{comment:'Обсуждение'},{...m,group}));
+  await assert.rejects(sealMessage(sender,[rc],{comment:'Обсуждение'},{...m,replyTo:meta().id}));
+});
+
+test('comments preserve joined medical emoji while hidden word joins and bidi controls remain forbidden',async()=>{
+  const comment='👩‍⚕️ Готово ✅ 👨🏽‍⚕️ Спасибо! 👩‍👩‍👧‍👦 🏳️‍🌈';
+  const sealed=await sealMessage(sender,[rc],{comment},meta());
+  assert.equal((await openMessage(recipient,sealed.entries[0].token,sealed.payload,[sc])).comment,comment);
+  for(const value of ['Ива\u200dнов','\u200d👩','👩\u200d','👩\u200dА','A\u200d⚕️','👩\u200c⚕️','👩\u200d\u200d⚕️','Готово\u202e','Готово\u2066','Готово\u200b'])await assert.rejects(sealMessage(sender,[rc],{comment:value},meta()));
+  await assert.rejects(sealMessage(sender,[rc],{surname:'Ива\u200dнов'},meta()));
 });

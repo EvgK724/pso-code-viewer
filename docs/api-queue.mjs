@@ -29,7 +29,7 @@ export async function runApiRequest(work, {retry=false, sleep=wait, random=Math.
   }
 }
 
-const errorCodes=new Set(['request_rejected','clock_skew','unlock_required','id_conflict','roster_changed','replay']);
+const errorCodes=new Set(['request_rejected','clock_skew','unlock_required','id_conflict','roster_changed','replay','history_full','history_unavailable','group_too_large']);
 const diagnosticCodes=new Set(['database_conflict','database_deadline','database_unavailable','invalid_record','invalid_result','result_limit','database_closed','transaction_closed','operation_limit','internal_error']);
 const stages=new Set(['validation','accept','status','directory','pending','invite','claim','approve','revoke','resolve','create','configuration','database_connect','organizer_check','handler_setup','dispatch']);
 

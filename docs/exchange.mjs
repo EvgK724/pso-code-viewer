@@ -128,8 +128,9 @@ export async function openSurname(device, token, contactsArray, now=Date.now()) 
     const plaintext = await crypto.subtle.decrypt({name:'RSA-OAEP',label:enc.encode(DOMAIN)},device.encryption.privateKey,ciphertext);
     try { data=JSON.parse(dec.decode(plaintext)); } finally { new Uint8Array(plaintext).fill(0); }
   } catch { throw new Error('Не удалось проверить подпись или расшифровать ссылку.'); }
-  if (!exact(data,'d,i,j,n,x') || !['','ПСО','ОРИТ'].includes(data.d) || surnameValue(data.n)!==data.n) throw new Error('Зашифрованная запись имеет неверный формат.');
-  try { unb64(data.j,12); } catch { throw new Error('Зашифрованная запись имеет неверный формат.'); }
-  if (!Number.isSafeInteger(data.i) || !Number.isSafeInteger(data.x) || data.x <= data.i || data.x-data.i > MAX_TTL || data.x-data.i < 60000 || data.i > now+30000 || data.x <= now) throw new Error('Срок ссылки истёк или время её создания некорректно.');
-  return {surname:data.n,department:data.d,code:'ПСО-'+data.j,senderName,issued:data.i,expires:data.x};
+  const bound=exact(data,'d,g,i,j,n,x');
+  if ((!bound&&!exact(data,'d,i,j,n,x')) || (bound&&!['cardiology','orit'].includes(data.g)) || !['','ПСО','ОРИТ'].includes(data.d) || surnameValue(data.n)!==data.n) throw new Error('Зашифрованная запись имеет неверный формат.');
+  try { unb64(data.j,bound?16:12); } catch { throw new Error('Зашифрованная запись имеет неверный формат.'); }
+  if (!Number.isSafeInteger(data.i) || data.i<=0 || !Number.isSafeInteger(data.x) || data.x <= data.i || data.x-data.i > (bound?2*MAX_TTL:MAX_TTL) || data.x-data.i < 60000 || data.i > now+30000 || data.x <= now) throw new Error('Срок ссылки истёк или время её создания некорректно.');
+  return {surname:data.n,department:data.d,code:'ПСО-'+data.j,senderName,issued:data.i,expires:data.x,...(bound?{messageId:data.j,group:data.g}:{})};
 }
