@@ -2,7 +2,7 @@
 // RFC 8292 (VAPID). Only a lookup capability is carried, never a surname.
 // WebCrypto is used in both Deno and Node; there are no runtime dependencies.
 const encoder = new TextEncoder();
-const MAX_TTL = 86400;
+const MAX_TTL = 172800;
 const MAX_ENDPOINT_LENGTH = 2048;
 const RECORD_SIZE = 4096;
 const b64 = bytes => btoa(String.fromCharCode(...new Uint8Array(bytes))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
@@ -121,7 +121,7 @@ export async function sendWebPush(subscription, keys, payload, {
     if (!Number.isSafeInteger(at) || !Number.isInteger(ttl) || ttl < 0 || ttl > MAX_TTL ||
         !Number.isInteger(timeout) || timeout < 1 || timeout > 30000) fail();
     if (!exact(payload, 'expires,id,v') || ![1,2].includes(payload.v) || !Number.isSafeInteger(payload.expires) ||
-        payload.expires <= at || payload.expires > at + MAX_TTL * 1000) fail();
+        payload.expires <= at || payload.expires > at + (payload.v === 2 ? MAX_TTL : 86400) * 1000) fail();
     if (payload.id === null) {
       // A user's own opt-in test can open the app home without a patient link.
       if (payload.v !== 1 || payload.expires > at + 300000) fail();

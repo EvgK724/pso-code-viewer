@@ -7,6 +7,7 @@ import vm from 'node:vm';
 import {readFile} from 'node:fs/promises';
 import {webcrypto} from 'node:crypto';
 import {performance} from 'node:perf_hooks';
+import {sealBoundBotToken} from './helpers/bot-token.mjs';
 import * as careRouting from '../docs/care-routing.mjs';
 import * as cryptography from '../docs/crypto.mjs';
 import * as exchange from '../docs/exchange.mjs';
@@ -70,6 +71,7 @@ class Element {
   scrollIntoView(options) { this.scrollCalls.push(options); }
   focus(options) { this.focusCalls.push(options); }
   select() {}
+  setSelectionRange(start,end) { this.selectionStart=start;this.selectionEnd=end; }
 }
 
 async function waitUntil(condition, description) {
@@ -89,7 +91,7 @@ async function harness(persistent, initialHash = '', {
   readText = '', rejectRead = false, deferRead = false, standalone = false, legacyStandalone = false, initialHidden = false,
   nativeCopy = undefined, nativeShare = undefined, shortlinkEndpoint = '', shortlinkFetch = undefined,
   directEndpoint = '', directFetch = undefined,
-  deviceAuthEndpoint = '', deviceAuthFetch = undefined,
+  deviceAuthEndpoint = '', deviceAuthFetch = undefined, deviceUnlockEnsure = undefined,
   teamEndpoint = '', teamFetch = undefined, pushEndpoint = '', pushFetch = undefined, notificationPermission = 'default', pushSubscription = null, permissionResult = 'granted', rejectSubscribe = false, rejectUnsubscribe = false
 } = {}) {
   const elements = new Map();
@@ -205,10 +207,11 @@ async function harness(persistent, initialHash = '', {
     constructor(endpoint) { super(endpoint, {fetch:shortlinkFetch}); }
   }
   class InjectedPushClient extends push.PushClient { constructor(endpoint){super(endpoint,{fetch:pushFetch});} }
-  class InjectedDirectClient extends direct.DirectClient {constructor(endpoint){super(endpoint,{fetch:directFetch});}}
+  let deliveryRetryStarted=0,deliveryRetryCompleted=0;
+  class InjectedDirectClient extends direct.DirectClient {constructor(endpoint){super(endpoint,{fetch:directFetch});}async retry(device){deliveryRetryStarted++;try{return await super.retry(device);}finally{deliveryRetryCompleted++;}}}
   const pinStorage={getItem:key=>persistent.pins.get(key)||null,setItem:(key,value)=>persistent.pins.set(key,value)};
   class InjectedTeamClient extends team.TeamClient {constructor(endpoint){super(endpoint,{fetch:teamFetch});}}
-  class InjectedDeviceUnlockClient extends deviceUnlock.DeviceUnlockClient {constructor(endpoint){super(endpoint,{fetch:deviceAuthFetch});}}
+  class InjectedDeviceUnlockClient extends deviceUnlock.DeviceUnlockClient {constructor(endpoint){super(endpoint,{fetch:deviceAuthFetch});}ensure(device){return deviceUnlockEnsure?deviceUnlockEnsure(device):super.ensure(device);}}
   const exportsFor = {
     './care-routing.mjs':careRouting, './crypto.mjs':cryptography, './exchange.mjs':exchange, './storage.mjs':storage, './sharing.mjs':sharing,
     './shortlinks.mjs':{...shortlinks, ShortLinkClient:InjectedShortLinkClient},
@@ -255,8 +258,10 @@ async function harness(persistent, initialHash = '', {
     },
     async event(id, type = 'click') { await el(id).fire(type); },
     async idle() { await waitUntil(() => !el('open').disabled, 'async operation completion'); },
+    async retryIdle() { await waitUntil(()=>deliveryRetryStarted===deliveryRetryCompleted,'delivery retry completion'); },
     async hide() { document.hidden = true; await docListeners.get('visibilitychange')(); },
     async show() { document.hidden = false; await docListeners.get('visibilitychange')(); },
+    async blur() { await globalListeners.get('blur')?.(); },
     async pagehide() { await globalListeners.get('pagehide')(); },
     async hashchange(hash) { location.hash = hash; await globalListeners.get('hashchange')(); },
     advance(milliseconds) { clock += milliseconds; for (const fn of [...intervals.values()]) fn(); }
@@ -1507,7 +1512,7 @@ async function directFixture(roles=['admin','neurologist','cardiologist']){
  const base=await teamFixture(stores,roles);const members=base.members.map(member=>({...member})),root=members[0];
  for(const member of members)member.approvalProof=await recipientTrust.makeRecipientGrant(stores[0].device,member);
  for(const store of stores)await recipientTrust.pinOrganizerCard(root.card,{confirmed:true,storage:{getItem:k=>store.pins.get(k)||null,setItem:(k,v)=>store.pins.set(k,v)}});
- const records=new Map(),requests=[];let failAfterCreate=false,openTransform=x=>x,openGate=null,createPush='accepted';
+ const records=new Map(),requests=[];let failAfterCreate=false,openTransform=x=>x,openGate=null,createPush='accepted',historyAvailable=true,historyTransform=x=>x;
  const respond=(value,status=200)=>new Response(JSON.stringify(value),{status,headers:{'Content-Type':'application/json'}});
  const fetcher=async(url,options)=>{
   const envelope=JSON.parse(options.body).envelope,{signature,...unsigned}=envelope;requests.push(envelope);
@@ -1535,6 +1540,16 @@ async function directFixture(roles=['admin','neurologist','cardiologist']){
    return respond({id:envelope.data.id,expires:envelope.data.expires,push:createPush});
   }
   if(envelope.op==='retry')return respond({accepted:1,queued:0});
+  if(envelope.op==='history'){
+   if(!historyAvailable)return respond({error:'request_rejected'},400);
+   const items=[...records.values()].filter(r=>envelope.data.source==='bot'?member.role==='admin'&&r.sender.role==='bot'&&r.organizerToken:r.sender.id===member.id).map(r=>({id:r.id,group:r.group,kind:r.kind,issued:r.issued,expires:r.expires,createdAt:r.issued+5,archiveUntil:r.issued+messages.HISTORY_TTL,recipientCount:r.entries.length,openedCount:r.opened.size,hasContent:!!r.senderToken||!!r.organizerToken}));
+   return respond({items,next:null});
+  }
+  if(envelope.op==='history_open'){
+   if(openGate)await openGate;
+   const r=records.get(envelope.data.id);if(!r)return respond({error:'not_found'},404);if(r.sender.id!==member.id&&!(member.role==='admin'&&r.sender.role==='bot'&&r.organizerToken))return respond({error:'forbidden'},403);
+   return respond(historyTransform({meta:{id:r.id,group:r.group,kind:r.kind,issued:r.issued,expires:r.expires,...(careRouting.isReplyKind(r.kind)?{replyTo:r.replyTo}:{})},payload:r.senderToken?r.payload:null,senderToken:r.senderToken||null,organizerToken:r.organizerToken||null,senderApprovalProof:r.organizerToken?r.sender.approvalProof:null,createdAt:r.issued+5,archiveUntil:r.issued+messages.HISTORY_TTL,senderCard:r.sender.card,senderName:r.sender.name,senderRole:r.sender.role,recipients:r.entries.map(e=>{const recipient=members.find(m=>m.id===e.recipientId);return {id:recipient.id,name:recipient.name,role:recipient.role,openedAt:r.opened.has(recipient.id)?r.issued+10:null,pushState:'accepted',pushAcceptedAt:r.issued+7};})}));
+  }
   if(envelope.op==='inbox'||envelope.op==='outbox'){
    const own=member.id;const items=[...records.values()].filter(r=>envelope.op==='outbox'?r.sender.id===own:r.entries.some(e=>e.recipientId===own)).map(r=>({id:r.id,group:r.group,kind:r.kind,issued:r.issued,expires:r.expires,senderId:r.sender.id,senderName:r.sender.name,openedAt:r.opened.has(own)?r.issued+1:null,recipientCount:r.entries.length,openedCount:r.opened.size}));
    return respond({items,next:null});
@@ -1543,12 +1558,12 @@ async function directFixture(roles=['admin','neurologist','cardiologist']){
    if(openGate)await openGate;
    const r=records.get(envelope.data.id);if(!r)return respond({error:'not_found'},404);
    const entry=r.entries.find(e=>e.recipientId===member.id);if(!entry)return respond({error:'forbidden'},403);
-   return respond(openTransform({token:entry.token,payload:r.payload||null,senderCard:r.sender.card,senderName:r.sender.name,senderRole:r.sender.role,senderApprovalProof:r.sender.approvalProof,meta:{id:r.id,group:r.group,kind:r.kind,issued:r.issued,expires:r.expires,...(r.kind==='reply'?{replyTo:r.replyTo}:{})}}));
+   return respond(openTransform({token:entry.token,payload:r.payload||null,senderCard:r.sender.card,senderName:r.sender.name,senderRole:r.sender.role,senderApprovalProof:r.sender.approvalProof,meta:{id:r.id,group:r.group,kind:r.kind,issued:r.issued,expires:r.expires,...(careRouting.isReplyKind(r.kind)?{replyTo:r.replyTo}:{})}}));
   }
   if(envelope.op==='ack'){records.get(envelope.data.id).opened.add(member.id);return respond({openedAt:Date.now()});}
   return respond({error:'unsupported'},400);
  };
- return {stores,members,records,requests,setFailure(v){failAfterCreate=v;},setPush(v){createPush=v;},transform(fn){openTransform=fn;},gate(p){openGate=p;},options:{...base.options,directEndpoint:'https://direct.example/api',directFetch:fetcher}};
+ return {stores,members,records,requests,setFailure(v){failAfterCreate=v;},setPush(v){createPush=v;},setHistory(v){historyAvailable=v;},transformHistory(fn){historyTransform=fn;},transform(fn){openTransform=fn;},gate(p){openGate=p;},options:{...base.options,directEndpoint:'https://direct.example/api',directFetch:fetcher}};
 }
 async function directSend(app,{surname='Иванов',comment='Проверить историю',group='cardiology'}={}){
  await app.event('show-write');app.el('recipient').value=group;await app.event('recipient','change');
@@ -1568,15 +1583,15 @@ test('direct review is encrypted before network/persistence, opens from inbox, a
  assert.equal(reader.el('surname').textContent,'Иванов');assert.equal(reader.el('result-comment').textContent,'Проверить историю');
  await waitUntil(()=>record.opened.has(s.members[2].id),'successful display acknowledgement');
  await reader.hide();assert.equal(reader.el('result').hidden,true);assert.equal(reader.el('surname').textContent,'');assert.equal(reader.el('result-comment').textContent,'');await reader.show();assert.equal(reader.el('result').hidden,true);
- await writer.event('show-read');await writer.event('box-outbox');await waitUntil(()=>writer.el('inbox-list').querySelectorAll('p').some(p=>p.textContent.includes('Открыли: 1')),'outgoing receipt');
+ await writer.event('show-read');await writer.event('box-outbox');await waitUntil(()=>writer.el('inbox-list').querySelectorAll('p').some(p=>p.textContent.includes('Открыто на устройствах: 1')),'outgoing receipt');
  assert.match(writer.el('inbox-status').textContent,/не выполненную консультацию/);
 });
 
 test('lost send response retries the same durable encrypted message without duplicates after app restart',async()=>{
  const s=await directFixture(),writer=await harness(s.stores[1],'',s.options);s.setFailure(true);await directSend(writer,{surname:'Петров'});
- assert.equal(s.records.size,1);assert.equal(s.stores[1].pending.size,1);const queued=[...s.stores[1].pending.values()][0];assert.ok(!JSON.stringify(queued).includes('Петров'));
+ assert.equal(s.records.size,1);assert.equal(s.stores[1].pending.size,1);const queued=[...s.stores[1].pending.values()][0];assert.ok(!JSON.stringify(queued).includes('Петров'));assert.ok(queued.senderToken);
  const restarted=await harness(s.stores[1],'',s.options);await waitUntil(()=>!restarted.el('retry-pending').hidden,'persistent retry button');s.setFailure(false);await restarted.event('retry-pending');
- await waitUntil(()=>s.stores[1].pending.size===0,'pending delivered');assert.equal(s.records.size,1);assert.equal(s.requests.filter(r=>r.op==='create').length,2);assert.equal(s.requests.filter(r=>r.op==='create')[1].data.id,queued.id);
+ await waitUntil(()=>s.stores[1].pending.size===0,'pending delivered');assert.equal(s.records.size,1);assert.equal(s.requests.filter(r=>r.op==='create').length,2);assert.equal(s.requests.filter(r=>r.op==='create')[1].data.id,queued.id);assert.equal(s.requests.filter(r=>r.op==='create')[1].data.senderToken,queued.senderToken);
 });
 
 test('direct opening fails closed for invalid sender grant, signed-role mismatch and metadata substitution, without acknowledgement',async t=>{
@@ -1704,6 +1719,7 @@ test('an explicit authorization rejection or revoked status clears the retained 
 
 test('approval progress blocks duplicate clicks and periodic work; HTTP stage survives failed refresh and recovery',async()=>{
  const s=await adminUiFixture(),app=await harness(s.stores[0],'',s.options);
+ await waitUntil(()=>s.events.includes('direct:retry'),'startup retry before approval');
  const pending=app.el('team-pending'),approve=pending.querySelectorAll('button')[0],check=pending.querySelectorAll('input')[0];
  check.checked=true;await check.fire('change');
  let release;s.gateApproval(new Promise(resolve=>release=resolve));s.faults.approve=503;s.failRefreshAfterApprove(true);
@@ -1878,7 +1894,7 @@ test('an incoming public card opens its confirmation in settings instead of a hi
  assert.equal(recipient.contacts.size,0);
 });
 
-test('specialists reply with encrypted content only to the verified original sender',async t=>{
+test('specialists reply with encrypted content to every current specialist and PSO sender except themselves',async t=>{
  for(const [role,group] of [['cardiologist','cardiology'],['intensivist','orit']])await t.test(role,async()=>{
   const s=await directFixture(['admin','neurologist',role,role]);
   const writer=await harness(s.stores[1],'',s.options);await directSend(writer,{group});
@@ -1887,23 +1903,23 @@ test('specialists reply with encrypted content only to the verified original sen
   await reader.hashchange('#m='+original.id);await reader.idle();
   assert.equal(reader.el('reply-message').hidden,false,reader.el('notice').textContent);
   await reader.event('reply-message');assertScreen(reader,'write');
-  assert.equal(reader.el('reply-recipient').textContent,s.members[1].name);
+  assert.equal(reader.el('reply-recipient').textContent,careRouting.GROUP_LABELS[group]);
   assert.equal(reader.el('recipient-routing').hidden,true);
   assert.equal(reader.el('compose-surname').value,'Иванов');
   assert.equal(reader.el('compose-comment').value,'');assert.equal(reader.el('photo-preview').hidden,true);
   reader.el('compose-comment').value='Ответ врача: прошу уточнить';
   await reader.event('compose-form','submit');await reader.idle();
-  const reply=[...s.records.values()].find(r=>r.kind==='reply');assert.ok(reply,reader.el('notice').textContent);
+  const reply=[...s.records.values()].find(r=>r.kind==='group_reply');assert.ok(reply,reader.el('notice').textContent);
   assert.equal(reply.replyTo,original.id);assert.equal(reply.group,group);
-  assert.deepEqual(reply.entries.map(e=>e.recipientId),[s.members[1].id]);
-  const sent=s.requests.find(r=>r.op==='create'&&r.data.kind==='reply');
+  assert.deepEqual(reply.entries.map(e=>e.recipientId),[s.members[0].id,s.members[1].id,s.members[3].id]);
+  const sent=s.requests.find(r=>r.op==='create'&&r.data.kind==='group_reply');
   assert.ok(!JSON.stringify(sent).includes('Иванов'));assert.ok(!JSON.stringify(sent).includes('прошу уточнить'));
   assert.equal(reader.el('compose-comment').value,'');assert.equal(reader.el('reply-context').hidden,true);
   await writer.hashchange('#m='+reply.id);await writer.idle();
   assert.equal(writer.el('result').hidden,false,writer.el('notice').textContent);
   assert.equal(writer.el('result-comment').textContent,'Ответ врача: прошу уточнить');
   assert.equal(writer.el('reply-message').hidden,false,'Original sender can continue the exchange');
-  await writer.event('reply-message');assert.equal(writer.el('reply-recipient').textContent,s.members[2].name);
+  await writer.event('reply-message');assert.equal(writer.el('reply-recipient').textContent,careRouting.GROUP_LABELS[group]);
  });
 });
 
@@ -1929,7 +1945,7 @@ test('a reply with substituted parent metadata cannot reveal content or acknowle
  const original=[...s.records.values()][0],reader=await harness(s.stores[2],'',s.options);
  await reader.hashchange('#m='+original.id);await reader.idle();await reader.event('reply-message');
  reader.el('compose-comment').value='Защищённый ответ';await reader.event('compose-form','submit');await reader.idle();
- const reply=[...s.records.values()].find(r=>r.kind==='reply');assert.ok(reply,reader.el('notice').textContent);
+ const reply=[...s.records.values()].find(r=>r.kind==='group_reply');assert.ok(reply,reader.el('notice').textContent);
  const before=s.requests.filter(r=>r.op==='ack').length;
  s.transform(r=>({...r,meta:{...r.meta,replyTo:direct.newMessageID()}}));
  await writer.hashchange('#m='+reply.id);await writer.idle();
@@ -1945,7 +1961,7 @@ test('a specialist retries a durable encrypted reply after a lost response witho
  reader.el('compose-comment').value='Ответ для повтора';s.setFailure(true);
  await reader.event('compose-form','submit');await reader.idle();
  assert.equal(s.stores[2].pending.size,1,reader.el('notice').textContent);
- const queued=[...s.stores[2].pending.values()][0];assert.equal(queued.kind,'reply');assert.ok(!JSON.stringify(queued).includes('Ответ для повтора'));
+ const queued=[...s.stores[2].pending.values()][0];assert.equal(queued.kind,'group_reply');assert.ok(queued.senderToken);assert.ok(!JSON.stringify(queued).includes('Ответ для повтора'));
  const restarted=await harness(s.stores[2],'',s.options);await waitUntil(()=>!restarted.el('retry-pending').hidden,'reply retry available');
  s.setFailure(false);await restarted.event('retry-pending');await waitUntil(()=>s.stores[2].pending.size===0,'reply retry delivered');
  assert.equal(s.records.size,2);assert.equal(s.requests.filter(r=>r.op==='create'&&r.data.id===queued.id).length,2);
@@ -1976,26 +1992,26 @@ test('care direction controls preserve the editable draft and select a complete 
   const reader=await harness(s.stores[i],'',s.options);await reader.hashchange('#m='+record.id);await reader.idle();
   assert.equal(reader.el('surname').textContent,'Примеров',reader.el('notice').textContent);
   assert.equal(reader.el('result-comment').textContent,'Оценить речь и ходьбу');
-  assert.equal(reader.el('show-write').hidden,true);assert.equal(reader.el('reply-message').hidden,true);
+  assert.equal(reader.el('show-write').hidden,false);assert.equal(reader.el('reply-message').hidden,false);
   assert.ok(reader.el('inbox-list').querySelectorAll('p').some(p=>p.textContent.includes('Реабилитация · I этап')));
  }
  const otherStage=await harness(s.stores[7],'',s.options);await otherStage.hashchange('#m='+record.id);await otherStage.idle();
  assert.equal(otherStage.el('result').hidden,true);assert.equal(otherStage.el('surname').textContent,'');
 });
 
-test('organizer sends to every OMR specialist while rehab recipients and bot cannot compose or reply',async()=>{
+test('organizer sends to every OMR specialist who can reply but cannot start messages in other directions',async()=>{
  const s=await directFixture(['admin','neurologist','rehab2_physician','rehab2_physician','psychologist','bot']);
  const organizer=await harness(s.stores[0],'',s.options);await organizer.event('show-write');await organizer.event('direction-rehab2');
  organizer.el('compose-surname').value='Учебный';organizer.el('compose-comment').value='Для второго этапа';
  await organizer.event('compose-form','submit');await organizer.idle();
  const record=[...s.records.values()][0];assert.ok(record,organizer.el('notice').textContent);assert.equal(record.group,'rehab2');
  assert.deepEqual(record.entries.map(e=>e.recipientId).sort(),s.members.slice(2,4).map(m=>m.id).sort());
- for(let i=2;i<s.stores.length;i++){
+ for(const i of [2,3,5]){
   const reader=await harness(s.stores[i],'',s.options);assert.equal(reader.el('care-directions').hidden,true);
   await reader.event('show-write');await reader.event('direction-rehab1');reader.el('compose-comment').value='Не отправлять';
   await reader.event('compose-form','submit');await reader.idle();assert.equal(s.records.size,1);
   assert.equal(reader.el('screen-write').hidden,true);
-  if(i<4){await reader.hashchange('#m='+record.id);await reader.idle();assert.equal(reader.el('surname').textContent,'Учебный');assert.equal(reader.el('reply-message').hidden,true);}
+  if(i<4){await reader.hashchange('#m='+record.id);await reader.idle();assert.equal(reader.el('surname').textContent,'Учебный');assert.equal(reader.el('reply-message').hidden,false);}
  }
 });
 
@@ -2012,7 +2028,7 @@ test('empty rehab group and invalid role grant stop sending before persistence a
 });
 
 
-test('queued rehabilitation push is retried by active human PSO senders without a local pending message and is rate limited',async()=>{
+test('queued rehabilitation push is retried by active human senders without a local pending message and is rate limited',async()=>{
  const s=await directFixture(['admin','neurologist','rehab2_physician','bot']);s.setPush('queued');
  const writer=await harness(s.stores[1],'',s.options);await waitUntil(()=>s.requests.some(r=>r.op==='retry'),'startup server retry');
  await writer.event('show-write');await writer.event('direction-rehab2');writer.el('compose-comment').value='Тестовое сообщение';
@@ -2025,9 +2041,179 @@ test('queued rehabilitation push is retried by active human PSO senders without 
  assert.equal(s.records.size,1,'Notification retry never creates another message');
  await writer.hide();writer.advance(60000);await writer.idle();assert.equal(s.requests.filter(r=>r.op==='retry').length,initial+1);
  await writer.show();await waitUntil(()=>s.requests.filter(r=>r.op==='retry').length===initial+2,'foreground server push retry');
- for(const index of [2,3]){
-  const before=s.requests.filter(r=>r.op==='retry').length,recipient=await harness(s.stores[index],'',s.options);
-  recipient.advance(60000);await recipient.hide();await recipient.show();await recipient.idle();
-  assert.equal(s.requests.filter(r=>r.op==='retry').length,before,'Recipients and bot do not retry rehabilitation notifications');
- }
+ const before=s.requests.filter(r=>r.op==='retry').length,recipient=await harness(s.stores[2],'',s.options);await waitUntil(()=>s.requests.filter(r=>r.op==='retry').length===before+1,'specialist retry startup');await recipient.retryIdle();
+ recipient.advance(60000);await waitUntil(()=>s.requests.filter(r=>r.op==='retry').length===before+2,'specialist periodic retry');
+ const botBefore=s.requests.filter(r=>r.op==='retry').length,bot=await harness(s.stores[3],'',s.options);bot.advance(60000);await bot.hide();await bot.show();await bot.idle();assert.equal(s.requests.filter(r=>r.op==='retry').length,botBefore,'Bot never drives human notification retries');
+});
+
+test('direct sends use48hour recipient access and encrypted90day own history while legacy links retain24hours',async()=>{
+ const s=await directFixture(),writer=await harness(s.stores[1],'',s.options);
+ assert.equal(writer.el('expiry').value,'2880');assert.deepEqual(writer.el('expiry').options.map(o=>o.value),['60','360','1440','2880']);
+ await directSend(writer,{surname:'Архивная',comment:'Только зашифрованная копия'});
+ const record=[...s.records.values()][0];assert.equal(record.expires-record.issued,48*3600000);assert.ok(record.senderToken);
+ const token=messages.inspectMessageToken(record.senderToken);assert.equal(token.recipientId,s.members[1].id);assert.equal(record.entries.length,1);
+ assert.ok(!JSON.stringify(s.requests).includes('Архивная'));assert.ok(!JSON.stringify(s.requests).includes('Только зашифрованная копия'));
+ await writer.event('show-read');await writer.event('box-outbox');await waitUntil(()=>writer.el('inbox-list').querySelectorAll('button').length===1,'own history list');
+ assert.ok(!writer.el('inbox-list').querySelectorAll('p').some(p=>p.textContent.includes('Архивная')));
+ assert.match(writer.el('inbox-status').textContent,/90 дней.*48 часов/);
+ await writer.el('inbox-list').querySelectorAll('button')[0].fire('click');await writer.idle();
+ assert.equal(writer.el('history-detail').hidden,false);assert.match(writer.el('history-saved').textContent,/Сохранено на сервере/);assert.ok(writer.el('history-id').textContent.includes(record.id));
+ assert.match(writer.el('history-expiry').textContent,/Получателям.*Ваша история/);assert.equal(writer.el('result').hidden,true);
+ assert.ok(writer.el('history-recipients').querySelectorAll('p').some(p=>p.textContent.includes('Принято службой уведомлений')));
+ assert.ok(writer.el('history-recipients').querySelectorAll('p').some(p=>p.textContent==='Открытие пока не отмечено'));
+ await writer.event('history-show');await writer.idle();assert.equal(writer.el('surname').textContent,'Архивная');assert.equal(writer.el('reply-message').hidden,true);
+ assert.equal(s.requests.filter(r=>r.op==='ack').length,0,'Sender history is never a recipient read receipt');
+ writer.advance(30001);assert.equal(writer.el('result').hidden,true);assert.equal(writer.el('surname').textContent,'');
+ await writer.event('history-show');await writer.idle();assert.equal(writer.el('result').hidden,false);
+ await writer.blur();assert.equal(writer.el('result').hidden,true);assert.equal(writer.el('history-detail').hidden,true);assert.equal(writer.el('result-comment').textContent,'');
+ const legacy=await harness(await persistentDevice());assert.equal(legacy.el('expiry').value,'1440');assert.ok(legacy.el('expiry').options.every(o=>Number(o.value)<=1440));assert.equal(legacy.el('archive-compose-help').hidden,true);
+});
+
+test('expired recipient access does not hide live senderarchive and per-device status distinguishes opens from notificationacceptance',async()=>{
+ const s=await directFixture(['admin','neurologist','cardiologist','cardiologist']),issued=Date.now()-3*86400000,id=direct.newMessageID(),meta={id,group:'cardiology',kind:'review',issued,expires:issued+48*3600000};
+ const contacts=await Promise.all(s.members.slice(2).map(async m=>({...await exchange.importPublicCard(m.card),verified:true})));
+ const data=(await readFile(new URL('./fixtures/review.jpg',import.meta.url))).toString('base64url'),photo={mime:'image/jpeg',data,width:3,height:2};
+ const originalNow=Date.now;let sealed;
+ try{Date.now=()=>issued;sealed=await messages.sealMessage(s.stores[1].device,contacts,{surname:'Сохранённая',comment:'После двух суток',photo},meta,{archive:true});}finally{Date.now=originalNow;}
+ s.records.set(id,{...meta,...sealed,sender:s.members[1],opened:new Set([s.members[2].id])});
+ s.transformHistory(record=>({...record,recipients:record.recipients.map((recipient,i)=>i?{...recipient,pushState:'queued',pushAcceptedAt:null}:recipient)}));
+ const writer=await harness(s.stores[1],'',s.options);await writer.event('box-outbox');await waitUntil(()=>writer.el('inbox-list').querySelectorAll('button').length===1,'expired history list');
+ assert.ok(writer.el('inbox-list').querySelectorAll('p').some(p=>p.textContent==='Открыто на устройствах: 1 из 2'));
+ await writer.el('inbox-list').querySelectorAll('button')[0].fire('click');await writer.idle();
+ const statuses=writer.el('history-recipients').querySelectorAll('p').map(p=>p.textContent);
+ assert.ok(statuses.some(text=>text.startsWith('Открыто на устройстве:')));assert.ok(statuses.some(text=>text.includes('Срок доступа для получателей истёк. Подтверждения службы уведомлений нет.')));assert.ok(!statuses.some(text=>/ожидает повторной отправки|прочитал|доставлено/i.test(text)));
+ await writer.event('history-show');await writer.idle();assert.equal(writer.el('surname').textContent,'Сохранённая');assert.equal(writer.el('result-comment').textContent,'После двух суток');assert.equal(writer.el('result').hidden,false);
+ const url=writer.el('result-photo').src;assert.equal((await fetch(url)).status,200);
+ await writer.hide();assert.equal(writer.el('result').hidden,true);assert.equal(writer.el('history-detail').hidden,true);await assert.rejects(fetch(url));
+ await writer.show();assert.equal(writer.el('result').hidden,true);
+});
+
+test('senderhistory unlock guards details and cancels delayed reveals when page hides',async()=>{
+ const s=await directFixture(),writer=await harness(s.stores[1],'',s.options);await directSend(writer);
+ let ensureCalls=0,release;const authToken='a'.repeat(43),options={...s.options,deviceAuthEndpoint:'https://auth.example/api',deviceAuthFetch:async()=>new Response(JSON.stringify({enabled:false}),{headers:{'Content-Type':'application/json'}}),deviceUnlockEnsure:async()=>{ensureCalls++;return authToken;}};
+ const app=await harness(s.stores[1],'',options);await app.event('box-outbox');await waitUntil(()=>app.el('inbox-list').querySelectorAll('button').length===1,'unlock history list');
+ s.gate(new Promise(resolve=>release=resolve));const opening=app.el('inbox-list').querySelectorAll('button')[0].fire('click');
+ await waitUntil(()=>s.requests.some(r=>r.op==='history_open'),'history open started');assert.equal(ensureCalls,1);assert.equal(s.requests.find(r=>r.op==='history_open').data.unlockToken,authToken);
+ await app.hide();release();await opening;await app.idle();assert.equal(app.el('history-detail').hidden,true);assert.equal(app.el('result').hidden,true);
+ s.gate(null);await app.show();await waitUntil(()=>app.el('inbox-refresh').disabled===false,'foreground history');
+ await app.el('inbox-list').querySelectorAll('button')[0].fire('click');await app.idle();assert.equal(app.el('history-detail').hidden,false);
+ await app.event('history-show');await app.idle();assert.equal(ensureCalls,3);assert.equal(app.el('surname').textContent,'Иванов');
+ await app.event('show-settings');assert.equal(app.el('surname').textContent,'');assert.equal(app.el('history-detail').hidden,true);
+});
+
+test('legacy outgoing fallback and old messages never claim archived plaintext; active former senders keep own history',async()=>{
+ const s=await directFixture(),writer=await harness(s.stores[1],'',s.options);await directSend(writer);const record=[...s.records.values()][0];delete record.senderToken;
+ await writer.event('show-read');await writer.event('box-outbox');await waitUntil(()=>writer.el('inbox-list').querySelectorAll('button').length===1,'metadata history list');
+ await writer.event('history-recent');await waitUntil(()=>writer.el('inbox-refresh').disabled===false,'explicit recent outgoing');assert.match(writer.el('inbox-status').textContent,/Недавние исходящие/);assert.equal(writer.el('inbox-list').querySelectorAll('button').length,0);
+ await writer.event('history-recent');await waitUntil(()=>writer.el('inbox-list').querySelectorAll('button').length===1,'return from recent outgoing');
+ await writer.el('inbox-list').querySelectorAll('button')[0].fire('click');await writer.idle();assert.equal(writer.el('history-show').hidden,true);assert.match(writer.el('history-content-note').textContent,/не сохранялась/);
+ s.setHistory(false);await writer.event('history-close');await writer.event('inbox-refresh');await waitUntil(()=>writer.el('inbox-refresh').disabled===false,'fallback refresh');
+ assert.match(writer.el('inbox-status').textContent,/прежние исходящие.*ещё не обновлён/);assert.equal(writer.el('inbox-list').querySelectorAll('button').length,0);assert.ok(s.requests.some(r=>r.op==='outbox'));
+ s.setHistory(true);const card=await exchange.importPublicCard(await exchange.exportPublicCard(s.stores[1].device,'Бывший отправитель'));
+ const oldRoleOptions={...s.options,teamFetch:async(url,options)=>{const e=JSON.parse(options.body).envelope;if(e.op==='status')return new Response(JSON.stringify({state:'active',role:'psychologist',name:'Бывший отправитель'}),{headers:{'Content-Type':'application/json'}});return s.options.teamFetch(url,options);}};
+ const changed=await harness(s.stores[1],'',oldRoleOptions);assert.equal(changed.el('show-write').hidden,false);assert.equal(changed.el('box-outbox').hidden,false);
+ await changed.event('box-outbox');await waitUntil(()=>changed.el('inbox-list').querySelectorAll('button').length===1,'former sender history');await changed.el('inbox-list').querySelectorAll('button')[0].fire('click');await changed.idle();assert.equal(changed.el('history-detail').hidden,false);assert.equal(card.id,s.members[1].id);
+ const recipient=await harness(s.stores[2],'',s.options);await recipient.event('box-outbox');await waitUntil(()=>recipient.el('inbox-refresh').disabled===false,'other device history');assert.equal(recipient.el('inbox-list').querySelectorAll('button').length,0);
+});
+
+async function addBotArchiveFixture(service,{issued=Date.now(),surname='Автоматическая'}={}){
+ const bot=service.members.find(m=>m.role==='bot'),botIndex=service.members.indexOf(bot),recipient=service.members.find(m=>m.role==='cardiologist'),root=service.members[0];
+ bot.approvalProof=await recipientTrust.makeRecipientGrant(service.stores[0].device,bot,{now:issued-1000});
+ const id=direct.newMessageID(),meta={id,group:'cardiology',kind:'admission',issued,expires:issued+48*3600000};
+ const token=await sealBoundBotToken(service.stores[botIndex].device,recipient,meta,{surname,department:'ОРИТ'}),organizerToken=await sealBoundBotToken(service.stores[botIndex].device,root,meta,{surname,department:'ОРИТ'});
+ const record={...meta,entries:[{recipientId:recipient.id,token}],organizerToken,sender:bot,opened:new Set()};service.records.set(id,record);return record;
+}
+
+test('organizer bot history reveals only new encrypted bot copies for90days and resets when organizer role changes',async()=>{
+ const s=await directFixture(['admin','bot','cardiologist','neurologist']),record=await addBotArchiveFixture(s,{issued:Date.now()-3*86400000});
+ const legacyID=direct.newMessageID();s.records.set(legacyID,{...record,id:legacyID,organizerToken:null});
+ let role='admin';const app=await harness(s.stores[0],'',{...s.options,teamFetch:async(url,options)=>{if(JSON.parse(options.body).envelope.op==='status')return new Response(JSON.stringify({state:'active',role,name:s.members[0].name}),{headers:{'Content-Type':'application/json'}});return s.options.teamFetch(url,options);}});
+ await app.event('box-outbox');await waitUntil(()=>app.el('inbox-refresh').disabled===false,'own history ready');assert.equal(app.el('history-source').hidden,false);assert.equal(app.el('inbox-list').querySelectorAll('button').length,0);
+ await app.event('history-bot');await waitUntil(()=>app.el('inbox-list').querySelectorAll('button').length===1,'bot history list');assert.equal(app.el('history-bot').attributes.get('aria-pressed'),'true');assert.equal(app.el('history-recent').hidden,true);
+ assert.match(app.el('inbox-status').textContent,/после обновления.*90 дней.*48 часов.*Прежние сообщения/);assert.ok(!app.el('inbox-list').querySelectorAll('p').some(p=>p.textContent.includes('Автоматическая')));
+ await app.el('inbox-list').querySelectorAll('button')[0].fire('click');await app.idle();assert.equal(app.el('history-show').hidden,false);assert.match(app.el('history-content-note').textContent,/бота.*организатора/);assert.equal(app.el('result').hidden,true);
+ await app.event('history-show');await app.idle();assert.equal(app.el('surname').textContent,'Автоматическая');assert.equal(app.el('department').textContent,'ОРИТ');assert.match(app.el('case-code').textContent,/Отправлено ботом/);assert.match(app.el('result-label').textContent,/История бота/);assert.equal(app.el('reply-message').hidden,true);assert.equal(s.requests.filter(r=>r.op==='ack'||r.op==='create').length,0);
+ app.advance(30001);assert.equal(app.el('result').hidden,true);await app.event('history-show');await app.idle();assert.equal(app.el('result').hidden,false);
+ role='psychologist';await app.event('team-refresh');await app.idle();assert.equal(app.el('history-source').hidden,true);assert.equal(app.el('history-own').attributes.get('aria-pressed'),'true');assert.equal(app.el('history-detail').hidden,true);assert.equal(app.el('surname').textContent,'');assert.equal(app.el('show-write').hidden,false);
+ const neurologist=await harness(s.stores[3],'',s.options);await neurologist.event('box-outbox');await waitUntil(()=>neurologist.el('inbox-refresh').disabled===false,'neurologist history');assert.equal(neurologist.el('history-source').hidden,true);
+ const requests=s.requests.filter(r=>r.op==='history'&&r.data.source==='bot').length;await neurologist.event('history-bot');assert.equal(s.requests.filter(r=>r.op==='history'&&r.data.source==='bot').length,requests);
+});
+
+test('changing bot history source ignores delayed rows and unsupported bot history never falls back to own outgoing',async()=>{
+ const s=await directFixture(['admin','bot','cardiologist']),record=await addBotArchiveFixture(s),writer=await harness(s.stores[0],'',s.options);await directSend(writer,{surname:'Личная'});
+ let release,gate=null,started=false,denyBot=false;const options={...s.options,directFetch:async(url,init)=>{const envelope=JSON.parse(init.body).envelope;if(denyBot&&envelope.op==='history'&&envelope.data.source==='bot')return new Response(JSON.stringify({error:'request_rejected'}),{status:403,headers:{'Content-Type':'application/json'}});if(gate&&envelope.op==='history'&&envelope.data.source==='bot'){started=true;await gate;}return s.options.directFetch(url,init);}};
+ const app=await harness(s.stores[0],'',options);await app.event('box-outbox');await waitUntil(()=>app.el('inbox-list').querySelectorAll('button').length===1,'manual source list');
+ gate=new Promise(resolve=>release=resolve);await app.event('history-bot');await waitUntil(()=>started,'delayed bot list');await app.event('history-own');release();await waitUntil(()=>app.el('inbox-list').querySelectorAll('button').length===1&&!app.el('inbox-refresh').disabled,'manual source restored');
+ assert.equal(app.el('history-own').attributes.get('aria-pressed'),'true');assert.equal(app.el('inbox-list').querySelectorAll('strong')[0].textContent,'Проверочная история');assert.equal(app.el('history-recent').hidden,false);
+ await app.el('inbox-list').querySelectorAll('button')[0].fire('click');await app.idle();await app.event('history-show');await app.idle();assert.equal(app.el('surname').textContent,'Личная');
+ await app.event('history-close');s.setHistory(false);const before=s.requests.filter(r=>r.op==='outbox').length;await app.event('history-bot');await waitUntil(()=>!app.el('inbox-refresh').disabled,'unsupported bot source');assert.equal(s.requests.filter(r=>r.op==='outbox').length,before);assert.equal(app.el('inbox-list').querySelectorAll('button').length,0);assert.equal(app.el('surname').textContent,'');assert.equal(s.records.has(record.id),true);
+ denyBot=true;await app.event('inbox-refresh');await waitUntil(()=>!app.el('inbox-refresh').disabled,'bot history access refusal');assert.match(app.el('inbox-status').textContent,/телефоне организатора/);assert.equal(app.el('show-write').hidden,false);assert.match(app.el('team-state').textContent,/Организатор ПСО/);
+});
+
+test('bound bot patient token must match its messageID before recipient reveal and receipt',async()=>{
+ const s=await directFixture(['admin','bot','cardiologist']),record=await addBotArchiveFixture(s),reader=await harness(s.stores[2],'',s.options);
+ await reader.hashchange('#m='+record.id);await reader.idle();assert.equal(reader.el('surname').textContent,'Автоматическая');await waitUntil(()=>record.opened.size===1,'bound bot receipt');
+ await reader.hide();await reader.show();const id=direct.newMessageID(),substituted={...record,id,opened:new Set()};s.records.set(id,substituted);
+ await reader.hashchange('#m='+id);await reader.idle();assert.equal(reader.el('result').hidden,true);assert.equal(reader.el('surname').textContent,'');assert.equal(substituted.opened.size,0);assert.match(reader.el('notice').textContent,/не соответствует сообщению/);
+});
+
+test('first rehabilitation stage starts and continues encrypted discussion with its full direction and PSO only',async()=>{
+ const s=await directFixture(['admin','neurologist','rehab1_physician','psychologist','speech_therapist','exercise_therapist','rehab2_physician','cardiologist','bot']);
+ const writer=await harness(s.stores[3],'',s.options);await writer.event('show-write');assertScreen(writer,'write');assert.equal(writer.el('page-title').textContent,'Написать группе');assert.equal(writer.el('discussion-context').hidden,false);assert.equal(writer.el('care-directions').hidden,true);assert.equal(writer.el('pso-recipient-picker').hidden,true);
+ await writer.event('direction-rehab2');writer.el('recipient').value='cardiology';writer.el('compose-surname').value='Групповая';writer.el('compose-comment').value='Обсуждение ранней реабилитации';await writer.event('compose-form','submit');await writer.idle();
+ const original=[...s.records.values()][0];assert.ok(original,writer.el('notice').textContent);assert.equal(original.kind,'discussion');assert.equal(original.group,'rehab1');assert.equal(original.replyTo,undefined);
+ assert.deepEqual(original.entries.map(e=>e.recipientId).sort(),[0,1,2,4,5].map(i=>s.members[i].id).sort());assert.ok(original.senderToken);assert.ok(!JSON.stringify(s.requests).includes('Групповая'));
+ const reader=await harness(s.stores[2],'',s.options);await reader.hashchange('#m='+original.id);await reader.idle();assert.equal(reader.el('result-comment').textContent,'Обсуждение ранней реабилитации');assert.equal(reader.el('reply-message').hidden,false);await reader.event('reply-message');
+ assert.equal(reader.el('page-title').textContent,'Ответ группе');assert.match(reader.el('reply-audience').textContent,/специалисты.*все неврологи.*кроме вас.*5/);assert.equal(reader.el('compose-surname').value,'Групповая');assert.equal(reader.el('compose-comment').value,'');assert.equal(reader.el('photo-preview').hidden,true);
+ reader.el('compose-comment').value='Ответ всей команде';await reader.event('compose-form','submit');await reader.idle();const reply=[...s.records.values()].find(r=>r.kind==='group_reply');assert.ok(reply,reader.el('notice').textContent);assert.equal(reply.replyTo,original.id);assert.deepEqual(reply.entries.map(e=>e.recipientId).sort(),[0,1,3,4,5].map(i=>s.members[i].id).sort());
+ const pso=await harness(s.stores[1],'',s.options);await pso.hashchange('#m='+reply.id);await pso.idle();assert.equal(pso.el('result-comment').textContent,'Ответ всей команде');assert.equal(pso.el('reply-message').hidden,false);
+ const otherStage=await harness(s.stores[6],'',s.options);await otherStage.hashchange('#m='+reply.id);await otherStage.idle();assert.equal(otherStage.el('result').hidden,true);
+});
+
+test('replying to a bot admission reaches PSO and all same-direction specialists but never the bot or other directions',async()=>{
+ const s=await directFixture(['admin','bot','cardiologist','neurologist','cardiologist','intensivist','rehab1_physician']),original=await addBotArchiveFixture(s),reader=await harness(s.stores[2],'',s.options);
+ await reader.hashchange('#m='+original.id);await reader.idle();assert.equal(reader.el('reply-message').hidden,false);await reader.event('reply-message');assert.equal(reader.el('compose-surname').value,'Автоматическая');assert.match(reader.el('reply-audience').textContent,/ПСО/);
+ reader.el('compose-comment').value='Поступление посмотрели';await reader.event('compose-form','submit');await reader.idle();const reply=[...s.records.values()].find(r=>r.kind==='group_reply');assert.ok(reply,reader.el('notice').textContent);assert.equal(reply.replyTo,original.id);assert.deepEqual(reply.entries.map(e=>e.recipientId).sort(),[0,3,4].map(i=>s.members[i].id).sort());
+ const neuro=await harness(s.stores[3],'',s.options);await neuro.hashchange('#m='+reply.id);await neuro.idle();assert.equal(neuro.el('result-comment').textContent,'Поступление посмотрели');assert.equal(neuro.el('reply-message').hidden,false);
+});
+
+test('a queued legacy private reply keeps its exact sole recipient and ciphertext after the group reply update',async()=>{
+ const s=await directFixture(['admin','neurologist','cardiologist','cardiologist']),writer=await harness(s.stores[1],'',s.options);await directSend(writer);const parent=[...s.records.values()][0],issued=Date.now(),id=direct.newMessageID(),meta={id,group:'cardiology',kind:'reply',replyTo:parent.id,issued,expires:issued+3600000};
+ const recipient={...await exchange.importPublicCard(s.members[1].card),verified:true},sealed=await messages.sealMessage(s.stores[2].device,[recipient],{surname:'Прежняя',comment:'Старый личный ответ'},meta,{archive:true}),pending={...meta,...sealed};s.stores[2].pending.set(id,pending);
+ const reader=await harness(s.stores[2],'',s.options);await waitUntil(()=>!reader.el('retry-pending').hidden,'legacy reply pending');await reader.event('retry-pending');await waitUntil(()=>s.stores[2].pending.size===0,'legacy reply sent');
+ const request=s.requests.find(r=>r.op==='create'&&r.data.id===id);assert.equal(JSON.stringify(request.data),JSON.stringify(pending));assert.equal(request.data.kind,'reply');assert.deepEqual(request.data.entries.map(e=>e.recipientId),[s.members[1].id]);assert.equal(request.data.payload.ciphertext,sealed.payload.ciphertext);
+});
+
+test('conversation with more than25 recipients fails visibly before encrypting or creating a partial group',async()=>{
+ const s=await directFixture(['admin','neurologist',...Array(25).fill('psychologist')]),app=await harness(s.stores[2],'',s.options);await app.event('show-write');app.el('compose-comment').value='Для всей группы';await app.event('compose-form','submit');await app.idle();
+ assert.equal(s.records.size,0);assert.equal(s.stores[2].pending.size,0);assert.equal(s.requests.filter(r=>r.op==='create').length,0);assert.match(app.el('notice').textContent,/вместе с ПСО больше 25 устройств.*не отправлено/);assert.equal(app.el('compose-comment').value,'Для всей группы');
+});
+
+test('emoji palette replaces selection at cursor, keeps private drafts and encrypts its medical symbols',async()=>{
+ const s=await directFixture(),writer=await harness(s.stores[1],'',s.options);await writer.event('show-write');writer.el('recipient').value='cardiology';await writer.event('recipient','change');
+ assert.equal(writer.el('emoji-picker').hidden,true);await writer.event('emoji-toggle');assert.equal(writer.el('emoji-toggle').attributes.get('aria-expanded'),'true');const chips=writer.el('emoji-picker').querySelectorAll('button');assert.equal(chips.length,16);assert.equal(chips[12].attributes.get('aria-label'),'Дышим ровно');assert.equal(chips[15].attributes.get('aria-label'),'Дежурим бодро');
+ const field=writer.el('compose-comment');field.value='До заменить после';field.setSelectionRange(3,11);await chips[0].fire('click');assert.equal(field.value,'До 🧠 после');assert.equal(field.selectionStart,5);assert.equal(field.selectionEnd,5);assert.ok(field.focusCalls.length);assert.equal(s.requests.filter(r=>r.op==='create').length,0,'An emoji never submits');
+ await writer.event('direction-rehab1');assert.equal(field.value,'До 🧠 после');await writer.event('direction-pso');assert.equal(field.value,'До 🧠 после');
+ field.setSelectionRange(field.value.length,field.value.length);await chips[12].fire('click');await chips[13].fire('click');await writer.event('emoji-toggle');assert.equal(writer.el('emoji-picker').hidden,true);assert.equal(writer.el('emoji-toggle').attributes.get('aria-expanded'),'false');
+ await writer.event('compose-form','submit');await writer.idle();const record=[...s.records.values()][0];assert.ok(record,writer.el('notice').textContent);assert.ok(!JSON.stringify(s.requests).includes('До 🧠 после'));
+ const reader=await harness(s.stores[2],'',s.options);await reader.hashchange('#m='+record.id);await reader.idle();assert.equal(reader.el('result-comment').textContent,'До 🧠 после🫁🫀');
+ await writer.event('emoji-toggle');await writer.hide();assert.equal(field.value,'');assert.equal(writer.el('emoji-picker').hidden,true);
+});
+
+test('emoji insertion honors2000codepoint limit and cannot edit while sender is blocked',async()=>{
+ const s=await directFixture(),app=await harness(s.stores[1],'',s.options);await app.event('show-write');app.el('recipient').value='cardiology';await app.event('recipient','change');await app.event('emoji-toggle');const field=app.el('compose-comment'),chip=app.el('emoji-picker').querySelectorAll('button')[0];
+ field.value='🙂'.repeat(2000);field.setSelectionRange(field.value.length,field.value.length);await chip.fire('click');assert.equal([...field.value].length,2000);assert.match(app.el('notice').textContent,/не более 2000 символов/);
+ field.setSelectionRange(0,2);await chip.fire('click');assert.equal([...field.value].length,2000);assert.ok(field.value.startsWith('🧠'));await app.event('show-read');assert.equal(app.el('emoji-toggle').disabled,true);field.value='Не менять';await chip.fire('click');assert.equal(field.value,'Не менять');
+ const recipient=await harness(s.stores[2],'',s.options);assert.equal(recipient.el('emoji-toggle').disabled,true);recipient.el('compose-comment').value='Не менять';await recipient.el('emoji-picker').querySelectorAll('button')[0].fire('click');assert.equal(recipient.el('compose-comment').value,'Не менять');
+});
+
+test('changing a replying specialist to another direction clears the old audience and patient draft',async()=>{
+ const s=await directFixture(['admin','neurologist','rehab2_physician','psychologist']),writer=await harness(s.stores[1],'',s.options);await writer.event('show-write');await writer.event('direction-rehab2');writer.el('compose-surname').value='Не переносить';writer.el('compose-comment').value='Запрос второго этапа';await writer.event('compose-form','submit');await writer.idle();const original=[...s.records.values()][0];
+ let role='rehab2_physician';const reader=await harness(s.stores[2],'',{...s.options,teamFetch:async(url,options)=>{if(JSON.parse(options.body).envelope.op==='status')return new Response(JSON.stringify({state:'active',role,name:s.members[2].name}),{headers:{'Content-Type':'application/json'}});return s.options.teamFetch(url,options);}});
+ await reader.hashchange('#m='+original.id);await reader.idle();await reader.event('reply-message');reader.el('compose-comment').value='Ответ второго этапа';assert.equal(reader.el('reply-context').hidden,false);
+ role='psychologist';await reader.event('team-refresh');await reader.idle();assert.equal(reader.el('reply-context').hidden,true);assert.equal(reader.el('compose-surname').value,'');assert.equal(reader.el('compose-comment').value,'');assert.equal(reader.el('discussion-context').hidden,false);assert.equal(s.records.size,1);
+});
+
+test('new group discussion rejects an unsigned additional PSO role before encryption and persistence',async()=>{
+ const s=await directFixture(['admin','neurologist','psychologist']),app=await harness(s.stores[2],'',s.options);s.members[1].role='admin';await app.event('show-write');app.el('compose-comment').value='Только проверенному составу';await app.event('compose-form','submit');await app.idle();assert.equal(s.records.size,0);assert.equal(s.stores[2].pending.size,0);assert.match(app.el('notice').textContent,/Допуск врача не подтверждён/);assert.equal(app.el('compose-comment').value,'Только проверенному составу');
 });

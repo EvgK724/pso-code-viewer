@@ -37,6 +37,13 @@ test('direct list rejects injected plaintext fields and invalid metadata',async(
   for(const change of [{...item,surname:'Иванов'},{...item,openedCount:2},{...item,group:'public'},{...item,senderName:'Имя\nПодмена'}]){body={items:[change],next:null};await assert.rejects(client.list(device));}
 });
 
+test('updated clients explicitly sign the group-conversation list capability',async()=>{
+  const requests=[];const client=new DirectClient('https://service.example/api',{fetch:async(_,options)=>{requests.push(JSON.parse(options.body).envelope);return response({items:[],next:null});}});
+  await client.list(device,'inbox');await client.list(device,'outbox');
+  assert.deepEqual(requests.map(e=>[e.op,e.data]),[['inbox',{cursor:null,includeConversations:true}],['outbox',{cursor:null,includeConversations:true}]]);
+  for(const {signature,...unsigned} of requests)assert.equal(await crypto.subtle.verify({name:'ECDSA',hash:'SHA-256'},card.signingPublicKey,Buffer.from(signature,'base64url'),new TextEncoder().encode('PSO-TEAM-v1\0'+JSON.stringify(unsigned))),true);
+});
+
 test('encrypted retry queue validation rejects plaintext or altered outer fields',async()=>{
   const issued=Date.now(),meta={id:newMessageID(),group:'cardiology',kind:'review',issued,expires:issued+60000};
   const sealed=await sealMessage(device,[rc],{surname:'Иванов',comment:'Проверить историю'},meta),data={...meta,...sealed};
@@ -60,4 +67,25 @@ test('reply retries retain signed parent binding and reject altered or plaintext
   assert.equal((await client.open(device,meta.id)).meta.replyTo,meta.replyTo);
   for(const replyTo of [undefined,'bad',meta.id]){body={...opened,meta:{...meta,replyTo}};await assert.rejects(client.open(device,meta.id));}
   body={...opened,payload:null};await assert.rejects(client.open(device,meta.id));
+});
+
+test('group conversation client retains parent binding and enforces direction-specific human roles',async()=>{
+  for(const [kind,group,role] of [['group_reply','rehab1','psychologist'],['group_reply','rehab2','rehab2_physician'],['group_reply','orit','intensivist'],['discussion','rehab1','speech_therapist']]){
+    const issued=Date.now(),meta={id:newMessageID(),group,kind,issued,expires:issued+172800000,...(kind==='group_reply'?{replyTo:newMessageID()}:{})};
+    const sealed=await sealMessage(device,[rc],{comment:'Обсуждение группы'},meta,{archive:true}),data={...meta,...sealed};
+    assert.equal(validatePending(data),data);
+    let body={meta,payload:sealed.payload,token:sealed.entries[0].token,senderName:'Автор',senderCard:card.card,senderRole:role,senderApprovalProof:null};
+    const original=body,client=new DirectClient('https://service.example/api',{fetch:async()=>response(body)});
+    assert.equal((await client.open(device,meta.id)).meta.kind,kind);
+    for(const wrongRole of ['bot',group==='rehab2'?'psychologist':'rehab2_physician']){body={...original,senderRole:wrongRole};await assert.rejects(client.open(device,meta.id));}
+    body={...original,payload:null};await assert.rejects(client.open(device,meta.id));
+    if(kind==='group_reply')for(const replyTo of [undefined,meta.id,newMessageID()]){
+      assert.throws(()=>validatePending({...data,replyTo}));
+    }
+  }
+});
+
+test('group-too-large failure survives bounded error decoding and never claims the message was sent',async()=>{
+  const client=new DirectClient('https://service.example/api',{fetch:async()=>response({error:'group_too_large'},409)});
+  await assert.rejects(client.create(device,{id:newMessageID()}),e=>e.code==='group_too_large'&&e.message.includes('Сообщение не отправлено'));
 });

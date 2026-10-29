@@ -1,13 +1,13 @@
 // Direct, device-authenticated encrypted inbox; never receives patient plaintext.
-import {ROLES,GROUPS,REHAB_ROLES,isRehabGroup,canSendGroup} from '../docs/care-routing.mjs';
+import {ROLES,GROUPS,REHAB_ROLES,isRehabGroup,isReplyKind,isGroupConversationKind,canSendGroup} from '../docs/care-routing.mjs';
 import {importPublicCard} from '../docs/exchange.mjs';
 import {verifyRecipientGrant} from '../docs/recipient-trust.mjs';
 import {verifyMessageEnvelope} from '../docs/messages.mjs';
 import {createVapidKeys,sendWebPush} from './web-push.mjs';
 export const MAX_DIRECT_BODY_BYTES=2100000;
 const DOMAIN='PSO-TEAM-v1\0',OLD_TOKEN_DOMAIN='PSO-SURNAME-LINK-v1\0';
-const TTL=86400000;
-const OPS=['create','inbox','outbox','open','ack','retry','admin_members','admin_update','admin_replace','directory','admin_certify'];
+const TTL=2*86400000,HISTORY_TTL=90*86400000;
+const OPS=['create','inbox','outbox','open','ack','retry','admin_members','admin_update','admin_replace','directory','admin_certify','history','history_open'];
 const enc=new TextEncoder();
 const exact=(v,k)=>v&&typeof v==='object'&&!Array.isArray(v)&&Object.keys(v).sort().join(',')===k;
 const b64=v=>btoa(String.fromCharCode(...new Uint8Array(v))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
@@ -18,12 +18,14 @@ function bytes(v,len){
  if(r.length!==len||b64(r)!==v)throw new Rejected();return r;
 }
 function text(v){if(typeof v!=='string'||!v||v!==v.normalize('NFC').trim()||[...v].length>60||/[\p{Cc}\p{Cf}]/u.test(v))throw new Rejected();return v;}
-function validMeta(v,at){
- if(!Number.isSafeInteger(v.issued)||v.issued<=0||v.issued>at+30000||!Number.isSafeInteger(v.expires)||v.expires<=at||v.expires<=v.issued||v.expires-v.issued>TTL||!GROUPS.includes(v.group)||!['admission','review','reply'].includes(v.kind))throw new Rejected();bytes(v.id,16);
+function validMeta(v,at,live=true){
+ if(!Number.isSafeInteger(v.issued)||v.issued<=0||v.issued>at+30000||!Number.isSafeInteger(v.expires)||(live&&v.expires<=at)||v.expires<=v.issued||v.expires-v.issued>TTL||!GROUPS.includes(v.group)||!['admission','review','reply','group_reply','discussion'].includes(v.kind))throw new Rejected();bytes(v.id,16);
 }
 function failure(result){
  const state=typeof result==='string'?result:result?.status;
  if(state==='limited')throw new Rejected(429);
+ if(state==='history_full')throw new Rejected(429,'history_full');
+ if(state==='group_too_large')throw new Rejected(409,'group_too_large');
  if(state==='denied')throw new Rejected(403);
  if(state==='missing')throw new Rejected(404);
  if(['conflict','replay','roster_changed'].includes(state))throw new Rejected(409,state==='conflict'?'id_conflict':state);
@@ -71,8 +73,9 @@ export function createDirectHandler({store,allowedOrigin,crypto=globalThis.crypt
     let state='failed';
     try{
      bytes(t.id,16);bytes(t.recipientId,32);if(id&&t.id!==id)throw new Error('Unexpected message');
-     if(!Number.isSafeInteger(t.lease)||t.lease<1||!Number.isSafeInteger(t.expires)||t.expires<=at||t.expires>at+TTL)throw new Error('Expired notification');
-     const r=await send(t.subscription,await keys(),{v:2,id:t.id,expires:t.expires},{crypto,now:at,ttl:Math.max(0,Math.floor((t.expires-at)/1000))});
+     if(!Number.isSafeInteger(t.lease)||t.lease<1||!Number.isSafeInteger(t.expires)||t.expires<=at||t.expires>at+TTL+30000)throw new Error('Expired notification');
+     const expires=Math.min(t.expires,at+TTL);
+     const r=await send(t.subscription,await keys(),{v:2,id:t.id,expires},{crypto,now:at,ttl:Math.max(0,Math.floor((expires-at)/1000))});
      if(['accepted','gone'].includes(r?.status))state=r.status;
     }catch{/* No provider details or subscription endpoints in logs/responses. */}
     try{await store.pushFinish(t.id,t.recipientId,t.lease,state);}catch{/* Lease timeout recovers the attempt. */}
@@ -97,10 +100,11 @@ export function createDirectHandler({store,allowedOrigin,crypto=globalThis.crypt
    const data=e.data;let normalized;
    if(e.op==='retry'){if(!exact(data,''))throw new Rejected();}
    else if(['admin_members','directory'].includes(e.op)){if(!exact(data,'')&&!(exact(data,'includeRehab')&&data.includeRehab===true))throw new Rejected();}
-   else if(['inbox','outbox'].includes(e.op)){
-    if(!exact(data,'')&&!exact(data,'cursor'))throw new Rejected();
+   else if(['inbox','outbox','history'].includes(e.op)){
+    if(!exact(data,'')&&!exact(data,'cursor')&&!(e.op==='history'&&(exact(data,'source')||exact(data,'cursor,source'))&&data.source==='bot')&&
+       !(e.op!=='history'&&(exact(data,'includeConversations')||exact(data,'cursor,includeConversations'))&&data.includeConversations===true))throw new Rejected();
     if(data.cursor!=null){if(!exact(data.cursor,'id,issued')||!Number.isSafeInteger(data.cursor.issued)||data.cursor.issued<=0)throw new Rejected();bytes(data.cursor.id,16);}
-   }else if(e.op==='open'){
+   }else if(e.op==='open'||e.op==='history_open'){
     if(!exact(data,'id')&&!exact(data,'id,unlockToken'))throw new Rejected();bytes(data.id,16);if('unlockToken'in data)bytes(data.unlockToken,32);
    }else if(e.op==='ack'){if(!exact(data,'id'))throw new Rejected();bytes(data.id,16);}
    else if(e.op==='admin_certify'){
@@ -110,9 +114,10 @@ export function createDirectHandler({store,allowedOrigin,crypto=globalThis.crypt
    }else if(e.op==='admin_replace'){
     if(!exact(data,'approvalProof,newId,oldId'))throw new Rejected();bytes(data.oldId,32);bytes(data.newId,32);if(data.oldId===data.newId)throw new Rejected();
    }else{
-    if(data?.kind==='reply'){if(!exact(data,'entries,expires,group,id,issued,kind,payload,replyTo'))throw new Rejected();bytes(data.replyTo,16);if(data.replyTo===data.id)throw new Rejected();}
-    else if(!exact(data,'entries,expires,group,id,issued,kind')&&!exact(data,'entries,expires,group,id,issued,kind,payload'))throw new Rejected();
-    validMeta(data,at);if(isRehabGroup(data.group)&&(data.kind!=='review'||!data.payload))throw new Rejected();if(!Array.isArray(data.entries)||data.entries.length<1||data.entries.length>25)throw new Rejected();
+    if(isReplyKind(data?.kind)){if(!exact(data,'entries,expires,group,id,issued,kind,payload,replyTo')&&!exact(data,'entries,expires,group,id,issued,kind,payload,replyTo,senderToken'))throw new Rejected();bytes(data.replyTo,16);if(data.replyTo===data.id)throw new Rejected();}
+    else if(!exact(data,'entries,expires,group,id,issued,kind')&&!exact(data,'entries,expires,group,id,issued,kind,payload')&&!exact(data,'entries,expires,group,id,issued,kind,payload,senderToken')&&!exact(data,'entries,expires,group,id,issued,kind,organizerId,organizerToken'))throw new Rejected();
+    validMeta(data,at);if((isRehabGroup(data.group)||isGroupConversationKind(data.kind))&&!data.payload)throw new Rejected();if(!Array.isArray(data.entries)||data.entries.length<1)throw new Rejected();
+    if(data.entries.length>25)throw isGroupConversationKind(data.kind)?new Rejected(409,'group_too_large'):new Rejected();
     if('payload'in data){if(!data.payload||data.payload.id!==data.id||data.payload.group!==data.group||data.payload.kind!==data.kind||data.payload.issued!==data.issued||data.payload.expires!==data.expires||data.payload.replyTo!==data.replyTo)throw new Rejected();}
    }
    const spki=b64(await crypto.subtle.exportKey('spki',sender.signingPublicKey));
@@ -123,24 +128,80 @@ export function createDirectHandler({store,allowedOrigin,crypto=globalThis.crypt
     const admins=directory.members.filter(m=>m.role==='admin');
     async function approved(member){if(member.role==='admin')return;const issuer=admins.find(a=>a.id===member.approvalProof?.grant?.issuerId);if(!issuer)throw new Rejected(403);try{await verifyRecipientGrant(member,issuer.card,at);}catch{throw new Rejected(403);}}
     await approved(actor);
+    if(Object.hasOwn(data,'senderToken')){
+     if(typeof store.history!=='function'||typeof store.historyOpen!=='function')throw new Rejected(503,'history_unavailable');
+     if(!data.payload)throw new Rejected();await validateToken(data.senderToken,data.payload,sender,sender.id,crypto,at);
+    }
+    if(Object.hasOwn(data,'organizerToken')){
+     if(typeof store.history!=='function'||typeof store.historyOpen!=='function')throw new Rejected(503,'history_unavailable');
+     bytes(data.organizerId,32);
+     const organizer=admins.find(m=>m.id===data.organizerId);
+     if(actor.role!=='bot'||data.kind!=='admission'||!['cardiology','orit'].includes(data.group)||!organizer||actor.approvalProof?.grant?.issuerId!==data.organizerId)throw new Rejected(403);
+     await validateToken(data.organizerToken,null,sender,data.organizerId,crypto,at);
+    }
     const seen=new Set(),entries=[];
     for(const entry of data.entries){if(!exact(entry,'recipientId,token'))throw new Rejected();bytes(entry.recipientId,32);if(seen.has(entry.recipientId))throw new Rejected();seen.add(entry.recipientId);const member=directory.members.find(m=>m.id===entry.recipientId);if(!member)throw new Rejected(403);await approved(member);await validateToken(entry.token,data.payload??null,sender,entry.recipientId,crypto,at);entries.push({recipientId:entry.recipientId,token:entry.token});}
     entries.sort((a,b)=>a.recipientId<b.recipientId?-1:a.recipientId>b.recipientId?1:0);
-    normalized={id:data.id,group:data.group,kind:data.kind,issued:data.issued,expires:data.expires,entries};if(data.payload)normalized.payload=data.payload;if(data.kind==='reply')normalized.replyTo=data.replyTo;
+    normalized={id:data.id,group:data.group,kind:data.kind,issued:data.issued,expires:data.expires,entries};if(data.payload)normalized.payload=data.payload;if(isReplyKind(data.kind))normalized.replyTo=data.replyTo;if(Object.hasOwn(data,'senderToken'))normalized.senderToken=data.senderToken;
+    if(Object.hasOwn(data,'organizerToken')){normalized.organizerId=data.organizerId;normalized.organizerToken=data.organizerToken;}
     const hash=[...new Uint8Array(await crypto.subtle.digest('SHA-256',enc.encode(JSON.stringify(normalized))))].map(x=>x.toString(16).padStart(2,'0')).join('');
     const created=await store.create(sender.id,hash,normalized);if(!['created','exists'].includes(created))failure(created);
     const delivery=await notify(sender.id,data.id,at);
     const push=delivery.accepted===entries.length?'accepted':delivery.accepted>0?'partial':'queued';
     return response(200,{id:data.id,expires:data.expires,push});
    }
+   if(e.op==='history'){
+    if(typeof store.history!=='function')throw new Rejected(503,'history_unavailable');
+    const r=result(await store.history(sender.id,data.cursor??null,data.source??null));
+    if(!exact(r,'items,next')||!Array.isArray(r.items)||r.items.length>50)throw new Error('Invalid history');
+    for(const m of r.items){
+     if(!exact(m,'archiveUntil,createdAt,expires,group,hasContent,id,issued,kind,openedCount,recipientCount'))throw new Error('Invalid history item');
+     validMeta(m,at,false);
+     if(m.archiveUntil!==m.issued+HISTORY_TTL||m.archiveUntil<=at||!Number.isSafeInteger(m.createdAt)||m.createdAt<=0||m.createdAt>at+30000||typeof m.hasContent!=='boolean'||!Number.isSafeInteger(m.recipientCount)||m.recipientCount<1||m.recipientCount>25||!Number.isSafeInteger(m.openedCount)||m.openedCount<0||m.openedCount>m.recipientCount)throw new Error('Invalid history metadata');
+    }
+    if(r.next!==null){if(!exact(r.next,'id,issued')||!Number.isSafeInteger(r.next.issued)||r.next.issued<=0)throw new Error('Invalid history cursor');bytes(r.next.id,16);}
+    return response(200,r);
+   }
+   if(e.op==='history_open'){
+    if(typeof store.historyOpen!=='function')throw new Rejected(503,'history_unavailable');
+    if(!await store.unlockCheck(sender.id,data.unlockToken||''))throw new Rejected(428,'unlock_required');
+    const r=result(await store.historyOpen(sender.id,data.id));
+    if(!exact(r,'archiveUntil,createdAt,meta,organizerToken,payload,recipients,senderApprovalProof,senderCard,senderName,senderRole,senderToken')||!exact(r.meta,isReplyKind(r.meta?.kind)?'expires,group,id,issued,kind,replyTo':'expires,group,id,issued,kind')||r.meta.id!==data.id)throw new Error('Invalid archive');
+    validMeta(r.meta,at,false);
+    if(isReplyKind(r.meta.kind)){bytes(r.meta.replyTo,16);if(r.meta.replyTo===r.meta.id)throw new Error('Invalid archive parent');}
+    if(r.archiveUntil!==r.meta.issued+HISTORY_TTL||r.archiveUntil<=at||!Number.isSafeInteger(r.createdAt)||r.createdAt<=0||r.createdAt>at+30000||!ROLES.includes(r.senderRole)||!Array.isArray(r.recipients)||r.recipients.length<1||r.recipients.length>25)throw new Error('Invalid archive metadata');
+    text(r.senderName);const owner=await importPublicCard(r.senderCard);
+    if(r.organizerToken!==null){
+     if(r.senderRole!=='bot'||r.meta.kind!=='admission'||!['cardiology','orit'].includes(r.meta.group)||r.senderToken!==null||r.payload!==null)throw new Error('Invalid bot archive');
+     const bot={id:owner.id,name:r.senderName,role:'bot',card:r.senderCard,approvalProof:r.senderApprovalProof};
+     try{await verifyRecipientGrant(bot,e.card,r.meta.issued);}catch{throw new Rejected(403);}
+     await validateToken(r.organizerToken,null,owner,sender.id,crypto,r.meta.issued);
+    }else if(owner.id!==sender.id||r.senderApprovalProof!==null)throw new Rejected(403);
+    const seen=new Set();
+    for(const recipient of r.recipients){
+     if(!exact(recipient,'id,name,openedAt,pushAcceptedAt,pushState,role')||!ROLES.includes(recipient.role)||!['queued','sending','accepted','failed','gone'].includes(recipient.pushState)||seen.has(recipient.id))throw new Error('Invalid archive receipt');
+     bytes(recipient.id,32);text(recipient.name);seen.add(recipient.id);
+     for(const key of ['openedAt','pushAcceptedAt'])if(recipient[key]!==null&&(!Number.isSafeInteger(recipient[key])||recipient[key]<r.createdAt||recipient[key]>=r.meta.expires||recipient[key]>at+30000))throw new Error('Invalid archive receipt time');
+     if((recipient.pushState==='accepted')!==(recipient.pushAcceptedAt!==null))throw new Error('Invalid archive push receipt');
+    }
+    if((r.senderToken===null)!==(r.payload===null))throw new Error('Incomplete archive content');
+    if(r.senderToken!==null){
+     // Signature and payload binding use the immutable original live window;
+     // the independent 90-day owner-only archive deadline was checked above.
+     await validateToken(r.senderToken,r.payload,owner,sender.id,crypto,r.meta.issued);
+     if(r.payload.id!==r.meta.id||r.payload.group!==r.meta.group||r.payload.kind!==r.meta.kind||r.payload.issued!==r.meta.issued||r.payload.expires!==r.meta.expires||r.payload.replyTo!==r.meta.replyTo)throw new Error('Invalid archive content binding');
+    }
+    return response(200,r);
+   }
    if(e.op==='inbox'||e.op==='outbox'){
-    const r=result(await store.list(sender.id,e.op==='outbox',data.cursor??null));if(!exact(r,'items,next')||!Array.isArray(r.items)||r.items.length>50)throw new Error('Invalid inbox response');
+    const r=result(await store.list(sender.id,e.op==='outbox',data.cursor??null,data.includeConversations===true));if(!exact(r,'items,next')||!Array.isArray(r.items)||r.items.length>50)throw new Error('Invalid inbox response');
     for(const item of r.items){if(!exact(item,'expires,group,id,issued,kind,openedAt,openedCount,recipientCount,senderId,senderName'))throw new Error('Invalid inbox item');validMeta(item,at);bytes(item.senderId,32);text(item.senderName);if(!Number.isSafeInteger(item.recipientCount)||item.recipientCount<1||item.recipientCount>25||!Number.isSafeInteger(item.openedCount)||item.openedCount<0||item.openedCount>item.recipientCount||(item.openedAt!==null&&!Number.isSafeInteger(item.openedAt)))throw new Error('Invalid receipt');}
-    if(r.next!==null){if(!exact(r.next,'id,issued')||!Number.isSafeInteger(r.next.issued))throw new Error('Invalid cursor');bytes(r.next.id,16);}return response(200,r);
+    if(r.next!==null){if(!exact(r.next,'id,issued')||!Number.isSafeInteger(r.next.issued))throw new Error('Invalid cursor');bytes(r.next.id,16);}
+    return response(200,{items:data.includeConversations===true?r.items:r.items.filter(m=>!isGroupConversationKind(m.kind)),next:r.next});
    }
    if(e.op==='open'){
     if(!await store.unlockCheck(sender.id,data.unlockToken||''))throw new Rejected(428,'unlock_required');
-    const r=result(await store.open(sender.id,data.id,false));if(!exact(r,'meta,payload,senderApprovalProof,senderCard,senderName,senderRole,token')||!exact(r.meta,r.meta?.kind==='reply'?'expires,group,id,issued,kind,replyTo':'expires,group,id,issued,kind')||r.meta.id!==data.id)throw new Error('Invalid message');validMeta(r.meta,at);if(r.meta.kind==='reply'){bytes(r.meta.replyTo,16);if(r.meta.replyTo===r.meta.id||!r.payload)throw new Error('Invalid reply');}text(r.senderName);
+    const r=result(await store.open(sender.id,data.id,false));if(!exact(r,'meta,payload,senderApprovalProof,senderCard,senderName,senderRole,token')||!exact(r.meta,isReplyKind(r.meta?.kind)?'expires,group,id,issued,kind,replyTo':'expires,group,id,issued,kind')||r.meta.id!==data.id)throw new Error('Invalid message');validMeta(r.meta,at);if(isReplyKind(r.meta.kind)){bytes(r.meta.replyTo,16);if(r.meta.replyTo===r.meta.id||!r.payload)throw new Error('Invalid reply');}text(r.senderName);
     let owner;try{owner=await importPublicCard(r.senderCard);}catch{throw new Error('Invalid sender');}await validateToken(r.token,r.payload,owner,sender.id,crypto,at);
     if(r.payload&&(r.payload.id!==r.meta.id||r.payload.group!==r.meta.group||r.payload.kind!==r.meta.kind||r.payload.issued!==r.meta.issued||r.payload.expires!==r.meta.expires||r.payload.replyTo!==r.meta.replyTo))throw new Error('Invalid message binding');
     return response(200,r);

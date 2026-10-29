@@ -1,17 +1,20 @@
 // Recipient-specific wrapped keys for a single encrypted message/photo payload.
 // Public identities must be approved by the caller before seal/open; the server
 // can verify signatures without having either the AES key or patient plaintext.
-import {deviceIdentity, importPublicCard} from './exchange.mjs';
+import {deviceIdentity, exportPublicCard, importPublicCard, openSurname} from './exchange.mjs';
+import {verifyRecipientGrant} from './recipient-trust.mjs';
 
 export const MAX_PHOTO_BYTES = 1024 * 1024;
 export const MAX_MESSAGE_PLAINTEXT_BYTES = 1420000;
 export const MAX_MESSAGE_CIPHERTEXT_CHARS = Math.ceil((MAX_MESSAGE_PLAINTEXT_BYTES + 16) * 4 / 3);
-export const MAX_MESSAGE_TTL = 86400000;
+export const MAX_MESSAGE_TTL = 2 * 86400000;
+export const HISTORY_TTL = 90 * 86400000;
 export const MESSAGE_SIGN_DOMAIN = 'PSO-MESSAGE-v2\0';
 export const MESSAGE_KEY_LABEL = 'PSO-MESSAGE-KEY-v2';
 const enc = new TextEncoder(), dec = new TextDecoder('utf-8', {fatal:true});
-import {GROUPS,isRehabGroup} from './care-routing.mjs';
-const KINDS = ['admission','review','reply'];
+import {GROUPS,isRehabGroup,isReplyKind} from './care-routing.mjs';
+const KINDS = ['admission','review','reply','group_reply','discussion'];
+const kindAllowed = (kind,group) => KINDS.includes(kind)&&(!isRehabGroup(group)||!['admission','reply'].includes(kind))&&(kind!=='discussion'||group==='rehab1');
 const BAD = /[\p{Cc}\p{Cf}]/u;
 const exact = (v,k) => v && typeof v === 'object' && !Array.isArray(v) && Object.keys(v).sort().join(',') === k;
 
@@ -30,15 +33,15 @@ export function messageUnbase64url(value, expected=0, max=MAX_MESSAGE_CIPHERTEXT
   return result;
 }
 function metaValue(meta,now) {
-  if (!exact(meta,meta?.kind==='reply'?'expires,group,id,issued,kind,replyTo,v':'expires,group,id,issued,kind,v') || meta.v !== 2 || !GROUPS.includes(meta.group) || (!KINDS.includes(meta.kind)||(isRehabGroup(meta.group)&&meta.kind!=='review'))) throw new Error('Неверные параметры сообщения.');
+  if (!exact(meta,isReplyKind(meta?.kind)?'expires,group,id,issued,kind,replyTo,v':'expires,group,id,issued,kind,v') || meta.v !== 2 || !GROUPS.includes(meta.group) || !kindAllowed(meta.kind,meta.group)) throw new Error('Неверные параметры сообщения.');
   messageUnbase64url(meta.id,16,22);
-  if(meta.kind==='reply'){messageUnbase64url(meta.replyTo,16,22);if(meta.replyTo===meta.id)throw new Error('Ответ не может ссылаться на себя.');}
+  if(isReplyKind(meta.kind)){messageUnbase64url(meta.replyTo,16,22);if(meta.replyTo===meta.id)throw new Error('Ответ не может ссылаться на себя.');}
   if (!Number.isSafeInteger(now) || !Number.isSafeInteger(meta.issued) || !Number.isSafeInteger(meta.expires) || meta.issued <= 0 || meta.expires <= meta.issued || meta.expires-meta.issued > MAX_MESSAGE_TTL || meta.expires-meta.issued < 60000 || meta.issued > now+30000 || meta.expires <= now) throw new Error('Срок сообщения истёк или время создания неверно.');
-  return {v:2,id:meta.id,group:meta.group,kind:meta.kind,issued:meta.issued,expires:meta.expires,...(meta.kind==='reply'?{replyTo:meta.replyTo}:{})};
+  return {v:2,id:meta.id,group:meta.group,kind:meta.kind,issued:meta.issued,expires:meta.expires,...(isReplyKind(meta.kind)?{replyTo:meta.replyTo}:{})};
 }
 export function validateMessagePayload(payload,now=Date.now()) {
-  if (!exact(payload,payload?.kind==='reply'?'ciphertext,expires,group,id,issued,iv,kind,replyTo,v':'ciphertext,expires,group,id,issued,iv,kind,v')) throw new Error('Неверный формат зашифрованного сообщения.');
-  const meta=metaValue({v:payload.v,id:payload.id,group:payload.group,kind:payload.kind,issued:payload.issued,expires:payload.expires,...(payload.kind==='reply'?{replyTo:payload.replyTo}:{})},now);
+  if (!exact(payload,isReplyKind(payload?.kind)?'ciphertext,expires,group,id,issued,iv,kind,replyTo,v':'ciphertext,expires,group,id,issued,iv,kind,v')) throw new Error('Неверный формат зашифрованного сообщения.');
+  const meta=metaValue({v:payload.v,id:payload.id,group:payload.group,kind:payload.kind,issued:payload.issued,expires:payload.expires,...(isReplyKind(payload.kind)?{replyTo:payload.replyTo}:{})},now);
   messageUnbase64url(payload.iv,12,16);
   const bytes=messageUnbase64url(payload.ciphertext,0,MAX_MESSAGE_CIPHERTEXT_CHARS);
   if (bytes.length < 16 || bytes.length > MAX_MESSAGE_PLAINTEXT_BYTES+16) throw new Error('Зашифрованное сообщение слишком большое.');
@@ -56,9 +59,15 @@ function surnameValue(value) {
   return s;
 }
 function commentValue(value) {
-  if (typeof value !== 'string' || /[\p{Cf}\u0000-\u0008\u000b-\u001f\u007f-\u009f]/u.test(value)) throw new Error('Неверный комментарий.');
+  if (typeof value !== 'string' || /[\p{Cf}\u0000-\u0008\u000b-\u001f\u007f-\u009f]/u.test(value.replace(/\u200d/g,''))) throw new Error('Неверный комментарий.');
   const s=value.normalize('NFC').trim();
   if ([...s].length > 2000) throw new Error('Комментарий: не более 2000 символов.');
+  // Preserve joined keyboard emoji (for example 👩‍⚕️) while still rejecting
+  // invisible joins in words and every other format/bidirectional control.
+  for(const join of s.matchAll(/\u200d/gu)){
+    const left=s.slice(0,join.index),right=s.slice(join.index+1);
+    if(!/\p{Extended_Pictographic}\uFE0F?[\u{1F3FB}-\u{1F3FF}]?$/u.test(left)||!/^\p{Extended_Pictographic}/u.test(right))throw new Error('Неверный комментарий.');
+  }
   return s;
 }
 // Walk every scan, not only the first SOS: progressive JPEGs may contain
@@ -147,7 +156,8 @@ export async function verifyMessageEnvelope(token,payload,sender,now=Date.now())
   if(p.senderId!==verifiedSender.id || p.payloadHash!==await messagePayloadHash(payload,now) || !await crypto.subtle.verify({name:'ECDSA',hash:'SHA-256'},verifiedSender.signingPublicKey,p.signature,p.signedBytes))throw new Error('Подпись сообщения не подтверждена.');
   return p;
 }
-export async function sealMessage(device,recipients,content,meta) {
+export async function sealMessage(device,recipients,content,meta,options={}) {
+  if(!exact(options,'')&&!(exact(options,'archive')&&typeof options.archive==='boolean'))throw new Error('Неверные параметры истории.');
   const at=Date.now(),m=metaValue({v:2,...meta},at),value=contentValue({surname:'',department:'',comment:'',photo:null,...content},m.kind);
   if(!Array.isArray(recipients)||recipients.length<1||recipients.length>25)throw new Error('Выберите от 1 до 25 получателей.');
   const verified=await Promise.all(recipients.map(c=>checkedContact(c)));
@@ -159,14 +169,45 @@ export async function sealMessage(device,recipients,content,meta) {
     const key=await crypto.subtle.importKey('raw',keyBytes,{name:'AES-GCM'},false,['encrypt']);
     const ciphertext=await crypto.subtle.encrypt({name:'AES-GCM',iv,additionalData:enc.encode(JSON.stringify(m)),tagLength:128},key,plaintext);
     const payload={...m,iv:messageBase64url(iv),ciphertext:messageBase64url(ciphertext)},hash=await messagePayloadHash(payload,at);
-    const entries=await Promise.all(verified.map(async recipient=>{
+    async function wrap(recipient){
       const wrapped=messageBase64url(await crypto.subtle.encrypt({name:'RSA-OAEP',label:enc.encode(MESSAGE_KEY_LABEL)},recipient.encryptionPublicKey,keyBytes));
       const unsigned=['PSO2',recipient.id,sender.id,wrapped,hash].join('.');
       const signature=await crypto.subtle.sign({name:'ECDSA',hash:'SHA-256'},device.signing.privateKey,enc.encode(MESSAGE_SIGN_DOMAIN+unsigned));
       return {recipientId:recipient.id,token:unsigned+'.'+messageBase64url(signature)};
-    }));
-    return {payload,entries};
+    }
+    const entries=await Promise.all(verified.map(wrap));
+    // The archive key belongs only to the sending device. It is never a group
+    // entry and does not increase the recipient count or notify the sender.
+    const senderToken=options.archive===true?(await wrap({id:sender.id,encryptionPublicKey:device.encryption.publicKey})).token:null;
+    return {payload,entries,...(senderToken?{senderToken}:{})};
   } finally {keyBytes.fill(0);plaintext.fill(0);}
+}
+
+// A sender-only archive has a separate, fixed retention window. We validate the
+// original signed payload at its creation time only after checking that BOTH
+// token identities belong to this device and that the 90-day window is live.
+// The ordinary recipient path above never bypasses the original access expiry.
+export async function openArchivedMessage(device,token,payload,now=Date.now()) {
+  const own=await deviceIdentity(device),parsed=inspectMessageToken(token);
+  if(parsed.senderId!==own.id||parsed.recipientId!==own.id)throw new Error('История доступна только на устройстве отправителя.');
+  if(!Number.isSafeInteger(now)||!Number.isSafeInteger(payload?.issued)||payload.issued<=0||payload.issued>now+30000||!Number.isSafeInteger(payload.issued+HISTORY_TTL)||now>=payload.issued+HISTORY_TTL)throw new Error('Срок хранения истории истёк или время сообщения неверно.');
+  const self={...await importPublicCard(await exportPublicCard(device,'Вы')),verified:true};
+  return openMessage(device,token,payload,[self],payload.issued);
+}
+
+// The bot cannot decrypt its outgoing RSA messages. A dedicated, separately
+// encrypted copy is addressed to the organizer who approved this bot key.
+// The signed encrypted body must bind the exact message, group and lifetime;
+// legacy unbound PSO1 links can never be promoted into an archive receipt.
+export async function openBotArchivedMessage(device,token,meta,verifiedBot,now=Date.now()) {
+  if(!exact(meta,'expires,group,id,issued,kind')||meta.kind!=='admission'||!['cardiology','orit'].includes(meta.group)||!Number.isSafeInteger(now)||!Number.isSafeInteger(meta.issued)||meta.issued<=0||meta.issued>now+30000||!Number.isSafeInteger(meta.expires)||meta.expires<=meta.issued||meta.expires-meta.issued>MAX_MESSAGE_TTL||meta.expires-meta.issued<60000||!Number.isSafeInteger(meta.issued+HISTORY_TTL)||now>=meta.issued+HISTORY_TTL)throw new Error('Срок хранения истории бота истёк или запись неверна.');
+  messageUnbase64url(meta.id,16,22);
+  const own=await deviceIdentity(device),parts=typeof token==='string'?token.split('.'):[];
+  if(parts.length!==5||parts[0]!=='PSO1'||parts[1]!==own.id||parts[2]!==verifiedBot?.id||verifiedBot?.role!=='bot'||verifiedBot?.verified!==true)throw new Error('Архив бота доступен только его организатору.');
+  const bot=await verifyRecipientGrant(verifiedBot,await exportPublicCard(device,'Организатор'),meta.issued);
+  const value=await openSurname(device,token,[bot],meta.issued);
+  if(value.messageId!==meta.id||value.group!==meta.group||value.issued!==meta.issued||value.expires!==meta.expires)throw new Error('Подпись бота не подтверждает эту запись истории.');
+  return {...value,kind:'admission',comment:'',photo:null};
 }
 export async function openMessage(device,token,payload,contactsArray,now=Date.now()) {
   const p=inspectMessageToken(token),own=await deviceIdentity(device);
@@ -180,12 +221,12 @@ export async function openMessage(device,token,payload,contactsArray,now=Date.no
     keyBytes=new Uint8Array(await crypto.subtle.decrypt({name:'RSA-OAEP',label:enc.encode(MESSAGE_KEY_LABEL)},device.encryption.privateKey,p.wrappedKey));
     if(keyBytes.length!==32)throw new Error('key');
     const key=await crypto.subtle.importKey('raw',keyBytes,{name:'AES-GCM'},false,['decrypt']);
-    const aad=metaValue({v:m.v,id:m.id,group:m.group,kind:m.kind,issued:m.issued,expires:m.expires,...(m.kind==='reply'?{replyTo:m.replyTo}:{})},now);
+    const aad=metaValue({v:m.v,id:m.id,group:m.group,kind:m.kind,issued:m.issued,expires:m.expires,...(isReplyKind(m.kind)?{replyTo:m.replyTo}:{})},now);
     plaintext=await crypto.subtle.decrypt({name:'AES-GCM',iv:messageUnbase64url(m.iv,12),additionalData:enc.encode(JSON.stringify(aad)),tagLength:128},key,messageUnbase64url(m.ciphertext));
     data=JSON.parse(dec.decode(plaintext));
     const value=contentValue(data,m.kind);
     if(JSON.stringify(value)!==JSON.stringify(data))throw new Error('noncanonical');
-    return {...value,messageId:m.id,kind:m.kind,group:m.group,issued:m.issued,expires:m.expires,...(m.kind==='reply'?{replyTo:m.replyTo}:{}),senderName:verifiedSender.name,code:'ПСО-'+m.id};
+    return {...value,messageId:m.id,kind:m.kind,group:m.group,issued:m.issued,expires:m.expires,...(isReplyKind(m.kind)?{replyTo:m.replyTo}:{}),senderName:verifiedSender.name,code:'ПСО-'+m.id};
   } catch {throw new Error('Не удалось расшифровать или проверить содержание сообщения.');}
   finally {if(keyBytes)keyBytes.fill(0);if(plaintext)new Uint8Array(plaintext).fill(0);}
 }

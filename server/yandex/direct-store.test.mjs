@@ -142,14 +142,16 @@ test('admin mutations enforce issuer binding and current role capacity',async ()
   assert.equal((await f.store.members(ADMIN)).members.length,5);
 });
 
-test('photo payload is separate from every scanned index and quota is rolling-day',async () => {
+test('encrypted payload is separate from every scanned index and its byte quota is rolling-day',async () => {
   const f = await fixture();
+  const payloadBytes=Buffer.byteLength(JSON.stringify(f.data(1,{payload:true}).payload));
+  await f.db.seed(`directquota:sender:${NEURO}:existing`,{created_at:START,expires:START+60000,payload_bytes:45000000-30*payloadBytes},START+DAY);
   for (let n=1;n<=30;n++) assert.equal(await f.store.create(NEURO,hash(n),f.data(n,{sender:NEURO,kind:'review',payload:true,ttl:60000})),'created');
   assert.equal(await f.store.create(NEURO,hash(31),f.data(31,{sender:NEURO,kind:'review',payload:true})),'limited');
   const rows = f.db.dump();
   for (const [key,value] of rows) if (!key.startsWith('directpayload:')) assert.equal(JSON.stringify(value).includes('X'.repeat(100)),false,key);
   assert.equal((await f.store.open(CARDIO,mid(1))).payload.ciphertext.length,1024);
-  f.advance(60001); // ciphertext expiry does not reset daily photo cap
+  f.advance(60001); // ciphertext expiry does not reset the daily byte cap
   assert.equal(await f.store.create(NEURO,hash(31),f.data(31,{sender:NEURO,kind:'review',payload:true})),'limited');
   f.advance(DAY);
   assert.equal(await f.store.create(NEURO,hash(31),f.data(31,{sender:NEURO,kind:'review',payload:true})),'created');

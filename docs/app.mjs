@@ -1,4 +1,4 @@
-import {INVITE_ROLES, ROLE_LABELS, GROUP_LABELS, roleGroup, rolesForGroup, isRehabGroup, canSendGroup} from './care-routing.mjs';
+import {INVITE_ROLES, ROLE_LABELS, GROUP_LABELS, roleGroup, rolesForGroup, isRehabGroup, canSendGroup, participatesInGroup, isReplyKind, isGroupConversationKind} from './care-routing.mjs';
 import {sealDemo, openDemo, tokenFromInput, linkForToken} from './crypto.mjs';
 import {exportPublicCard, importPublicCard, deviceIdentity, sealSurname, openSurname} from './exchange.mjs';
 import {readDevice, loadContacts, saveContact, deleteContact, getMyName, setMyName} from './storage.mjs';
@@ -9,7 +9,7 @@ import {PushClient, pushKeyBytes} from './push.mjs';
 import {TeamClient, joinIDFromInput} from './team.mjs';
 import {installAppUpdates} from './updates.mjs';
 import {DirectClient, directIDFromInput, newMessageID, savePending, loadPending, removePending} from './direct.mjs';
-import {sealMessage, openMessage} from './messages.mjs';
+import {sealMessage, openMessage, openArchivedMessage, openBotArchivedMessage} from './messages.mjs';
 import {preparePhoto, photoObjectURL} from './photos.mjs';
 import {DeviceUnlockClient} from './device-unlock.mjs';
 import {makeRecipientGrant, verifyRecipientGrant, verifyRecipientDirectory, pinOrganizerCard, loadOrganizerCard, shortTrustedInvitationURL, parseShortInvitation, verifyShortInvitation, parseTrustedInvitation} from './recipient-trust.mjs';
@@ -34,6 +34,7 @@ let lastConfirmedTeam=null, teamConnectionMessage='';
 let appUpdates=null, appUpdateAvailable=false;
 let organizerPin=null, invitationOrganizer=null;
 let revealedReply=null, draftReply=null;
+let historyRecord=null, historyFallback=false, historySource='own';
 let activeBox='inbox', inboxItems=[], inboxNext=null, inboxBusy=false, directPhoto=null, photoURL='', previewURL='', photoBusy=false, directPendingBusy=false, discardPendingConfirmed=false;
 const standalone = navigator.standalone === true || globalThis.matchMedia?.('(display-mode: standalone)').matches === true;
 
@@ -61,14 +62,16 @@ function hideResult(message = '') {
   if (message) say(message);
 }
 function clearPhoto(){directPhoto=null;$('compose-photo').value='';$('photo-preview').hidden=true;$('photo-preview').removeAttribute('src');$('photo-remove').hidden=true;$('photo-status').textContent='';if(previewURL){URL.revokeObjectURL(previewURL);previewURL='';}}
-function clearSensitive() { hideResult(); draftReply=null; $('compose-surname').value = ''; $('compose-comment').value=''; clearPhoto(); renderReplyCompose(); }
+function clearHistory(){historyRecord=null;$('history-detail').hidden=true;$('history-recipients').replaceChildren();$('history-show').hidden=true;}
+function clearSensitive() { hideResult();clearHistory();closeEmojiPicker(); draftReply=null; $('compose-surname').value = ''; $('compose-comment').value=''; clearPhoto(); renderReplyCompose(); }
 function renderReplyCompose() {
   $('reply-context').hidden=!draftReply;
-  $('reply-recipient').textContent=draftReply?draftReply.recipient.name:'';
+  $('reply-recipient').textContent=draftReply?GROUP_LABELS[draftReply.group]:'';
+  $('reply-audience').textContent=draftReply?'Ответ получат специалисты этого направления и все неврологи и организаторы ПСО, кроме вас. Подключено устройств: '+teamMembers.filter(m=>m.id!==selfContact?.id&&participatesInGroup(m.role,draftReply.group)).length+'.':'';
   $('recipient-routing').hidden=!!draftReply;
   $('recipient').required=!draftReply;
   renderCareDirection();
-  if(directClient)$('encrypt').textContent=draftReply?'Отправить ответ':isRehabGroup(selectedGroup())?'Отправить всей группе':'Отправить врачу';
+  if(directClient)$('encrypt').textContent=draftReply?'Отправить ответ группе':isRehabGroup(selectedGroup())?'Отправить всей группе':'Отправить врачу';
 }
 function tick() {
   if (!endsAt) return;
@@ -88,6 +91,11 @@ function setBusy(value) {
   $('encrypt').disabled = value || photoBusy || !ready || (!draftReply&&!selectedGroup()) || (teamClient && (!canCompose() || teamBusy));
   $('reply-message').disabled=value||teamBusy||!ready||!canReply()||!revealedReply;
   $('cancel-reply').disabled=value;
+  $('history-show').disabled=value||teamBusy||!ready||!(historyRecord?.senderToken||historyRecord?.organizerToken);
+  $('history-close').disabled=value;
+  updateEmojiButtons();
+  $('history-own').disabled=value||teamBusy||!ready;
+  $('history-bot').disabled=value||teamBusy||!ready||!canAdmin();
   $('inbox-refresh').disabled=value||inboxBusy||!ready;$('inbox-more').disabled=value||inboxBusy||!inboxNext;
   $('retry-pending').disabled=value||directPendingBusy||!ready;
   $('discard-pending').disabled=value||directPendingBusy||!ready;
@@ -124,7 +132,7 @@ function suspendSensitive() {
   clearSensitive();if(activeScreen==='write'&&teamClient&&!canCompose())activeScreen='read';renderNavigation();deviceUnlock?.clear();
 }
 const screens = {
-  read: ['Сообщения', 'Входящие и исходящие сообщения вашей команды.'],
+  read: ['Сообщения', 'Входящие и история отправленных сообщений.'],
   write: ['Новое сообщение', 'Фамилия, фото и комментарий для выбранной группы.'],
   team: ['Команда', 'Подключение, приглашения и доступ специалистов.'],
   settings: ['Настройки', 'Уведомления, защита и помощь.']
@@ -136,19 +144,22 @@ function allowedScreen(screen) {
   return screen;
 }
 function renderNavigation() {
+  if((draftReply&&!participatesInGroup(teamState.role,draftReply.group))||(revealedReply&&!participatesInGroup(teamState.role,revealedReply.group))){clearSensitive();if(activeScreen==='write'&&!canCompose())activeScreen='read';}
+  renderHistorySource();
   for (const screen of Object.keys(screens)) {
     $('screen-' + screen).hidden = screen !== activeScreen;
     $('show-' + screen).setAttribute('aria-pressed', String(screen === activeScreen));
   }
   $('show-write').hidden = !!teamClient && !canCompose();
   $('show-team').hidden = !teamClient;
+  $('box-outbox').hidden=!!teamClient&&!canHistory();
   $('read-panel').hidden = activeScreen !== 'read';
   $('write-panel').hidden = activeScreen !== 'write';
   $('direct-panel').hidden = !directClient || activeScreen !== 'read';
   $('legacy-open').hidden = activeScreen !== 'read';
-  $('page-title').textContent = activeScreen==='write'&&draftReply?'Ответ врачу':screens[activeScreen][0];
-  $('page-description').textContent = activeScreen==='write'&&draftReply?'Напишите ответ на полученное сообщение.':screens[activeScreen][1];
-  renderReplyCompose();
+  $('page-title').textContent = activeScreen==='write'?(draftReply?'Ответ группе':canDiscuss()&&!canReview()?'Написать группе':screens.write[0]):screens[activeScreen][0];
+  $('page-description').textContent = activeScreen==='write'?(draftReply?'Ответ специалистам направления и неврологам ПСО.':canDiscuss()&&!canReview()?'Обсуждение ранней реабилитации вместе с ПСО.':screens.write[1]):screens[activeScreen][1];
+  renderReplyCompose();updateEmojiButtons();
 }
 function showScreen(screen, {preserveNotice=false, focus=false} = {}) {
   const next = allowedScreen(screen);
@@ -578,12 +589,13 @@ addEventListener('hashchange', () => {
   clearSensitive(); setCandidate(null);
   flushIncoming();
 });
+addEventListener('blur',()=>{if(!$('result').hidden)suspendSensitive();});
 document.addEventListener('visibilitychange', () => { if (document.hidden) suspendSensitive(); else { tick(); flushIncoming(); if(directClient)void refreshInbox().then(()=>retryDelivery()); } });
 addEventListener('pagehide', suspendSensitive);
 
 
 const roleLabels=ROLE_LABELS;
-function selectedGroup(){return directClient&&isRehabGroup(composeDirection)?composeDirection:$('recipient').value;}
+function selectedGroup(){if(canDiscuss()&&!canReview())return 'rehab1';return directClient&&isRehabGroup(composeDirection)?composeDirection:$('recipient').value;}
 function selectCareDirection(direction){
   if(!directClient||!canReview()||draftReply||busy||teamBusy||photoBusy||!ready||!['pso','rehab1','rehab2'].includes(direction))return;
   if(composeDirection===direction)return;
@@ -595,22 +607,25 @@ function selectCareDirection(direction){
   renderReplyCompose();invalidateComposed();
 }
 function renderCareDirection(){
-  const group=selectedGroup(),rehab=!!directClient&&isRehabGroup(group);
+  const group=selectedGroup(),rehab=!!directClient&&isRehabGroup(group),discussion=canDiscuss()&&!canReview();
+  $('discussion-context').hidden=!discussion||!!draftReply;
   $('care-directions').hidden=!directClient||!!draftReply||!canReview();
   for(const direction of ['pso','rehab1','rehab2'])$('direction-'+direction).setAttribute('aria-pressed',String(composeDirection===direction));
   $('pso-recipient-picker').hidden=rehab;
   $('recipient').required=!draftReply&&!rehab;
   $('recipient-summary').hidden=!directClient||!!draftReply;
-  const recipients=teamMembers.filter(member=>roleGroup(member.role)===group);
+  const recipients=teamMembers.filter(member=>discussion?member.id!==selfContact?.id&&participatesInGroup(member.role,group):roleGroup(member.role)===group);
   const count=recipients.length;
-  $('recipient-summary').textContent=!group?'Выберите получателей в направлении ПСО.':(GROUP_LABELS[group]||'Группа')+' · подключено: '+count+'. '+(count?'Сообщение получат все подключённые участники этой группы.':'В группе пока никого нет. Сначала пригласите специалистов.');
+  $('recipient-summary').textContent=!group?'Выберите получателей в направлении ПСО.':(GROUP_LABELS[group]||'Группа')+' · подключено: '+count+'. '+(count?(discussion?'Сообщение получат специалисты I этапа и все неврологи и организаторы ПСО, кроме вас.':'Сообщение получат все подключённые участники этой группы.'):'В группе пока никого нет. Сначала пригласите специалистов.');
   $('rehab-members').hidden=!rehab;
   $('rehab-members').textContent=group==='rehab1'?'Реабилитолог, медицинский психолог, логопед и методист ЛФК — I этап.':group==='rehab2'?'Реабилитологи отделения медицинской реабилитации — II этап.':'';
   $('rehab-delivery-note').hidden=!rehab;
 }
+function canHistory(){return teamState.state==='active'&&teamState.role!=='bot';}
 function canReview(){return teamState.state==='active'&&['admin','neurologist'].includes(teamState.role);}
-function canReply(){return !!directClient&&teamState.state==='active'&&['admin','neurologist','cardiologist','intensivist'].includes(teamState.role);}
-function canCompose(){return canReview()||!!draftReply&&canReply();}
+function canDiscuss(){return !!directClient&&teamState.state==='active'&&roleGroup(teamState.role)==='rehab1';}
+function canReply(){return !!directClient&&teamState.state==='active'&&teamState.role!=='bot';}
+function canCompose(){return canReview()||canDiscuss()||!!draftReply&&canReply();}
 function canAdmin(){return teamState.state==='active'&&teamState.role==='admin';}
 function actionError(error,stage){
   const status=Number.isInteger(error?.status)&&error.status>=100&&error.status<=599?' (HTTP '+error.status+')':'';
@@ -628,6 +643,7 @@ function teamRefreshFailed(error,stage){
   inboxItems=[];inboxNext=null;$('inbox-list').replaceChildren();
 }
 function updateTeamButtons(){
+  updateEmojiButtons();
   if(!teamClient)return;
   const blocked=busy||teamBusy||!ready;
   $('team-refresh').disabled=blocked;
@@ -797,7 +813,33 @@ $('share-invite').addEventListener('click',async()=>{
   }
 });
 
+const emojiGroups=[
+  ['Неврология',[['🧠','Мозг в деле'],['🧩','Собираем картину'],['💡','Есть идея'],['🗣️','Работаем над речью']]],
+  ['Движение',[['💪','Набираем силу'],['🦵','Разминаемся'],['👣','Шаг за шагом'],['🎯','К цели']]],
+  ['Поддержка',[['🙌','Получилось'],['👏','Отличная работа'],['🙂','С улыбкой'],['🌟','Маленькая победа']]],
+  ['Реанимация',[['🫁','Дышим ровно'],['🫀','Держим ритм'],['🩺','Команда на посту'],['☕','Дежурим бодро']]]
+];
+function updateEmojiButtons(){const disabled=busy||teamBusy||photoBusy||!ready||!directClient||!canCompose()||activeScreen!=='write';$('emoji-toggle').disabled=disabled;for(const button of $('emoji-picker').querySelectorAll('button'))button.disabled=disabled;}
+function closeEmojiPicker(){$('emoji-picker').hidden=true;$('emoji-toggle').setAttribute('aria-expanded','false');}
+function insertCommentEmoji(symbol){
+  if(busy||teamBusy||photoBusy||!ready||!directClient||!canCompose()||activeScreen!=='write')return;
+  const field=$('compose-comment'),start=Number.isInteger(field.selectionStart)?field.selectionStart:field.value.length,end=Number.isInteger(field.selectionEnd)?field.selectionEnd:start;
+  const value=field.value.slice(0,start)+symbol+field.value.slice(end);
+  if([...value].length>2000){say('Комментарий: не более 2000 символов. Сократите текст перед вставкой эмодзи.',true);return;}
+  field.value=value;invalidateComposed();field.focus({preventScroll:true});field.setSelectionRange?.(start+symbol.length,start+symbol.length);
+}
+function installEmojiPicker(){
+  for(const [label,entries] of emojiGroups){const section=document.createElement('section'),heading=document.createElement('h3'),buttons=document.createElement('div');heading.textContent=label;buttons.className='emoji-chips';
+    for(const [symbol,title] of entries){const button=document.createElement('button');button.type='button';button.textContent=symbol;button.title=title;button.setAttribute('aria-label',title);button.addEventListener('click',()=>insertCommentEmoji(symbol));buttons.append(button);}
+    section.append(heading,buttons);$('emoji-picker').append(section);
+  }
+}
+$('emoji-toggle').addEventListener('click',()=>{if(busy||teamBusy||photoBusy||!ready||!directClient||!canCompose()||activeScreen!=='write')return;const open=$('emoji-picker').hidden;$('emoji-picker').hidden=!open;$('emoji-toggle').setAttribute('aria-expanded',String(open));});
 async function init() {
+  installEmojiPicker();
+  $('expiry').replaceChildren();
+  for(const [value,label] of (directClient?[[60,'1 час'],[360,'6 часов'],[1440,'24 часа'],[2880,'48 часов']]:[[60,'1 час'],[240,'4 часа'],[1440,'24 часа']])){const option=document.createElement('option');option.value=String(value);option.textContent=label;$('expiry').append(option);}
+  $('expiry').value=directClient?'2880':'1440';$('archive-compose-help').hidden=!directClient;
   setBusy(true);
   if ('serviceWorker' in navigator) {
     appUpdates = installAppUpdates({navigator,document,
@@ -843,35 +885,109 @@ $('app-update').addEventListener('click',async()=>{
   try{await appUpdates.check();}finally{$('app-update').disabled=false;}
 });
 
-function messageTitle(item){return item.kind==='reply'?'Ответ на сообщение':isRehabGroup(item.group)?'Запрос на реабилитацию':item.kind==='review'?'Проверочная история':'Новый пациент';}
+function messageTitle(item){return item.kind==='group_reply'?'Ответ группе':item.kind==='discussion'?'Обсуждение · I этап':item.kind==='reply'?'Личный ответ':isRehabGroup(item.group)?'Запрос на реабилитацию':item.kind==='review'?'Проверочная история':'Новый пациент';}
 function dateLabel(time){return new Date(time).toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'});}
+function renderHistorySource(){
+  if(historySource==='bot'&&!canAdmin()){historySource='own';hideResult();clearHistory();inboxItems=[];inboxNext=null;$('inbox-list').replaceChildren();}
+  $('history-source').hidden=activeBox==='inbox'||!canAdmin();
+  $('history-own').setAttribute('aria-pressed',String(historySource==='own'));$('history-bot').setAttribute('aria-pressed',String(historySource==='bot'));
+  $('history-recent').hidden=historySource==='bot';
+}
+function historyHelp(){if(historySource==='bot')return 'Отправления бота после обновления сохраняются на 90 дней. Получателям — до 48 часов. Прежние сообщения автоматически не добавляются. История доступна только на этом телефоне организатора.';if(activeBox==='outbox')return 'Недавние исходящие: только сообщения с действующим сроком для получателей. Здесь видны отметки открытия, а не выполнение консультации.';return historyFallback?'Показаны прежние исходящие: сервис истории ещё не обновлён. «Открыто» означает просмотр сообщения, а не выполненную консультацию.':'Новые отправления после обновления сохраняются на 90 дней. Получателям — до 48 часов. История доступна только с этого телефона. «Открыто» означает просмотр сообщения, а не выполненную консультацию.';}
 function renderInbox(){
+  renderHistorySource();
   $('inbox-list').replaceChildren();
-  const unread=inboxItems.filter(item=>!item.openedAt).length;
+  const history=activeBox!=='inbox',unread=inboxItems.filter(item=>!item.openedAt).length;
   $('inbox-count').textContent=activeBox==='inbox'&&unread?String(unread):'';
-  $('box-inbox').setAttribute('aria-pressed',String(activeBox==='inbox'));$('box-outbox').setAttribute('aria-pressed',String(activeBox==='outbox'));
+  $('history-controls').hidden=!history;
+  $('history-recent').textContent=activeBox==='outbox'?'Вернуться к истории за 90 дней':'Недавние исходящие';
+  $('box-inbox').setAttribute('aria-pressed',String(!history));$('box-outbox').setAttribute('aria-pressed',String(history));
   for(const item of inboxItems){
     const row=document.createElement('article');row.className='message-row';
     const title=document.createElement('strong');title.textContent=messageTitle(item);row.append(title);
-    const info=document.createElement('p');info.className='message-meta';info.textContent=(item.kind==='reply'?'Личный ответ':GROUP_LABELS[item.group]||'Группа')+' · '+dateLabel(item.issued);row.append(info);
-    const sender=document.createElement('p');sender.className='message-meta';sender.textContent='От '+item.senderName;row.append(sender);
-    if(activeBox==='inbox'){
+    const info=document.createElement('p');info.className='message-meta';info.textContent=(item.kind==='reply'?'Личный ответ':GROUP_LABELS[item.group]||'Группа')+' · '+dateLabel(item.createdAt||item.issued);row.append(info);
+    if(!history){
+      const sender=document.createElement('p');sender.className='message-meta';sender.textContent='От '+item.senderName;row.append(sender);
       const button=document.createElement('button');button.type='button';button.className='button '+(item.openedAt?'button-secondary':'button-primary');button.textContent=item.openedAt?'Открыть снова':'Открыть';button.addEventListener('click',()=>revealDirect(item.id));row.append(button);
       if(!item.openedAt){const badge=document.createElement('span');badge.className='unread-mark';badge.textContent='Не открыто';row.append(badge);}
-    }else{const status=document.createElement('p');status.className='delivery-state';status.textContent=item.openedCount?'Открыли: '+item.openedCount+' из '+item.recipientCount:'Сохранено · ожидает открытия';row.append(status);}
+    }else{
+      const status=document.createElement('p');status.className='delivery-state';status.textContent='Открыто на устройствах: '+item.openedCount+' из '+item.recipientCount;row.append(status);
+      if(activeBox==='history'&&!historyFallback){const button=document.createElement('button');button.type='button';button.className='button button-secondary';button.textContent='Получатели и содержимое';button.addEventListener('click',()=>openHistoryDetail(item.id));row.append(button);}
+      if(activeBox==='outbox'||historyFallback||!item.hasContent){const note=document.createElement('p');note.className='field-help compact-help';note.textContent=activeBox==='outbox'||historyFallback?'В этом списке доступен только статус отправки.':'Копия содержимого в историю не сохранялась.';row.append(note);}
+    }
     $('inbox-list').append(row);
   }
   $('inbox-more').hidden=!inboxNext;
-  if(!inboxItems.length)$('inbox-status').textContent=activeBox==='inbox'?'Новых сообщений пока нет.':'Отправленных сообщений пока нет.';
+  if(!inboxItems.length)$('inbox-status').textContent=history?(historySource==='bot'?'Здесь появятся новые отправления бота после его обновления. Прежние сообщения автоматически не добавляются.':'Здесь появятся сообщения, отправленные с этого телефона. Прежнее содержимое автоматически не добавляется.'):'Новых сообщений пока нет.';
 }
 async function refreshInbox(more=false){
   if(!directClient||!ready||teamBusy||teamState.state!=='active'||inboxBusy||document.hidden)return;
-  const box=activeBox;inboxBusy=true;setBusy(busy);$('inbox-status').textContent='Обновляем…';
-  try{const r=await directClient.list(device,box,more?inboxNext:null);if(box!==activeBox)return;
-    inboxItems=more?[...inboxItems,...r.items.filter(m=>!inboxItems.some(old=>old.id===m.id))]:r.items;inboxNext=r.next;renderInbox();if(inboxItems.length)$('inbox-status').textContent=activeBox==='outbox'?'«Открыто» означает просмотр сообщения, а не выполненную консультацию.':'Сообщения доступны до 24 часов.';
-    if(activeBox==='inbox'&&navigator.setAppBadge){const unread=inboxItems.filter(m=>!m.openedAt).length;try{if(unread)await navigator.setAppBadge(unread);else await navigator.clearAppBadge?.();}catch{}}
-  }catch(e){$('inbox-status').textContent=e.status===403?'Доступ этого телефона отключён.':e.message;if(e.status===403){teamRefreshFailed(e,'Проверка доступа');renderTeam();}}
-  finally{inboxBusy=false;setBusy(busy);}
+  const box=activeBox,source=historySource;inboxBusy=true;setBusy(busy);$('inbox-status').textContent='Обновляем…';
+  try{
+    let r;
+    if(box==='history'){
+      try{r=source==='bot'?await directClient.botHistory(device,more?inboxNext:null):await directClient.history(device,more?inboxNext:null);historyFallback=false;}
+      catch(e){if(source==='bot')throw e;if((![400,404,405,501].includes(e.status)&&!(e.status===503&&e.code==='history_unavailable'))||e.code==='clock_skew')throw e;r=await directClient.list(device,'outbox',more&&historyFallback?inboxNext:null);historyFallback=true;}
+    }else r=await directClient.list(device,box,more?inboxNext:null);
+    if(box!==activeBox||source!==historySource)return;
+    inboxItems=more?[...inboxItems,...r.items.filter(m=>!inboxItems.some(old=>old.id===m.id))]:r.items;inboxNext=r.next;renderInbox();
+    if(inboxItems.length)$('inbox-status').textContent=box!=='inbox'?historyHelp():'Получателям сообщения доступны до выбранного срока, максимум 48 часов.';
+    if(box==='inbox'&&navigator.setAppBadge){const unread=inboxItems.filter(m=>!m.openedAt).length;try{if(unread)await navigator.setAppBadge(unread);else await navigator.clearAppBadge?.();}catch{}}
+  }catch(e){if(box!==activeBox||source!==historySource)return;if(box==='history'&&source==='bot'&&e.status===403){$('inbox-status').textContent='История бота доступна только на телефоне организатора, который подключил этого бота.';return;}$('inbox-status').textContent=e.status===403?'Доступ этого телефона отключён.':e.message;if(e.status===403){teamRefreshFailed(e,'Проверка доступа');renderTeam();}}
+  finally{inboxBusy=false;setBusy(busy);if(box!==activeBox||source!==historySource)void refreshInbox();}
+}
+function historyDate(time){return new Date(time).toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit'});}
+function renderHistoryDetail(record){
+  $('history-title').textContent=messageTitle(record.meta)+' · '+(GROUP_LABELS[record.meta.group]||'Группа');
+  $('history-saved').textContent='Сохранено на сервере: '+historyDate(record.createdAt)+'.';
+  $('history-id').textContent='Номер сообщения: '+record.meta.id;
+  $('history-expiry').textContent='Получателям доступно до '+historyDate(record.meta.expires)+'. Ваша история — до '+historyDate(record.archiveUntil)+'.';
+  $('history-recipients').replaceChildren();
+  for(const recipient of record.recipients){
+    const row=document.createElement('li'),name=document.createElement('strong');name.textContent=recipient.name+' · '+(ROLE_LABELS[recipient.role]||'Получатель');row.append(name);
+    const deviceCode=document.createElement('p');deviceCode.className='message-meta';deviceCode.textContent='Устройство: '+recipient.id.slice(0,10);row.append(deviceCode);
+    const viewed=document.createElement('p');viewed.className='message-meta';viewed.textContent=recipient.openedAt?'Открыто на устройстве: '+historyDate(recipient.openedAt):'Открытие пока не отмечено';row.append(viewed);
+    const push=document.createElement('p');push.className='field-help compact-help';push.textContent=recipient.pushState==='accepted'?'Принято службой уведомлений'+(recipient.pushAcceptedAt?': '+historyDate(recipient.pushAcceptedAt):'')+'.':recipient.pushState==='queued'&&record.meta.expires>Date.now()?'Уведомление ожидает повторной отправки.':record.meta.expires<=Date.now()?'Срок доступа для получателей истёк. Подтверждения службы уведомлений нет.':'Нет подтверждения от службы уведомлений.';row.append(push);
+    $('history-recipients').append(row);
+  }
+  const hasContent=!!record.payload&&!!record.senderToken||!!record.organizerToken;
+  $('history-content-note').textContent=record.organizerToken?'Копия отправления бота открывается только на этом телефоне организатора.':hasContent?'Копия открывается только на этом телефоне. На другом или новом телефоне прежняя история недоступна.':'Копия содержимого для этого сообщения не сохранялась. Доступны только сведения об отправке и открытии.';
+  $('history-show').hidden=!hasContent;$('history-detail').hidden=false;
+}
+async function openHistoryDetail(id){
+  if(!directClient||busy||teamBusy||!ready||!canHistory())return;
+  showMode('read');const current=generation;setBusy(true);say('Проверяем историю отправления…');
+  try{
+    let unlockToken=deviceUnlock?await deviceUnlock.ensure(device):'';
+    if(current!==generation||document.hidden)return;
+    let record;try{record=await directClient.historyOpen(device,id,{unlockToken});}catch(e){
+      if(e.status!==428||!deviceUnlock)throw e;deviceUnlock.clear();unlockToken=await deviceUnlock.ensure(device);
+      if(current!==generation||document.hidden)return;record=await directClient.historyOpen(device,id,{unlockToken});
+    }
+    if(current!==generation||document.hidden)return;
+    if(record.senderRole==='bot'){if(!canAdmin()||!record.organizerToken||!record.sender?.verified)throw new Error('История бота недоступна на этом телефоне.');}
+    else if((await importPublicCard(record.senderCard)).id!==selfContact.id)throw new Error('История принадлежит другому телефону.');
+    if(current!==generation||document.hidden)return;
+    historyRecord=record;renderHistoryDetail(record);say('');$('history-detail').scrollIntoView({block:'start',behavior:'auto'});$('history-title').focus({preventScroll:true});
+  }catch(e){if(current===generation&&!document.hidden)say(e.message||'История недоступна.',true);}
+  finally{setBusy(false);}
+}
+async function revealHistory(){
+  if(!(historyRecord?.senderToken||historyRecord?.organizerToken)||busy||teamBusy||!ready||!canHistory())return;
+  const record=historyRecord;if(record.senderRole==='bot'&&!canAdmin())return;hideResult();const current=generation;setBusy(true);
+  try{
+    if(deviceUnlock)await deviceUnlock.ensure(device);
+    if(current!==generation||document.hidden)return;
+    const data=record.organizerToken?await openBotArchivedMessage(device,record.organizerToken,record.meta,record.sender):await openArchivedMessage(device,record.senderToken,record.payload);
+    if(current!==generation||document.hidden)return;
+    if(data.messageId!==record.meta.id||data.group!==record.meta.group||data.kind!==record.meta.kind||data.issued!==record.meta.issued||data.expires!==record.meta.expires||isReplyKind(record.meta.kind)&&data.replyTo!==record.meta.replyTo)throw new Error('Содержимое не соответствует записи истории.');
+    $('surname').textContent=data.surname||(isReplyKind(record.meta.kind)?'Ваш ответ':'Ваше сообщение');$('department').textContent=data.department;
+    $('result-label').textContent=(record.organizerToken?'История бота · ':'Моя история · ')+messageTitle(record.meta);$('result-comment').textContent=data.comment||'';$('case-code').textContent=(record.organizerToken?'Отправлено ботом · ':'Отправлено вами · ')+historyDate(record.createdAt);
+    if(data.photo){photoURL=photoObjectURL(data.photo);$('result-photo').src=photoURL;$('result-photo').hidden=false;}
+    $('result').hidden=false;endsAt=performance.now()+Math.min(30000,Math.max(0,record.archiveUntil-Date.now()));tick();timer=setInterval(tick,250);
+    say('Ваша копия расшифрована на этом телефоне.');$('result').scrollIntoView({block:'center',behavior:'auto'});$('surname').focus({preventScroll:true});
+  }catch(e){if(current===generation&&!document.hidden)say(e.message||'Не удалось расшифровать вашу копию.',true);}
+  finally{setBusy(false);}
 }
 async function revealDirect(id,fromIncoming=false){
   if(!directClient||busy||!ready)return;
@@ -890,26 +1006,28 @@ async function revealDirect(id,fromIncoming=false){
     let sender;
     if(record.sender.id===organizerPin.id&&record.senderRole==='admin')sender={...organizerPin,name:record.senderName,role:'admin',verified:true};
     else sender=await verifyRecipientGrant({id:record.sender.id,name:record.senderName,role:record.senderRole,card:record.senderCard,approvalProof:record.senderApprovalProof},organizerPin);
-    if(isRehabGroup(record.meta.group)&&(!record.payload||!canSendGroup(record.senderRole,record.meta.group,record.meta.kind)))throw new Error('Реабилитационное сообщение должно быть зашифровано и отправлено неврологом ПСО.');
-    if(record.meta.kind==='admission'&&record.senderRole!=='bot'||record.meta.kind==='review'&&!['admin','neurologist'].includes(record.senderRole)||record.meta.kind==='reply'&&!['admin','neurologist','cardiologist','intensivist'].includes(sender.role))throw new Error('Роль отправителя не разрешает это сообщение.');
+    if(!canSendGroup(sender.role,record.meta.group,record.meta.kind)||(isRehabGroup(record.meta.group)||isGroupConversationKind(record.meta.kind))&&!record.payload)throw new Error('Роль отправителя не разрешает это сообщение.');
     const ownRecord=(await directClient.directory(device)).find(member=>member.id===selfContact.id);
     const ownRole=ownRecord?.id===organizerPin.id&&ownRecord.role==='admin'?'admin':(await verifyRecipientGrant(ownRecord,organizerPin)).role;
     if(record.meta.kind==='reply'){
       if(!record.payload||!['admin','neurologist','cardiologist','intensivist'].includes(ownRole))throw new Error('Ответ недоступен этому получателю.');
+    }else if(isGroupConversationKind(record.meta.kind)){
+      if(!record.payload||!participatesInGroup(ownRole,record.meta.group))throw new Error('Обсуждение адресовано другому направлению.');
     }else if(record.meta.group!==roleGroup(ownRole))throw new Error('Сообщение адресовано другой группе врачей.');
     if(current!==generation||document.hidden)return;
     const data=record.payload?await openMessage(device,record.token,record.payload,[sender]):await openSurname(device,record.token,[sender]);
     if(current!==generation||document.hidden)return;
+    if(!record.payload&&(data.messageId!==undefined||data.group!==undefined)&&(data.messageId!==id||data.group!==record.meta.group))throw new Error('Содержимое не соответствует сообщению.');
     if(record.payload&&(data.messageId!==id||data.group!==record.meta.group||data.kind!==record.meta.kind))throw new Error('Содержимое не соответствует сообщению.');
-    if(record.meta.kind==='reply'&&data.replyTo!==record.meta.replyTo)throw new Error('Ответ не соответствует исходному сообщению.');
+    if(isReplyKind(record.meta.kind)&&data.replyTo!==record.meta.replyTo)throw new Error('Ответ не соответствует исходному сообщению.');
     if(data.expires!==record.meta.expires||data.issued!==record.meta.issued)throw new Error('Время сообщения не совпадает с подписанным содержимым.');
-    $('surname').textContent=data.surname||(record.meta.kind==='reply'?'Ответ врача':'Проверочная история');$('department').textContent=data.department;
+    $('surname').textContent=data.surname||(isReplyKind(record.meta.kind)?'Ответ группе':record.meta.kind==='discussion'?'Обсуждение':'Проверочная история');$('department').textContent=data.department;
     $('result-label').textContent=messageTitle(record.meta);
     $('result-comment').textContent=data.comment||'';$('case-code').textContent='Отправитель: '+data.senderName;
     if(data.photo){photoURL=photoObjectURL(data.photo);$('result-photo').src=photoURL;$('result-photo').hidden=false;}
     $('result').hidden=false;$('token').value='';endsAt=performance.now()+Math.min(30000,Math.max(0,data.expires-Date.now()));tick();timer=setInterval(tick,250);
-    if(!$('result').hidden&&canReply()&&!isRehabGroup(record.meta.group)&&record.meta.kind!=='admission'&&['admin','neurologist','cardiologist','intensivist'].includes(sender.role)&&sender.id!==selfContact.id){
-      revealedReply={id,group:record.meta.group,expires:data.expires,recipient:sender,hasSurname:!!data.surname};$('reply-message').hidden=false;
+    if(!$('result').hidden&&canReply()&&participatesInGroup(ownRole,record.meta.group)){
+      revealedReply={id,group:record.meta.group,expires:data.expires,hasSurname:!!data.surname};$('reply-message').hidden=false;
     }
     if(fromIncoming&&activeIncoming)activeIncoming.pending=false;
     say('Сообщение расшифровано на этом телефоне.');$('result').scrollIntoView({block:'center',behavior:'auto'});$('surname').focus({preventScroll:true});
@@ -927,7 +1045,7 @@ function startReply(){
   // Never copy the received comment/photo or leave the result behind the form.
   clearSensitive();draftReply=context;activeScreen='write';renderNavigation();setBusy(false);
   $('compose-surname').value=surname;$('compose-orit').checked=orit;
-  say('Ответ получит '+context.recipient.name+'.');
+  say('Ответ получат специалисты направления и все неврологи и организаторы ПСО, кроме вас.');
   $('compose-comment').scrollIntoView({block:'center',behavior:'auto'});$('compose-comment').focus({preventScroll:true});
 }
 $('reply-message').addEventListener('click',startReply);
@@ -936,29 +1054,26 @@ $('cancel-reply').addEventListener('click',()=>{
   clearSensitive();activeScreen='read';renderNavigation();setBusy(false);say('Ответ отменён.');
 });
 async function composeDirectReply(){
-  if(!draftReply||!canReply()||teamBusy||photoBusy){say('Сначала откройте сообщение и нажмите «Ответить».',true);return;}
+  if(!draftReply||!canReply()||teamBusy||photoBusy){say('Сначала откройте сообщение и нажмите «Ответить группе».',true);return;}
   const context=draftReply;
   hideResult();const current=generation,issued=Date.now(),expires=issued+Number($('expiry').value)*60000;
   let content={surname:$('compose-surname').value,department:$('compose-orit').checked?'ОРИТ':'ПСО',comment:$('compose-comment').value,photo:directPhoto};
   let queued=false;
-  setBusy(true);say('Шифруем ответ для отправителя…');
+  setBusy(true);say('Шифруем ответ для всей группы…');
   try{
     if(context.expires<=issued)throw new Error('Срок исходного сообщения истёк. Ответ больше недоступен.');
-    if(!organizerPin)throw new Error('Сначала подтвердите ключ организатора.');
-    const record=(await directClient.directory(device)).find(member=>member.id===context.recipient.id);
-    if(!record)throw new Error('Телефон получателя больше не подключён. Ответ не отправлен.');
-    const recipient=record.id===organizerPin.id&&record.role==='admin'?{...organizerPin,name:record.name,role:'admin',verified:true}:await verifyRecipientGrant(record,organizerPin);
-    if(!['admin','neurologist','cardiologist','intensivist'].includes(recipient.role)||recipient.id!==context.recipient.id||recipient.fingerprint!==context.recipient.fingerprint)throw new Error('Доступ или ключ получателя изменился. Откройте сообщение заново.');
+    if(!canSendGroup(teamState.role,context.group,'group_reply'))throw new Error('Ответ в этом направлении недоступен для вашей роли.');
+    const recipients=await trustedConversationDirectory(context.group);
     if(current!==generation||document.hidden)return;
-    const id=newMessageID(),meta={id,group:context.group,kind:'reply',replyTo:context.id,issued,expires};
-    const sealed=await sealMessage(device,[recipient],content,meta);
+    const id=newMessageID(),meta={id,group:context.group,kind:'group_reply',replyTo:context.id,issued,expires};
+    const sealed=await sealMessage(device,recipients,content,meta,{archive:true});
     content=null;$('compose-surname').value='';$('compose-comment').value='';clearPhoto();
     if(current!==generation||document.hidden)return;
     const request={...meta,...sealed};await savePending(request);queued=true;
     const result=await directClient.create(device,request);await removePending(id);queued=false;
     if(current!==generation||document.hidden)return;
     clearSensitive();activeScreen='read';renderNavigation();
-    say(result.push==='accepted'?'Ответ сохранён. Уведомление передано в службу доставки.':'Ответ сохранён во «Входящих» отправителя. Уведомление ожидает доставки.');
+    say(result.push==='accepted'?'Ответ сохранён. Уведомление передано в службу доставки.':'Ответ сохранён во «Входящих» участников группы. Уведомление ожидает доставки.');
     await refreshPending();void refreshInbox();
   }catch(e){
     if(current===generation&&!document.hidden){
@@ -974,9 +1089,9 @@ async function refreshPending(){
   catch{$('pending-count').textContent='Очередь этого телефона недоступна.';}
 }
 // Recover server-side queued notifications even when the encrypted local send
-// queue is empty. Only human PSO senders participate; one bounded batch/minute.
+// queue is empty. Human senders participate; one bounded batch/minute.
 async function retryDelivery(){
-  if(!directClient||!ready||busy||teamBusy||directPendingBusy||deliveryRetryBusy||document.hidden||!canReview())return;
+  if(!directClient||!ready||busy||teamBusy||directPendingBusy||deliveryRetryBusy||document.hidden||!canReply())return;
   const at=performance.now();if(at-lastDeliveryRetry<60000)return;
   lastDeliveryRetry=at;deliveryRetryBusy=true;
   try{await directClient.retry(device);}catch{/* Inbox records remain available; next foreground/poll retries. */}
@@ -987,27 +1102,27 @@ async function retryPending(announce=true){
   directPendingBusy=true;setBusy(busy);let sent=0;
   try{for(const data of await loadPending()){
     if(teamBusy||!canReply())break;
-    if(data.kind!=='reply'&&!canReview())continue;
+    if(!canSendGroup(teamState.role,data.group,data.kind))continue;
     try{await directClient.create(device,data);await removePending(data.id);sent++;}
-    catch(e){if(announce)say(e.status===409?'Состав получателей изменился. Старая зашифрованная запись не отправлена. Создайте её заново после удаления из очереди.':e.message,true);break;}
+    catch(e){if(announce)say(e.status===409&&e.code!=='group_too_large'?'Состав получателей изменился. Старая зашифрованная запись не отправлена. Создайте её заново после удаления из очереди.':e.message,true);break;}
   }if(sent&&announce)say('Сохранено для получателей: '+sent+'.');await refreshPending();void refreshInbox();}
   finally{directPendingBusy=false;setBusy(busy);}
 }
 async function composeDirectReview(){
   if(draftReply)return composeDirectReply();
-  if(!canReview()||teamBusy||photoBusy){say('Проверочные истории отправляют подключённые неврологи.',true);return;}
-  hideResult();const current=generation,group=selectedGroup(),issued=Date.now(),expires=issued+Number($('expiry').value)*60000;
+  if(!(canReview()||canDiscuss())||teamBusy||photoBusy){say('Новое сообщение недоступно для вашей роли.',true);return;}
+  hideResult();const current=generation,group=selectedGroup(),kind=canReview()?'review':'discussion',issued=Date.now(),expires=issued+Number($('expiry').value)*60000;
   let content={surname:$('compose-surname').value,department:$('compose-orit').checked?'ОРИТ':'ПСО',comment:$('compose-comment').value,photo:directPhoto};
   let queued=false;
   setBusy(true);say('Шифруем для получателей…');
   try{
-    if(!canSendGroup(teamState.role,group,'review'))throw new Error('Выберите доступное направление.');
-    const recipients=await trustedGroupDirectory(group);if(!recipients.length)throw new Error('В выбранной группе пока нет подключённых специалистов.');
+    if(!canSendGroup(teamState.role,group,kind))throw new Error('Выберите доступное направление.');
+    const recipients=kind==='discussion'?await trustedConversationDirectory(group):await trustedGroupDirectory(group);if(!recipients.length)throw new Error('В выбранной группе пока нет подключённых специалистов.');
     if(recipients.length>25)throw new Error('В группе больше 25 устройств. Обратитесь к организатору.');
-    const id=newMessageID(),sealed=await sealMessage(device,recipients,content,{id,group,kind:'review',issued,expires});
+    const id=newMessageID(),sealed=await sealMessage(device,recipients,content,{id,group,kind,issued,expires},{archive:true});
     content=null;$('compose-surname').value='';$('compose-comment').value='';clearPhoto();
     if(current!==generation||document.hidden)return;
-    const request={id,group,kind:'review',issued,expires,...sealed};await savePending(request);queued=true;
+    const request={id,group,kind,issued,expires,...sealed};await savePending(request);queued=true;
     const result=await directClient.create(device,request);await removePending(id);queued=false;
     if(current!==generation||document.hidden)return;
     say(result.push==='accepted'?'Сообщение сохранено. Уведомление передано в службу доставки.':'Сообщение сохранено во «Входящих» получателей. Уведомление ожидает доставки.');
@@ -1024,8 +1139,15 @@ $('device-unlock-enable').addEventListener('click',async()=>{
   if(!deviceUnlock||busy||teamBusy||!ready||teamState.state!=='active')return;setBusy(true);
   try{await deviceUnlock.enroll(device);say('Подтверждение на этом телефоне включено.');await refreshUnlock();}catch(e){say(e.message||'Не удалось включить подтверждение.',true);}finally{setBusy(false);}
 });
-$('box-inbox').addEventListener('click',()=>{activeBox='inbox';inboxItems=[];inboxNext=null;void refreshInbox();});
-$('box-outbox').addEventListener('click',()=>{activeBox='outbox';inboxItems=[];inboxNext=null;void refreshInbox();});
+function selectBox(box){if(busy||box!=='inbox'&&!canHistory())return;hideResult();clearHistory();activeBox=box;inboxItems=[];inboxNext=null;renderInbox();void refreshInbox();}
+$('box-inbox').addEventListener('click',()=>selectBox('inbox'));
+$('box-outbox').addEventListener('click',()=>selectBox('history'));
+$('history-recent').addEventListener('click',()=>{if(historySource==='own')selectBox(activeBox==='outbox'?'history':'outbox');});
+function selectHistorySource(source){if(busy||teamBusy||!ready||!canAdmin()||!['own','bot'].includes(source))return;historySource=source;historyFallback=false;selectBox('history');}
+$('history-own').addEventListener('click',()=>selectHistorySource('own'));
+$('history-bot').addEventListener('click',()=>selectHistorySource('bot'));
+$('history-show').addEventListener('click',revealHistory);
+$('history-close').addEventListener('click',()=>{hideResult();clearHistory();});
 $('inbox-refresh').addEventListener('click',()=>refreshInbox());
 $('inbox-more').addEventListener('click',()=>refreshInbox(true));
 $('retry-pending').addEventListener('click',()=>retryPending());
@@ -1125,4 +1247,17 @@ async function trustedGroupDirectory(group){
   const roles=rolesForGroup(group),all=await directClient.directory(device);
   const members=all.filter(member=>roles.includes(member.role));
   return verifyRecipientDirectory(members,organizerPin);
+}
+
+async function trustedConversationDirectory(group){
+  if(!organizerPin)throw new Error('Сначала подключите ключ организатора через его личное приглашение.');
+  const all=await directClient.directory(device),members=all.filter(member=>member.id!==selfContact.id&&participatesInGroup(member.role,group));
+  if(!members.length)throw new Error('В направлении и ПСО пока нет других подключённых участников.');
+  if(members.length>25)throw new Error('В направлении вместе с ПСО больше 25 устройств. Сообщение не отправлено. Обратитесь к организатору.');
+  const verified=[],ids=new Set();
+  for(const member of members){
+    if(ids.has(member.id))throw new Error('Список участников повторяется. Обновите команду.');ids.add(member.id);
+    verified.push(member.id===organizerPin.id&&member.role==='admin'?{...organizerPin,name:member.name,role:'admin',verified:true}:await verifyRecipientGrant(member,organizerPin));
+  }
+  return verified;
 }

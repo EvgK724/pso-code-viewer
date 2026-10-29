@@ -49,6 +49,15 @@ test('self-test notification opens the app home without a fictitious patient lin
   await h.click(h.shown[0].data);assert.deepEqual(h.opened,[base]);
 });
 
+test('two-day direct notifications retain their inbox target but longer payloads are rejected',async()=>{
+  const direct={...valid(),v:2,expires:now+172800000};
+  const h=harness();await h.push(direct);
+  assert.deepEqual(JSON.parse(JSON.stringify(h.shown[0].data)),direct);
+  await h.click(h.shown[0].data);assert.deepEqual(h.opened,[base+'#m='+id]);
+  const invalid=harness();await invalid.push({...direct,expires:now+172830001});
+  assert.deepEqual(JSON.parse(JSON.stringify(invalid.shown[0].data)),{v:1,id:null,expires:0});
+});
+
 test('malformed and expired pushes still display a generic safe notification',async t=>{
   const bad=[null,[],{},'text',{...valid(),v:3},{...valid(),expires:now},{...valid(),expires:now+86430001},
     {...valid(),expires:'tomorrow'},{...valid(),expires:NaN},{...valid(),id:'https://evil.example/'},

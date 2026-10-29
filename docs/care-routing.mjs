@@ -9,8 +9,16 @@ const members = Object.freeze({cardiology:Object.freeze(['cardiologist']),orit:O
 export const rolesForGroup = group => members[group] || [];
 export const roleGroup = role => GROUPS.find(group => rolesForGroup(group).includes(role)) || null;
 export const isRehabGroup = group => group === 'rehab1' || group === 'rehab2';
+export const isReplyKind = kind => kind === 'reply' || kind === 'group_reply';
+export const isGroupConversationKind = kind => kind === 'group_reply' || kind === 'discussion';
+// PSO clinicians and the specialists of exactly one direction take part in
+// group conversations. A bot never receives or replies to these messages.
+export const participatesInGroup = (role,group) => GROUPS.includes(group) &&
+  (role === 'admin' || role === 'neurologist' || roleGroup(role) === group);
 export function canSendGroup(role,group,kind) {
   if (!GROUPS.includes(group)) return false;
+  if (kind === 'group_reply') return participatesInGroup(role,group);
+  if (kind === 'discussion') return group === 'rehab1' && participatesInGroup(role,group);
   if (isRehabGroup(group)) return kind === 'review' && ['admin','neurologist'].includes(role);
   if (kind === 'admission') return role === 'bot';
   if (kind === 'review') return ['admin','neurologist'].includes(role);

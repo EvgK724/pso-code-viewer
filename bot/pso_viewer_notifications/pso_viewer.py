@@ -29,7 +29,7 @@ DATA = Path.home() / '.local' / 'share' / 'pso-viewer-bot'
 OLD_DATA = Path.home() / '.local' / 'share' / 'pso-pachca'
 MONTHS = ('Январь Февраль Март Апрель Май Июнь Июль Август Сентябрь Октябрь Ноябрь Декабрь').split()
 POLL = 60
-VERSION = '1.1 — прямые сообщения'
+VERSION = '1.2 — история и доступ 48 часов'
 
 
 def prepare():
