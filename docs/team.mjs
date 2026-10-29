@@ -3,7 +3,7 @@
 import {exportPublicCard, importPublicCard, deviceIdentity} from './exchange.mjs';
 import {runApiRequest,readApiError,apiDiagnosticText,API_REQUEST_TIMEOUT_MS} from './api-queue.mjs';
 const DOMAIN='PSO-TEAM-v1\0', enc=new TextEncoder();
-const ROLES=['admin','neurologist','intensivist','cardiologist','bot'];
+import {ROLES,INVITE_ROLES} from './care-routing.mjs';
 const ID=/^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/, LINK=/^[A-Za-z0-9_-]{21}[AQgw]$/;
 const b64=x=>btoa(String.fromCharCode(...new Uint8Array(x))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
 const exact=(v,k)=>v&&typeof v==='object'&&!Array.isArray(v)&&Object.keys(v).sort().join(',')===k;
@@ -47,14 +47,14 @@ export class TeamClient {
   }
   async status(device){const r=await this.request(device,'status');if(!exact(r,'name,role,state')||!['active','pending','unregistered','revoked'].includes(r.state)||!(r.role===null||ROLES.includes(r.role))||!(r.name===null||text(r.name)))throw new Error('Не удалось проверить подключение.');return r;}
   async members(device,op='directory'){
-    const r=await this.request(device,op);if(!exact(r,'members')||!Array.isArray(r.members)||r.members.length>100)throw new Error('Не удалось проверить состав команды.');
+    const r=await this.request(device,op,{includeRehab:true});if(!exact(r,'members')||!Array.isArray(r.members)||r.members.length>100)throw new Error('Не удалось проверить состав команды.');
     const members=[],ids=new Set();for(const v of r.members){if(!exact(v,'card,id,name,role')||!ID.test(v.id)||!text(v.name)||!ROLES.includes(v.role)||ids.has(v.id))throw new Error('Не удалось проверить состав команды.');const c=await importPublicCard(v.card);if(c.id!==v.id)throw new Error('Ключ врача не совпадает с подключением.');ids.add(v.id);members.push({...c,name:v.name,role:v.role,verified:true});}return members;
   }
   directory(device){return this.members(device);}
   pending(device){return this.members(device,'pending');}
   async invite(device,name,role,organizerCard){
     if(typeof name==='string')name=name.normalize('NFC');
-    if(!text(name)||!['neurologist','intensivist','cardiologist','bot'].includes(role))throw new Error('Укажите имя и специальность.');
+    if(!text(name)||!INVITE_ROLES.includes(role))throw new Error('Укажите имя и специальность.');
     const id=randomTeamID(),data={name,role,id};
     if(organizerCard!==undefined){
       const root=await importPublicCard(organizerCard),own=await deviceIdentity(device);

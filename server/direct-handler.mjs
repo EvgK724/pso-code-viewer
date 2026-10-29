@@ -1,11 +1,12 @@
 // Direct, device-authenticated encrypted inbox; never receives patient plaintext.
+import {ROLES,GROUPS,REHAB_ROLES,isRehabGroup,canSendGroup} from '../docs/care-routing.mjs';
 import {importPublicCard} from '../docs/exchange.mjs';
 import {verifyRecipientGrant} from '../docs/recipient-trust.mjs';
 import {verifyMessageEnvelope} from '../docs/messages.mjs';
 import {createVapidKeys,sendWebPush} from './web-push.mjs';
 export const MAX_DIRECT_BODY_BYTES=2100000;
 const DOMAIN='PSO-TEAM-v1\0',OLD_TOKEN_DOMAIN='PSO-SURNAME-LINK-v1\0';
-const TTL=86400000,ROLES=['admin','neurologist','cardiologist','intensivist','bot'];
+const TTL=86400000;
 const OPS=['create','inbox','outbox','open','ack','retry','admin_members','admin_update','admin_replace','directory','admin_certify'];
 const enc=new TextEncoder();
 const exact=(v,k)=>v&&typeof v==='object'&&!Array.isArray(v)&&Object.keys(v).sort().join(',')===k;
@@ -18,7 +19,7 @@ function bytes(v,len){
 }
 function text(v){if(typeof v!=='string'||!v||v!==v.normalize('NFC').trim()||[...v].length>60||/[\p{Cc}\p{Cf}]/u.test(v))throw new Rejected();return v;}
 function validMeta(v,at){
- if(!Number.isSafeInteger(v.issued)||v.issued<=0||v.issued>at+30000||!Number.isSafeInteger(v.expires)||v.expires<=at||v.expires<=v.issued||v.expires-v.issued>TTL||!['cardiology','orit'].includes(v.group)||!['admission','review','reply'].includes(v.kind))throw new Rejected();bytes(v.id,16);
+ if(!Number.isSafeInteger(v.issued)||v.issued<=0||v.issued>at+30000||!Number.isSafeInteger(v.expires)||v.expires<=at||v.expires<=v.issued||v.expires-v.issued>TTL||!GROUPS.includes(v.group)||!['admission','review','reply'].includes(v.kind))throw new Rejected();bytes(v.id,16);
 }
 function failure(result){
  const state=typeof result==='string'?result:result?.status;
@@ -60,7 +61,7 @@ export function createDirectHandler({store,allowedOrigin,crypto=globalThis.crypt
  }
  async function notify(actor,id,at){
   let targets;
-  try{const claimed=result(await store.pushClaim(actor,id));targets=claimed?.targets;if(!Array.isArray(targets)||targets.length>20)throw new Error('Bad claims');}
+  try{const claimed=result(await store.pushClaim(actor,id));targets=claimed?.targets;if(!Array.isArray(targets)||targets.length>25)throw new Error('Bad claims');}
   catch{return {accepted:0,queued:1};}
   let accepted=0,queued=0;
   // Bound concurrency / duration. Every outcome completes a lease; ambiguous
@@ -94,7 +95,8 @@ export function createDirectHandler({store,allowedOrigin,crypto=globalThis.crypt
    const unsigned={v:1,op:e.op,issued:e.issued,nonce:e.nonce,card:e.card,data:e.data};
    if(!await crypto.subtle.verify({name:'ECDSA',hash:'SHA-256'},sender.signingPublicKey,signature,enc.encode(DOMAIN+JSON.stringify(unsigned))))throw new Rejected(403);
    const data=e.data;let normalized;
-   if(['retry','admin_members','directory'].includes(e.op)){if(!exact(data,''))throw new Rejected();}
+   if(e.op==='retry'){if(!exact(data,''))throw new Rejected();}
+   else if(['admin_members','directory'].includes(e.op)){if(!exact(data,'')&&!(exact(data,'includeRehab')&&data.includeRehab===true))throw new Rejected();}
    else if(['inbox','outbox'].includes(e.op)){
     if(!exact(data,'')&&!exact(data,'cursor'))throw new Rejected();
     if(data.cursor!=null){if(!exact(data.cursor,'id,issued')||!Number.isSafeInteger(data.cursor.issued)||data.cursor.issued<=0)throw new Rejected();bytes(data.cursor.id,16);}
@@ -110,14 +112,14 @@ export function createDirectHandler({store,allowedOrigin,crypto=globalThis.crypt
    }else{
     if(data?.kind==='reply'){if(!exact(data,'entries,expires,group,id,issued,kind,payload,replyTo'))throw new Rejected();bytes(data.replyTo,16);if(data.replyTo===data.id)throw new Rejected();}
     else if(!exact(data,'entries,expires,group,id,issued,kind')&&!exact(data,'entries,expires,group,id,issued,kind,payload'))throw new Rejected();
-    validMeta(data,at);if(!Array.isArray(data.entries)||data.entries.length<1||data.entries.length>25)throw new Rejected();
+    validMeta(data,at);if(isRehabGroup(data.group)&&(data.kind!=='review'||!data.payload))throw new Rejected();if(!Array.isArray(data.entries)||data.entries.length<1||data.entries.length>25)throw new Rejected();
     if('payload'in data){if(!data.payload||data.payload.id!==data.id||data.payload.group!==data.group||data.payload.kind!==data.kind||data.payload.issued!==data.issued||data.payload.expires!==data.expires||data.payload.replyTo!==data.replyTo)throw new Rejected();}
    }
    const spki=b64(await crypto.subtle.exportKey('spki',sender.signingPublicKey));
    const ok=await store.accept(sender.id,e.nonce,e.op,e.issued,e.card,spki);if(ok!=='ok')failure(ok);
    if(e.op==='create'){
     const directory=result(await store.directory(sender.id));if(!Array.isArray(directory?.members))throw new Error('Missing directory');
-    const actor=directory.members.find(m=>m.id===sender.id);if(!actor)throw new Rejected(403);
+    const actor=directory.members.find(m=>m.id===sender.id);if(!actor||!canSendGroup(actor.role,data.group,data.kind))throw new Rejected(403);
     const admins=directory.members.filter(m=>m.role==='admin');
     async function approved(member){if(member.role==='admin')return;const issuer=admins.find(a=>a.id===member.approvalProof?.grant?.issuerId);if(!issuer)throw new Rejected(403);try{await verifyRecipientGrant(member,issuer.card,at);}catch{throw new Rejected(403);}}
     await approved(actor);
@@ -147,10 +149,10 @@ export function createDirectHandler({store,allowedOrigin,crypto=globalThis.crypt
     const r=result(await store.open(sender.id,data.id,true));if(!exact(r,'openedAt')||!Number.isSafeInteger(r.openedAt))throw new Error('Invalid receipt');return response(200,r);
    }
    if(e.op==='retry')return response(200,await notify(sender.id,null,at));
-   if(e.op==='directory'){const r=result(await store.directory(sender.id));if(!exact(r,'members')||!Array.isArray(r.members)||r.members.length>100)throw new Error('Invalid directory');return response(200,r);}
+   if(e.op==='directory'){const r=result(await store.directory(sender.id));if(!exact(r,'members')||!Array.isArray(r.members)||r.members.length>100)throw new Error('Invalid directory');return response(200,{members:data.includeRehab===true?r.members:r.members.filter(m=>!REHAB_ROLES.includes(m.role))});}
    if(e.op==='admin_members'){
     const r=result(await store.members(sender.id));if(!exact(r,'members')||!Array.isArray(r.members)||r.members.length>500)throw new Error('Invalid members');
-    for(const m of r.members){if(!exact(m,'approvalProof,approvedAt,card,createdAt,id,name,revokedAt,role,state')||!ROLES.includes(m.role)||!['active','pending','revoked'].includes(m.state))throw new Error('Invalid member');bytes(m.id,32);text(m.name);}return response(200,r);
+    for(const m of r.members){if(!exact(m,'approvalProof,approvedAt,card,createdAt,id,name,revokedAt,role,state')||!ROLES.includes(m.role)||!['active','pending','revoked'].includes(m.state))throw new Error('Invalid member');bytes(m.id,32);text(m.name);}return response(200,{members:data.includeRehab===true?r.members:r.members.filter(m=>!REHAB_ROLES.includes(m.role))});
    }
    if(['admin_certify','admin_update','admin_replace'].includes(e.op)){
     const listing=result(await store.members(sender.id));if(!Array.isArray(listing?.members))throw new Error('Missing members');

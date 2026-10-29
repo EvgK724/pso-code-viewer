@@ -10,7 +10,8 @@ export const MAX_MESSAGE_TTL = 86400000;
 export const MESSAGE_SIGN_DOMAIN = 'PSO-MESSAGE-v2\0';
 export const MESSAGE_KEY_LABEL = 'PSO-MESSAGE-KEY-v2';
 const enc = new TextEncoder(), dec = new TextDecoder('utf-8', {fatal:true});
-const GROUPS = ['cardiology','orit'], KINDS = ['admission','review','reply'];
+import {GROUPS,isRehabGroup} from './care-routing.mjs';
+const KINDS = ['admission','review','reply'];
 const BAD = /[\p{Cc}\p{Cf}]/u;
 const exact = (v,k) => v && typeof v === 'object' && !Array.isArray(v) && Object.keys(v).sort().join(',') === k;
 
@@ -29,7 +30,7 @@ export function messageUnbase64url(value, expected=0, max=MAX_MESSAGE_CIPHERTEXT
   return result;
 }
 function metaValue(meta,now) {
-  if (!exact(meta,meta?.kind==='reply'?'expires,group,id,issued,kind,replyTo,v':'expires,group,id,issued,kind,v') || meta.v !== 2 || !GROUPS.includes(meta.group) || !KINDS.includes(meta.kind)) throw new Error('Неверные параметры сообщения.');
+  if (!exact(meta,meta?.kind==='reply'?'expires,group,id,issued,kind,replyTo,v':'expires,group,id,issued,kind,v') || meta.v !== 2 || !GROUPS.includes(meta.group) || (!KINDS.includes(meta.kind)||(isRehabGroup(meta.group)&&meta.kind!=='review'))) throw new Error('Неверные параметры сообщения.');
   messageUnbase64url(meta.id,16,22);
   if(meta.kind==='reply'){messageUnbase64url(meta.replyTo,16,22);if(meta.replyTo===meta.id)throw new Error('Ответ не может ссылаться на себя.');}
   if (!Number.isSafeInteger(now) || !Number.isSafeInteger(meta.issued) || !Number.isSafeInteger(meta.expires) || meta.issued <= 0 || meta.expires <= meta.issued || meta.expires-meta.issued > MAX_MESSAGE_TTL || meta.expires-meta.issued < 60000 || meta.issued > now+30000 || meta.expires <= now) throw new Error('Срок сообщения истёк или время создания неверно.');

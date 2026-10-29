@@ -7,6 +7,7 @@ import vm from 'node:vm';
 import {readFile} from 'node:fs/promises';
 import {webcrypto} from 'node:crypto';
 import {performance} from 'node:perf_hooks';
+import * as careRouting from '../docs/care-routing.mjs';
 import * as cryptography from '../docs/crypto.mjs';
 import * as exchange from '../docs/exchange.mjs';
 import * as sharing from '../docs/sharing.mjs';
@@ -209,7 +210,7 @@ async function harness(persistent, initialHash = '', {
   class InjectedTeamClient extends team.TeamClient {constructor(endpoint){super(endpoint,{fetch:teamFetch});}}
   class InjectedDeviceUnlockClient extends deviceUnlock.DeviceUnlockClient {constructor(endpoint){super(endpoint,{fetch:deviceAuthFetch});}}
   const exportsFor = {
-    './crypto.mjs':cryptography, './exchange.mjs':exchange, './storage.mjs':storage, './sharing.mjs':sharing,
+    './care-routing.mjs':careRouting, './crypto.mjs':cryptography, './exchange.mjs':exchange, './storage.mjs':storage, './sharing.mjs':sharing,
     './shortlinks.mjs':{...shortlinks, ShortLinkClient:InjectedShortLinkClient},
     './shortlink-config.mjs':{SHORTLINK_ENDPOINT:shortlinkEndpoint,PUSH_ENDPOINT:pushEndpoint,TEAM_ENDPOINT:teamEndpoint,DIRECT_ENDPOINT:directEndpoint,DEVICE_AUTH_ENDPOINT:deviceAuthEndpoint},
     './push.mjs':{...push,PushClient:InjectedPushClient},
@@ -1506,7 +1507,7 @@ async function directFixture(roles=['admin','neurologist','cardiologist']){
  const base=await teamFixture(stores,roles);const members=base.members.map(member=>({...member})),root=members[0];
  for(const member of members)member.approvalProof=await recipientTrust.makeRecipientGrant(stores[0].device,member);
  for(const store of stores)await recipientTrust.pinOrganizerCard(root.card,{confirmed:true,storage:{getItem:k=>store.pins.get(k)||null,setItem:(k,v)=>store.pins.set(k,v)}});
- const records=new Map(),requests=[];let failAfterCreate=false,openTransform=x=>x,openGate=null;
+ const records=new Map(),requests=[];let failAfterCreate=false,openTransform=x=>x,openGate=null,createPush='accepted';
  const respond=(value,status=200)=>new Response(JSON.stringify(value),{status,headers:{'Content-Type':'application/json'}});
  const fetcher=async(url,options)=>{
   const envelope=JSON.parse(options.body).envelope,{signature,...unsigned}=envelope;requests.push(envelope);
@@ -1531,8 +1532,9 @@ async function directFixture(roles=['admin','neurologist','cardiologist']){
    if(!records.has(envelope.data.id))records.set(envelope.data.id,{...envelope.data,sender:member,opened:new Set()});
    else assert.equal(JSON.stringify(envelope.data),JSON.stringify((({sender,opened,...data})=>data)(records.get(envelope.data.id))),'retry retains exact encrypted envelope');
    if(failAfterCreate)throw new TypeError('response lost');
-   return respond({id:envelope.data.id,expires:envelope.data.expires,push:'accepted'});
+   return respond({id:envelope.data.id,expires:envelope.data.expires,push:createPush});
   }
+  if(envelope.op==='retry')return respond({accepted:1,queued:0});
   if(envelope.op==='inbox'||envelope.op==='outbox'){
    const own=member.id;const items=[...records.values()].filter(r=>envelope.op==='outbox'?r.sender.id===own:r.entries.some(e=>e.recipientId===own)).map(r=>({id:r.id,group:r.group,kind:r.kind,issued:r.issued,expires:r.expires,senderId:r.sender.id,senderName:r.sender.name,openedAt:r.opened.has(own)?r.issued+1:null,recipientCount:r.entries.length,openedCount:r.opened.size}));
    return respond({items,next:null});
@@ -1546,7 +1548,7 @@ async function directFixture(roles=['admin','neurologist','cardiologist']){
   if(envelope.op==='ack'){records.get(envelope.data.id).opened.add(member.id);return respond({openedAt:Date.now()});}
   return respond({error:'unsupported'},400);
  };
- return {stores,members,records,requests,setFailure(v){failAfterCreate=v;},transform(fn){openTransform=fn;},gate(p){openGate=p;},options:{...base.options,directEndpoint:'https://direct.example/api',directFetch:fetcher}};
+ return {stores,members,records,requests,setFailure(v){failAfterCreate=v;},setPush(v){createPush=v;},transform(fn){openTransform=fn;},gate(p){openGate=p;},options:{...base.options,directEndpoint:'https://direct.example/api',directFetch:fetcher}};
 }
 async function directSend(app,{surname='Иванов',comment='Проверить историю',group='cardiology'}={}){
  await app.event('show-write');app.el('recipient').value=group;await app.event('recipient','change');
@@ -1669,7 +1671,7 @@ test('transient status or directory errors preserve only the displayed admin ide
  const key=s.stores[0].device;
  s.faults.directory=503;await app.event('team-refresh');
  assert.equal(app.el('team-admin').hidden,false);
- assert.match(app.el('team-state').textContent,/Врач 0 · Администратор/);
+ assert.match(app.el('team-state').textContent,/Врач 0 · Организатор ПСО/);
  assert.match(app.el('team-state').textContent,/Не удалось обновить список команды.*HTTP 503.*Действия недоступны/);
  assert.equal(app.el('invite-create').disabled,true);assert.equal(app.el('show-write').hidden,true);
  check.checked=true;await check.fire('change');assert.equal(approve.disabled,true);
@@ -1678,10 +1680,10 @@ test('transient status or directory errors preserve only the displayed admin ide
  assert.equal(s.events.length,before,'Offline identity grants neither management mutations nor message opening');
  assert.equal(app.el('result').hidden,true);assert.equal(s.stores[0].device,key);
  s.faults.directory=0;s.faults.status=503;await app.event('team-refresh');
- assert.equal(app.el('team-admin').hidden,false);assert.match(app.el('team-state').textContent,/Администратор.*HTTP 503/);
+ assert.equal(app.el('team-admin').hidden,false);assert.match(app.el('team-state').textContent,/Организатор ПСО.*HTTP 503/);
  s.faults.status=0;await app.event('team-refresh');await app.idle();
  assert.equal(app.el('team-admin').hidden,false);assert.equal(app.el('invite-create').disabled,false);assert.equal(app.el('show-write').hidden,false);
- assert.equal(app.el('team-state').textContent,'Врач 0 · Администратор');
+ assert.equal(app.el('team-state').textContent,'Врач 0 · Организатор ПСО');
 });
 
 test('an explicit authorization rejection or revoked status clears the retained admin identity',async()=>{
@@ -1696,7 +1698,7 @@ test('an explicit authorization rejection or revoked status clears the retained 
   await app.event('team-refresh');assert.equal(app.el('team-admin').hidden,true,failure);
   assert.equal(app.el('show-write').hidden,true);assert.equal(app.el('invite-create').disabled,true);
   assert.match(app.el('team-state').textContent,/Доступ этого телефона отключён/);
-  assert.doesNotMatch(app.el('team-state').textContent,/Администратор/);
+  assert.doesNotMatch(app.el('team-state').textContent,/Организатор ПСО/);
  }
 });
 
@@ -1721,7 +1723,7 @@ test('approval progress blocks duplicate clicks and periodic work; HTTP stage su
 });
 
 test('initialization avoids duplicate inbox/auth checks and post-refresh background work runs in order',async()=>{
- const s=await adminUiFixture({withPush:true}),app=await harness(s.stores[0],'',s.options);await app.pushIdle();
+ const s=await adminUiFixture({withPush:true}),app=await harness(s.stores[0],'',s.options);await app.pushIdle();await waitUntil(()=>s.events.includes('direct:retry'),'startup push retry');
  assert.equal(s.events.filter(e=>e==='direct:inbox').length,1);
  assert.equal(s.events.filter(e=>e==='auth:status').length,1);
  assert.equal(s.events.filter(e=>e==='push:register').length,1);
@@ -1947,4 +1949,85 @@ test('a specialist retries a durable encrypted reply after a lost response witho
  const restarted=await harness(s.stores[2],'',s.options);await waitUntil(()=>!restarted.el('retry-pending').hidden,'reply retry available');
  s.setFailure(false);await restarted.event('retry-pending');await waitUntil(()=>s.stores[2].pending.size===0,'reply retry delivered');
  assert.equal(s.records.size,2);assert.equal(s.requests.filter(r=>r.op==='create'&&r.data.id===queued.id).length,2);
+});
+
+test('care direction controls preserve the editable draft and select a complete group instead of individual specialists',async()=>{
+ const s=await directFixture(['admin','neurologist','cardiologist','rehab1_physician','psychologist','speech_therapist','exercise_therapist','rehab2_physician']);
+ const writer=await harness(s.stores[1],'',s.options);
+ await writer.event('show-write');writer.el('recipient').value='cardiology';await writer.event('recipient','change');
+ writer.el('compose-surname').value='Примеров';writer.el('compose-comment').value='Оценить речь и ходьбу';
+ await writer.event('direction-rehab1');
+ assert.equal(writer.el('direction-rehab1').attributes.get('aria-pressed'),'true');
+ assert.equal(writer.el('pso-recipient-picker').hidden,true);
+ assert.equal(writer.el('recipient').required,false);
+ assert.equal(writer.el('encrypt').textContent,'Отправить всей группе');
+ assert.match(writer.el('recipient-summary').textContent,/I этап · подключено: 4/);
+ assert.equal(writer.el('compose-surname').value,'Примеров');assert.equal(writer.el('compose-comment').value,'Оценить речь и ходьбу');
+ await writer.event('direction-rehab2');assert.match(writer.el('recipient-summary').textContent,/II этап · подключено: 1/);
+ await writer.event('direction-pso');assert.equal(writer.el('pso-recipient-picker').hidden,false);assert.equal(writer.el('recipient').value,'cardiology');
+ assert.equal(writer.el('compose-comment').value,'Оценить речь и ходьбу');
+ await writer.event('direction-rehab1');await writer.event('compose-form','submit');await writer.idle();
+ const record=[...s.records.values()][0];assert.ok(record,writer.el('notice').textContent);
+ assert.equal(record.group,'rehab1');assert.equal(record.kind,'review');
+ assert.deepEqual(record.entries.map(e=>e.recipientId).sort(),s.members.slice(3,7).map(m=>m.id).sort());
+ const sent=s.requests.find(r=>r.op==='create');assert.ok(!JSON.stringify(sent).includes('Примеров'));assert.ok(!JSON.stringify(sent).includes('Оценить речь и ходьбу'));
+ assert.equal(s.stores[1].pending.size,0);
+ for(let i=3;i<7;i++){
+  const reader=await harness(s.stores[i],'',s.options);await reader.hashchange('#m='+record.id);await reader.idle();
+  assert.equal(reader.el('surname').textContent,'Примеров',reader.el('notice').textContent);
+  assert.equal(reader.el('result-comment').textContent,'Оценить речь и ходьбу');
+  assert.equal(reader.el('show-write').hidden,true);assert.equal(reader.el('reply-message').hidden,true);
+  assert.ok(reader.el('inbox-list').querySelectorAll('p').some(p=>p.textContent.includes('Реабилитация · I этап')));
+ }
+ const otherStage=await harness(s.stores[7],'',s.options);await otherStage.hashchange('#m='+record.id);await otherStage.idle();
+ assert.equal(otherStage.el('result').hidden,true);assert.equal(otherStage.el('surname').textContent,'');
+});
+
+test('organizer sends to every OMR specialist while rehab recipients and bot cannot compose or reply',async()=>{
+ const s=await directFixture(['admin','neurologist','rehab2_physician','rehab2_physician','psychologist','bot']);
+ const organizer=await harness(s.stores[0],'',s.options);await organizer.event('show-write');await organizer.event('direction-rehab2');
+ organizer.el('compose-surname').value='Учебный';organizer.el('compose-comment').value='Для второго этапа';
+ await organizer.event('compose-form','submit');await organizer.idle();
+ const record=[...s.records.values()][0];assert.ok(record,organizer.el('notice').textContent);assert.equal(record.group,'rehab2');
+ assert.deepEqual(record.entries.map(e=>e.recipientId).sort(),s.members.slice(2,4).map(m=>m.id).sort());
+ for(let i=2;i<s.stores.length;i++){
+  const reader=await harness(s.stores[i],'',s.options);assert.equal(reader.el('care-directions').hidden,true);
+  await reader.event('show-write');await reader.event('direction-rehab1');reader.el('compose-comment').value='Не отправлять';
+  await reader.event('compose-form','submit');await reader.idle();assert.equal(s.records.size,1);
+  assert.equal(reader.el('screen-write').hidden,true);
+  if(i<4){await reader.hashchange('#m='+record.id);await reader.idle();assert.equal(reader.el('surname').textContent,'Учебный');assert.equal(reader.el('reply-message').hidden,true);}
+ }
+});
+
+test('empty rehab group and invalid role grant stop sending before persistence and a group change does not silently reuse PSO recipients',async()=>{
+ const s=await directFixture(),writer=await harness(s.stores[1],'',s.options);
+ await writer.event('show-write');writer.el('recipient').value='cardiology';await writer.event('recipient','change');
+ await writer.event('direction-rehab1');writer.el('compose-comment').value='Только реабилитационной группе';
+ assert.match(writer.el('recipient-summary').textContent,/подключено: 0/);
+ await writer.event('compose-form','submit');await writer.idle();
+ assert.equal(s.records.size,0);assert.equal(s.stores[1].pending.size,0);assert.match(writer.el('notice').textContent,/нет подключённых специалистов/);
+ s.members[2].role='rehab1_physician';
+ await writer.event('compose-form','submit');await writer.idle();
+ assert.equal(s.records.size,0);assert.equal(s.stores[1].pending.size,0,'Unsigned role change cannot select a foreign recipient');
+});
+
+
+test('queued rehabilitation push is retried by active human PSO senders without a local pending message and is rate limited',async()=>{
+ const s=await directFixture(['admin','neurologist','rehab2_physician','bot']);s.setPush('queued');
+ const writer=await harness(s.stores[1],'',s.options);await waitUntil(()=>s.requests.some(r=>r.op==='retry'),'startup server retry');
+ await writer.event('show-write');await writer.event('direction-rehab2');writer.el('compose-comment').value='Тестовое сообщение';
+ await writer.event('compose-form','submit');await writer.idle();
+ assert.equal(s.records.size,1);assert.equal(s.stores[1].pending.size,0);
+ const initial=s.requests.filter(r=>r.op==='retry').length;assert.equal(initial,1,'Startup retries old server-side work');
+ await writer.hide();await writer.show();await writer.idle();
+ assert.equal(s.requests.filter(r=>r.op==='retry').length,initial,'Immediate foreground does not spam');
+ writer.advance(60000);await waitUntil(()=>s.requests.filter(r=>r.op==='retry').length===initial+1,'periodic server push retry');
+ assert.equal(s.records.size,1,'Notification retry never creates another message');
+ await writer.hide();writer.advance(60000);await writer.idle();assert.equal(s.requests.filter(r=>r.op==='retry').length,initial+1);
+ await writer.show();await waitUntil(()=>s.requests.filter(r=>r.op==='retry').length===initial+2,'foreground server push retry');
+ for(const index of [2,3]){
+  const before=s.requests.filter(r=>r.op==='retry').length,recipient=await harness(s.stores[index],'',s.options);
+  recipient.advance(60000);await recipient.hide();await recipient.show();await recipient.idle();
+  assert.equal(s.requests.filter(r=>r.op==='retry').length,before,'Recipients and bot do not retry rehabilitation notifications');
+ }
 });
