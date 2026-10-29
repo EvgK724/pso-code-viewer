@@ -166,3 +166,17 @@ test('wire authentication rejects tampering or a different auth secret', async (
   body[body.length-1] ^= 1;
   assert.throws(()=>decryptBody(body));
 });
+
+test('release notification wire decrypts to a fixed non-patient schema with a seven-day TTL',async()=>{
+  const f=captured(201),notice={v:1,type:'release',version:18,expires:NOW+7*86400000};
+  assert.deepEqual(await sendWebPush(subscription,vapid,notice,{fetch:f.fetch,now:NOW,ttl:604800}),{status:'accepted'});
+  assert.equal(f.calls[0].options.headers.TTL,'604800');
+  assert.deepEqual(JSON.parse(decryptBody(f.calls[0].options.body)),notice);
+  for(const changed of [
+    {...notice,url:'https://other.example/'},{...notice,title:'Arbitrary'},{...notice,surname:'Тестов'},
+    {...notice,version:16},{...notice,version:18.5},{...notice,version:'18'},
+    {...notice,type:'patient'},{...notice,v:2},{...notice,expires:NOW+7*86400000+1},
+    {...notice,expires:NOW},{...payload,v:2,expires:NOW+7*86400000}
+  ])assert.deepEqual(await sendWebPush(subscription,vapid,changed,{fetch:f.fetch,now:NOW,ttl:604800}),{status:'failed'});
+  assert.equal(f.calls.length,1,'Unexpected content never reaches a push provider');
+});

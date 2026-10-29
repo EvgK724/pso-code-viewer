@@ -3,6 +3,7 @@
 // WebCrypto is used in both Deno and Node; there are no runtime dependencies.
 const encoder = new TextEncoder();
 const MAX_TTL = 172800;
+const RELEASE_TTL = 604800;
 const MAX_ENDPOINT_LENGTH = 2048;
 const RECORD_SIZE = 4096;
 const b64 = bytes => btoa(String.fromCharCode(...new Uint8Array(bytes))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
@@ -118,17 +119,26 @@ export async function sendWebPush(subscription, keys, payload, {
   let timer;
   try {
     const at = typeof now === 'function' ? now() : now;
-    if (!Number.isSafeInteger(at) || !Number.isInteger(ttl) || ttl < 0 || ttl > MAX_TTL ||
+    const release = exact(payload,'expires,type,v,version') && payload.v===1 && payload.type==='release' &&
+      Number.isSafeInteger(payload.version) && payload.version>=17 && payload.version<=1000000;
+    if (!Number.isSafeInteger(at) || !Number.isInteger(ttl) || ttl < 0 || ttl > (release?RELEASE_TTL:MAX_TTL) ||
         !Number.isInteger(timeout) || timeout < 1 || timeout > 30000) fail();
-    if (!exact(payload, 'expires,id,v') || ![1,2].includes(payload.v) || !Number.isSafeInteger(payload.expires) ||
-        payload.expires <= at || payload.expires > at + (payload.v === 2 ? MAX_TTL : 86400) * 1000) fail();
-    if (payload.id === null) {
+    let wirePayload;
+    if(release){
+      if(!Number.isSafeInteger(payload.expires)||payload.expires<=at||payload.expires>at+RELEASE_TTL*1000)fail();
+      wirePayload={v:1,type:'release',version:payload.version,expires:payload.expires};
+    }else{
+      if (!exact(payload, 'expires,id,v') || ![1,2].includes(payload.v) || !Number.isSafeInteger(payload.expires) ||
+          payload.expires <= at || payload.expires > at + (payload.v === 2 ? MAX_TTL : 86400) * 1000) fail();
+      if (payload.id === null) {
       // A user's own opt-in test can open the app home without a patient link.
-      if (payload.v !== 1 || payload.expires > at + 300000) fail();
-    } else bytes(payload.id, 16);
+        if (payload.v !== 1 || payload.expires > at + 300000) fail();
+      } else bytes(payload.id, 16);
+      wirePayload={v:payload.v,id:payload.id,expires:payload.expires};
+    }
     const normalized = await validateSubscription(subscription, {crypto});
     const url = endpoint(normalized.endpoint);
-    const body = await encryptPushPayload(normalized, encoder.encode(JSON.stringify({v:payload.v,id:payload.id,expires:payload.expires})), {crypto});
+    const body = await encryptPushPayload(normalized, encoder.encode(JSON.stringify(wirePayload)), {crypto});
     const authorization = await vapidHeader(keys, url.origin, subject, at, crypto);
     const controller = new AbortController();
     timer = setTimeout(() => controller.abort(), timeout);

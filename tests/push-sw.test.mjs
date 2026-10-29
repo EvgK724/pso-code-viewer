@@ -8,8 +8,9 @@ const now=1792756800000;
 const base='https://viewer.example/pso-code-viewer/';
 const id='AAAAAAAAAAAAAAAAAAAAAQ';
 const valid=()=>({v:1,id,expires:now+60000});
+const release=()=>({v:1,type:'release',version:18,expires:now+604800000});
 function harness({windows=[],matchError=false,matchHang=false,baseURL=base}={}) {
-  const events=new Map(),shown=[],opened=[],cached=[],focusedOpened=[];
+  const events=new Map(),shown=[],opened=[],cached=[],focusedOpened=[],capabilities=[];
   let closed=0;
   class FixedDate extends Date {static now(){return now;}}
   const context={
@@ -26,7 +27,8 @@ function harness({windows=[],matchError=false,matchHang=false,baseURL=base}={}) 
   vm.runInNewContext(source,context);
   async function run(name,event){let pending;events.get(name)({...event,waitUntil(p){pending=p;}});assert.ok(pending);await pending;}
   return {
-    shown,opened,cached,focusedOpened,closed:()=>closed,
+    shown,opened,cached,focusedOpened,capabilities,closed:()=>closed,
+    message(data,ports=[{postMessage(value){capabilities.push(JSON.parse(JSON.stringify(value)));}}]){events.get('message')({data,ports});},
     push(value,{throws=false,noData=false}={}){return run('push',{data:noData?undefined:{json(){if(throws)throw Error('bad json');return value;}}});},
     click(data){return run('notificationclick',{notification:{data,close(){closed++;}}});}
   };
@@ -150,4 +152,75 @@ test('direct push v2 opens only the direct inbox message route without plaintext
   assert.deepEqual(JSON.parse(JSON.stringify(h.shown[0].data)),payload);
   await h.click(h.shown[0].data);assert.deepEqual(h.opened,[base+'#m='+id]);
   assert.deepEqual(h.cached,[]);
+});
+
+test('release notification uses its own strict data, title, body and version tag without patient lookup',async()=>{
+  const h=harness();await h.push(release());
+  const shown=h.shown[0];
+  assert.equal(shown.title,'ПСО · Новая версия');
+  assert.equal(shown.body,'Вышла новая версия. Откройте приложение и обновитесь.');
+  assert.equal(shown.tag,'pso-release-18');
+  assert.deepEqual(JSON.parse(JSON.stringify(shown.data)),release());
+  assert.deepEqual(h.cached,[]);assert.deepEqual(h.opened,[]);
+  await h.click(shown.data);
+  assert.deepEqual(h.opened,[base+'#update']);assert.deepEqual(h.focusedOpened,h.opened);
+});
+
+test('release capability handshake only responds to the exact request through its supplied port',()=>{
+  const h=harness();h.message({type:'PSO_GET_RELEASE_CAPABILITY'});
+  assert.deepEqual(h.capabilities,[{type:'PSO_RELEASE_CAPABILITY',notificationsVersion:1}]);
+  for(const input of [undefined,null,[],{},'PSO_GET_RELEASE_CAPABILITY',
+    {type:'PSO_RELEASE_CAPABILITY'},{type:'PSO_GET_RELEASE_CAPABILITY',extra:true}]) h.message(input);
+  assert.equal(h.capabilities.length,1);
+  h.message({type:'PSO_GET_RELEASE_CAPABILITY'},[]);
+  h.message({type:'PSO_GET_RELEASE_CAPABILITY'},[{postMessage(){throw Error('disconnected');}}]);
+  assert.equal(h.capabilities.length,1);assert.deepEqual(h.cached,[]);assert.deepEqual(h.opened,[]);
+});
+
+test('release click focuses an existing app and requests update UI without navigating or reloading a draft',async()=>{
+  for(const suffix of ['#m='+id,'index.html#compose','?mode=draft']){
+    const actions=[];
+    const app={url:base+suffix,frameType:'top-level',async focus(){actions.push('focus');return this;},
+      navigate(){assert.fail('A release click must never navigate an open app');},
+      postMessage(value){actions.push(JSON.parse(JSON.stringify(value)));}};
+    const h=harness({windows:[app]});await h.click(release());
+    assert.deepEqual(actions,['focus',{type:'PSO_RELEASE_AVAILABLE',version:release().version}]);
+    assert.deepEqual(h.opened,[]);
+  }
+});
+
+test('release click keeps a focused page intact even when its message channel is unavailable',async()=>{
+  const app={url:base,async focus(){return this;},postMessage(){throw Error('page closed');},
+    navigate(){assert.fail('Never navigate as a substitute for notifying a release');}};
+  const h=harness({windows:[app]});await h.click(release());assert.deepEqual(h.opened,[]);
+});
+
+test('release click opens only the local update route if no usable app can be focused',async()=>{
+  for(const options of [
+    {}, {matchError:true}, {matchHang:true},
+    {windows:[{url:base,async focus(){return null;},navigate(){assert.fail('No navigation');}}]},
+    {windows:[{url:'https://elsewhere.example/',focus(){assert.fail('Foreign focus');}}]},
+    {windows:[{url:base,frameType:'nested',focus(){assert.fail('Embedded focus');}}]}
+  ]){const h=harness(options);await h.click(release());assert.deepEqual(h.opened,[base+'#update']);}
+  const root=harness({baseURL:'https://viewer.example/'});await root.click(release());
+  assert.deepEqual(root.opened,['https://viewer.example/#update']);
+});
+
+test('malformed release data cannot include a message ID, arbitrary content or an external destination',async()=>{
+  const bad=[
+    {...release(),v:2}, {...release(),type:'message'}, {...release(),id},
+    {...release(),expires:now}, {...release(),expires:now+604830001}, {...release(),expires:'tomorrow'},
+    {...release(),body:'patient information'},
+    {...release(),url:'https://elsewhere.example/'}, {...release(),version:null},
+    {...release(),version:'https://elsewhere.example/'}, {...release(),version:16},
+    {...release(),version:18.1}, {...release(),version:1000001},
+    {...release(),version:Infinity}, {...release(),version:'18'},
+    {...release(),version:'yandex-v18-next-release'}
+  ];
+  for(const value of bad){
+    const h=harness();await h.push(value);
+    assert.equal(h.shown[0].title,'ПСО');
+    assert.deepEqual(JSON.parse(JSON.stringify(h.shown[0].data)),{v:1,id:null,expires:0});
+    await h.click(value);assert.deepEqual(h.opened,[base]);
+  }
 });

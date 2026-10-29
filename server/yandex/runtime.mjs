@@ -5,6 +5,7 @@ import {createTeamStore} from './team-store.mjs';
 import {createDirectStore} from './direct-store.mjs';
 import {createPushStore} from './push-store.mjs';
 import {createDeviceAuthStore} from './device-auth-store.mjs';
+import {createReleaseNotifications} from './release-notifications.mjs';
 import {createTeamHandler,safeServiceDiagnostic} from '../team-handler.mjs';
 import {createDirectHandler} from '../direct-handler.mjs';
 import {createPushHandler} from '../push-handler.mjs';
@@ -49,7 +50,7 @@ export async function httpHandler(event,context){
    const webauthn=await import('@simplewebauthn/server'),{team,direct,push,auth}=composeStores(db);
    const handlers={
     'pso-team':createTeamHandler({store:team,allowedOrigin}),
-    'pso-direct':createDirectHandler({store:direct,allowedOrigin}),
+    'pso-direct':createDirectHandler({store:direct,allowedOrigin,releaseStatus:createReleaseNotifications(db).status}),
     'pso-push':createPushHandler({store:push,allowedOrigin}),
     'pso-device-auth':createDeviceAuthHandler({store:auth,webauthn,allowedOrigin})
    };

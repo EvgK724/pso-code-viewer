@@ -119,6 +119,10 @@ textarea::placeholder { font-family: -apple-system, BlinkMacSystemFont, "Segoe U
 .button:active { transform: translateY(1px); }
 @media (hover: hover) { .button-primary:not(:disabled):hover { background: #e2edf6; border-color: #e2edf6; } .button-secondary:not(:disabled):hover { background: #343b45; border-color: #8693a4; } }
 .notice { margin: 0 0 18px; color: var(--orange); font-size: 15px; line-height: 1.5; overflow-wrap: anywhere; }
+.release-notice { margin: 0 0 22px; padding: 20px; background: #18222e; border: 1px solid #617c98; border-radius: 20px; }
+.release-notice h2 { margin: 0 0 10px; font-size: 20px; color: var(--blue); }
+.release-notice p { line-height: 1.5; }
+.release-notice .field-help:empty { display: none; }
 .notice:empty { display: none; }
 .notice.error { border: 1px solid #ba8b68; border-radius: 16px; padding: 17px; background: #30261f; color: #ecc5a6; font-size: 17px; font-weight: 600; scroll-margin-block: 24px; }
 .notice.error:focus { outline: 2px solid var(--orange); outline-offset: 3px; }

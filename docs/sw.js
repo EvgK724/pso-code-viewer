@@ -1,6 +1,6 @@
 const PREFIX = 'pso-viewer-' + encodeURIComponent(new URL('./', self.location).pathname) + '-shell-';
-const CACHE = PREFIX + 'github-v25-update-recovery';
-const SHELL = ['./','./index.html','./styles.css','./pso-comic-cyrillic.woff2','./app.mjs','./care-routing.mjs','./api-queue.mjs','./updates.mjs','./direct.mjs','./messages.mjs','./photos.mjs','./device-unlock.mjs','./recipient-trust.mjs','./crypto.mjs','./exchange.mjs','./storage.mjs','./sharing.mjs','./push.mjs','./team.mjs','./shortlinks.mjs','./shortlink-config.mjs','./manifest.webmanifest','./icon-pso-v2-192.png','./icon-pso-v2-512.png','./apple-touch-icon-pso-v2.png','./favicon-pso-v2.png','./icon-192.png','./icon-512.png','./apple-touch-icon.png'];
+const CACHE = PREFIX + 'github-v26-multiple-roles';
+const SHELL = ['./','./index.html','./styles.css','./pso-comic-cyrillic.woff2','./app.mjs','./care-routing.mjs','./api-queue.mjs','./updates.mjs','./release-info.mjs','./release-notices.mjs','./direct.mjs','./messages.mjs','./photos.mjs','./device-unlock.mjs','./recipient-trust.mjs','./crypto.mjs','./exchange.mjs','./storage.mjs','./sharing.mjs','./push.mjs','./team.mjs','./shortlinks.mjs','./shortlink-config.mjs','./manifest.webmanifest','./icon-pso-v2-192.png','./icon-pso-v2-512.png','./apple-touch-icon-pso-v2.png','./favicon-pso-v2.png','./icon-192.png','./icon-512.png','./apple-touch-icon.png'];
 // Activate only after the complete shell is fetched without stale HTTP cache.
 // Existing pages are never navigated: drafts and in-progress operations survive.
 self.addEventListener('install', event => event.waitUntil((async () => {
@@ -25,9 +25,25 @@ self.addEventListener('fetch', event => {
 });
 
 
-// Notifications carry only a random lookup ID and expiry. Patient data is never
-// resolved or decrypted by this worker and never written to its shell cache.
+// Message notifications carry only a random lookup ID and expiry. Release
+// notifications are a separate schema and never contain patient message IDs.
+// Patient data is never resolved/decrypted or written to this shell cache.
 const APP = new URL('./', self.location);
+function releasePayload(value, now = Date.now()) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) ||
+      Object.keys(value).sort().join(',') !== 'expires,type,v,version' || value.v !== 1 ||
+      value.type !== 'release' || !Number.isSafeInteger(value.version) || value.version < 17 || value.version > 1000000 ||
+      !Number.isSafeInteger(value.expires) || value.expires <= now || value.expires > now + 604830000) return null;
+  return {v:1,type:'release',version:value.version,expires:value.expires};
+}
+// Only a worker implementing the release schema advertises this capability.
+// The page must wait for this handshake before registering release pushes.
+self.addEventListener('message', event => {
+  const data=event.data;
+  if (!data || typeof data !== 'object' || Array.isArray(data) ||
+      Object.keys(data).join(',') !== 'type' || data.type !== 'PSO_GET_RELEASE_CAPABILITY') return;
+  try { event.ports?.[0]?.postMessage({type:'PSO_RELEASE_CAPABILITY',notificationsVersion:1}); } catch {}
+});
 function notificationPayload(value, now = Date.now()) {
   if (!value || typeof value !== 'object' || Array.isArray(value) ||
       Object.keys(value).sort().join(',') !== 'expires,id,v' || ![1,2].includes(value.v) ||
@@ -37,8 +53,17 @@ function notificationPayload(value, now = Date.now()) {
   return {v:value.v, id:value.id, expires:value.expires};
 }
 self.addEventListener('push', event => {
-  let payload = null;
-  try { payload = notificationPayload(event.data?.json()); } catch {}
+  let payload = null, release = null;
+  try { const data=event.data?.json(); release=releasePayload(data); payload=notificationPayload(data); } catch {}
+  if (release) {
+    event.waitUntil(self.registration.showNotification('ПСО · Новая версия', {
+      body:'Вышла новая версия. Откройте приложение и обновитесь.',
+      icon:new URL('./icon-pso-v2-192.png', APP).href,
+      tag:'pso-release-' + release.version,
+      data:release
+    }));
+    return;
+  }
   // Even malformed or expired pushes remain user-visible as required by Apple.
   // They can only open the app home page, never an unvalidated destination.
   event.waitUntil(self.registration.showNotification('ПСО', {
@@ -61,9 +86,10 @@ async function windowOperation(operation, timeout = 1500) {
   } finally { clearTimeout(timer); }
 }
 async function openNotification(data) {
-  const payload = notificationPayload(data);
+  const release = releasePayload(data), payload = notificationPayload(data);
   const target = new URL(APP.href);
-  if (payload?.id) target.hash = (payload.v===2?'m=':'r=') + payload.id;
+  if (release) target.hash = 'update';
+  else if (payload?.id) target.hash = (payload.v===2?'m=':'r=') + payload.id;
   let windows = [];
   try { windows = await windowOperation(self.clients.matchAll({type:'window',includeUncontrolled:true})) || []; } catch {}
   for (const client of windows) {
@@ -75,6 +101,12 @@ async function openNotification(data) {
     try {
       const focused = await windowOperation(client.focus());
       if (focused) {
+        if (release) {
+          // Notify the existing page: only an explicit in-app update action may
+          // reload it. Never navigate an open draft after a release push click.
+          try { focused.postMessage({type:'PSO_RELEASE_AVAILABLE',version:release.version}); } catch {}
+          return;
+        }
         // Invalid or expired data also only raises the existing application.
         if (!payload?.id) return;
         if (await windowOperation(focused.navigate(target.href))) return;

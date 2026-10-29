@@ -3,10 +3,11 @@
 import {exportPublicCard, importPublicCard, deviceIdentity} from './exchange.mjs';
 import {runApiRequest,readApiError,apiDiagnosticText,API_REQUEST_TIMEOUT_MS} from './api-queue.mjs';
 const DOMAIN='PSO-TEAM-v1\0', enc=new TextEncoder();
-import {ROLES,INVITE_ROLES} from './care-routing.mjs';
+import {ROLES,INVITE_ROLES,memberRoles} from './care-routing.mjs';
 const ID=/^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/, LINK=/^[A-Za-z0-9_-]{21}[AQgw]$/;
 const b64=x=>btoa(String.fromCharCode(...new Uint8Array(x))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
 const exact=(v,k)=>v&&typeof v==='object'&&!Array.isArray(v)&&Object.keys(v).sort().join(',')===k;
+const optionalExact=(value,required,optional=[])=>value&&typeof value==='object'&&!Array.isArray(value)&&required.split(',').every(key=>Object.hasOwn(value,key))&&Object.keys(value).every(key=>required.split(',').includes(key)||optional.includes(key));
 const text=v=>typeof v==='string'&&v.trim()===v&&v.length>0&&[...v].length<=60&&!/[\p{Cc}\p{Cf}]/u.test(v);
 export function randomTeamID(){return b64(crypto.getRandomValues(new Uint8Array(16)));}
 export function joinIDFromInput(input,base){
@@ -45,10 +46,10 @@ export class TeamClient {
       try{for(;;){const {done,value}=await reader.read();if(done)break;bytes+=value.byteLength;if(bytes>1000000){await reader.cancel();throw new Error('Ответ команды слишком большой.');}body+=decoder.decode(value,{stream:true});}body+=decoder.decode();return JSON.parse(body);}finally{reader.releaseLock();}
     }catch(e){if(e.name==='AbortError'||e instanceof TypeError||e instanceof SyntaxError){const error=new TeamError('Нет связи с командой. Проверьте интернет.',0);error.networkFailure=e.name==='AbortError'||e instanceof TypeError;throw error;}throw e;}finally{clearTimeout(timer);}
   }
-  async status(device){const r=await this.request(device,'status');if(!exact(r,'name,role,state')||!['active','pending','unregistered','revoked'].includes(r.state)||!(r.role===null||ROLES.includes(r.role))||!(r.name===null||text(r.name)))throw new Error('Не удалось проверить подключение.');return r;}
+  async status(device){const r=await this.request(device,'status',{includeRoles:true});if(!optionalExact(r,'name,role,state',['roles','pendingRole'])||!['active','pending','unregistered','revoked'].includes(r.state)||!(r.role===null||memberRoles(r).length)||!(r.name===null||text(r.name))||r.role===null&&Object.hasOwn(r,'roles')||Object.hasOwn(r,'pendingRole')&&(r.state!=='active'||!memberRoles([...memberRoles(r),r.pendingRole]).length))throw new Error('Не удалось проверить подключение.');return r;}
   async members(device,op='directory'){
-    const r=await this.request(device,op,{includeRehab:true});if(!exact(r,'members')||!Array.isArray(r.members)||r.members.length>100)throw new Error('Не удалось проверить состав команды.');
-    const members=[],ids=new Set();for(const v of r.members){if(!exact(v,'card,id,name,role')||!ID.test(v.id)||!text(v.name)||!ROLES.includes(v.role)||ids.has(v.id))throw new Error('Не удалось проверить состав команды.');const c=await importPublicCard(v.card);if(c.id!==v.id)throw new Error('Ключ врача не совпадает с подключением.');ids.add(v.id);members.push({...c,name:v.name,role:v.role,verified:true});}return members;
+    const r=await this.request(device,op,{includeRehab:true,includeRoles:true});if(!exact(r,'members')||!Array.isArray(r.members)||r.members.length>100)throw new Error('Не удалось проверить состав команды.');
+    const members=[],ids=new Set();for(const v of r.members){if(!optionalExact(v,'card,id,name,role',['roles','pendingRole'])||!ID.test(v.id)||!text(v.name)||!memberRoles(v).length||Object.hasOwn(v,'pendingRole')&&!memberRoles([...memberRoles(v),v.pendingRole]).length||ids.has(v.id))throw new Error('Не удалось проверить состав команды.');const c=await importPublicCard(v.card);if(c.id!==v.id)throw new Error('Ключ врача не совпадает с подключением.');ids.add(v.id);members.push({...c,name:v.name,role:v.role,...(v.roles?{roles:v.roles}:{}),...(v.pendingRole?{pendingRole:v.pendingRole}:{}),verified:true});}return members;
   }
   directory(device){return this.members(device);}
   pending(device){return this.members(device,'pending');}

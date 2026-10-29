@@ -6,7 +6,7 @@ import {deviceIdentity, exportPublicCard, importPublicCard} from './exchange.mjs
 
 export const RECIPIENT_GRANT_DOMAIN = 'PSO-RECIPIENT-GRANT-v1\0';
 export const MAX_GRANT_TTL = 365 * 24 * 60 * 60 * 1000;
-import {ROLES} from './care-routing.mjs';
+import {ROLES, REHAB_ROLES} from './care-routing.mjs';
 const enc = new TextEncoder();
 const scope = encodeURIComponent(new URL('./', import.meta.url).pathname);
 const PIN_KEY = 'pso-organizer-pin-v1-' + scope;
@@ -56,16 +56,33 @@ export async function makeRecipientGrant(device, member, {now=Date.now(),ttlMs=M
   return {grant,signature,issuerCard:await exportPublicCard(device,'Организатор')};
 }
 
-export async function verifyRecipientGrant(member, pinnedOrganizerCard, now=Date.now()) {
-  const root=await organizerCard(pinnedOrganizerCard);
-  const proof=member?.approvalProof;
+async function verifyRoleGrant(proof, member, role, root, subject, now) {
   if (!exact(proof,'grant,issuerCard,signature')) failure();
   const grant=canonicalGrant(proof.grant,now), signature=unb64(proof.signature,64);
-  const issuer=await importPublicCard(proof.issuerCard), subject=await importPublicCard(member.card);
+  const issuer=await importPublicCard(proof.issuerCard);
   if (issuer.id!==root.id || grant.issuerId!==root.id || grant.subjectId!==subject.id || member.id!==subject.id ||
-      member.role!==grant.role || member.name!==grant.name) failure();
+      role!==grant.role || member.name!==grant.name) failure();
   if (!await crypto.subtle.verify({name:'ECDSA',hash:'SHA-256'},root.signingPublicKey,signature,enc.encode(RECIPIENT_GRANT_DOMAIN+JSON.stringify(grant)))) failure();
-  return {...subject,name:grant.name,role:grant.role,approvalProof:proof,verified:true};
+  return grant;
+}
+
+export async function verifyRecipientGrant(member, pinnedOrganizerCard, now=Date.now()) {
+  const root=await organizerCard(pinnedOrganizerCard), subject=await importPublicCard(member?.card);
+  const proof=member?.approvalProof;
+  const grant=await verifyRoleGrant(proof,member,member?.role,root,subject,now);
+  const result={...subject,name:grant.name,role:grant.role,approvalProof:proof,verified:true};
+  // Keep the original v1 certificate intact for existing clients and the bot.
+  // Additional roles are capabilities only when EACH role has its own signed
+  // grant for this exact device, doctor name and independently pinned organizer.
+  const hasRoles=Object.hasOwn(member,'roles'), hasProofs=Object.hasOwn(member,'roleProofs');
+  if(!hasRoles&&!hasProofs) return result;
+  const roles=member.roles, proofs=member.roleProofs;
+  if(!hasRoles||!hasProofs||!Array.isArray(roles)||roles.length<2||roles.length>REHAB_ROLES.length+1||
+     roles[0]!==member.role||new Set(roles).size!==roles.length||
+     roles.some(role=>role!=='neurologist'&&!REHAB_ROLES.includes(role))||
+     !Array.isArray(proofs)||proofs.length!==roles.length-1) failure();
+  for(let i=1;i<roles.length;i++) await verifyRoleGrant(proofs[i-1],member,roles[i],root,subject,now);
+  return {...result,roles:[...roles],roleProofs:[...proofs]};
 }
 
 export async function verifyRecipientDirectory(members,pinnedOrganizerCard,now=Date.now()) {
