@@ -363,7 +363,18 @@ summary:focus-visible { border-radius: 8px; }
 .emoji-picker { margin: 8px 0 14px; padding: 14px; border: 1px solid #455466; border-radius: 18px; background: #171e26; }
 .emoji-picker section + section { margin-top: 12px; }
 .emoji-picker h3 { margin: 0 0 6px; font-size: 14px; font-weight: 600; color: #b8c3d0; }
-.emoji-chips { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 6px; }
-.emoji-chips button { min-width: 44px; min-height: 46px; border: 1px solid #46576a; border-radius: 12px; background: #253342; color: #e3ebf2; font-size: 24px; line-height: 1.2; cursor: pointer; }
+.emoji-chips { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 8px; }
+.emoji-chips button { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; min-width: 0; min-height: 88px; padding: 10px 6px; border: 1px solid #46576a; border-radius: 12px; background: #253342; color: #e3ebf2; font-size: 24px; line-height: 1.2; cursor: pointer; }
 .emoji-chips button:focus-visible { outline: 3px solid #83c5ff; outline-offset: 2px; }
 .emoji-chips button:disabled { opacity: .45; cursor: default; }
+
+@font-face { font-family: 'PSO Comic'; src: url('./fonts/pso-comic-cyrillic.woff2') format('woff2'); font-weight: 400; font-style: normal; font-display: swap; }
+.emoji-symbol { font-family: system-ui, 'Apple Color Emoji', 'Segoe UI Emoji', sans-serif; font-size: 25px; line-height: 1.2; }
+.emoji-caption, .comic-phrase { font-family: 'PSO Comic', 'Comic Sans MS', cursive; font-weight: 400; font-style: normal; letter-spacing: 0; }
+.emoji-caption { display: block; font-size: 17px; line-height: 1.2; text-align: center; overflow-wrap: anywhere; }
+.comic-phrase { font-size: 1.08em; color: #dae9f6; }
+.comment-preview { margin-top: 14px; padding: 16px; border: 1px solid #455466; border-radius: 16px; background: #171e26; }
+.comment-preview .eyebrow { margin: 0 0 9px; font-size: 12px; }
+.comment-preview .message-comment { margin: 0; font-size: 17px; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+.comic-symbol { font-family: 'Apple Color Emoji', 'Segoe UI Emoji', 'Noto Color Emoji', system-ui, sans-serif; font-size: 1em; font-weight: 400; font-style: normal; }

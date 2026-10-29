@@ -44,6 +44,9 @@ class Element {
     this.disabled = /\bdisabled\b/.test(attrs);
     this.hidden = /\bhidden\b/.test(attrs);
   }
+  get textContent() { return (this._textContent||'')+this.children.map(child=>child.textContent).join(''); }
+  set textContent(value) { this._textContent=String(value);this.children=[]; }
+  setCustomValidity(value) { this.validationMessage=value; }
   addEventListener(type, listener) {
     const listeners = this.listeners.get(type) || [];
     listeners.push(listener); this.listeners.set(type, listeners);
@@ -60,7 +63,7 @@ class Element {
     if (this.tag === 'select' && this.children.length === nodes.length) this.value = this.children[0]?.value || '';
   }
   replaceChildren(...nodes) {
-    this.children = [];
+    this._textContent='';this.children = [];
     if (this.tag === 'select') this.value = '';
     this.append(...nodes);
   }
@@ -2192,18 +2195,18 @@ test('conversation with more than25 recipients fails visibly before encrypting o
 test('emoji palette replaces selection at cursor, keeps private drafts and encrypts its medical symbols',async()=>{
  const s=await directFixture(),writer=await harness(s.stores[1],'',s.options);await writer.event('show-write');writer.el('recipient').value='cardiology';await writer.event('recipient','change');
  assert.equal(writer.el('emoji-picker').hidden,true);await writer.event('emoji-toggle');assert.equal(writer.el('emoji-toggle').attributes.get('aria-expanded'),'true');const chips=writer.el('emoji-picker').querySelectorAll('button');assert.equal(chips.length,16);assert.equal(chips[12].attributes.get('aria-label'),'Дышим ровно');assert.equal(chips[15].attributes.get('aria-label'),'Дежурим бодро');
- const field=writer.el('compose-comment');field.value='До заменить после';field.setSelectionRange(3,11);await chips[0].fire('click');assert.equal(field.value,'До 🧠 после');assert.equal(field.selectionStart,5);assert.equal(field.selectionEnd,5);assert.ok(field.focusCalls.length);assert.equal(s.requests.filter(r=>r.op==='create').length,0,'An emoji never submits');
- await writer.event('direction-rehab1');assert.equal(field.value,'До 🧠 после');await writer.event('direction-pso');assert.equal(field.value,'До 🧠 после');
+ const field=writer.el('compose-comment');field.value='До заменить после';field.setSelectionRange(3,11);await chips[0].fire('click');assert.equal(field.value,'До 🧠 Мозг в деле после');assert.equal(field.selectionStart,'До 🧠 Мозг в деле'.length);assert.equal(field.selectionEnd,field.selectionStart);assert.ok(field.focusCalls.length);assert.equal(s.requests.filter(r=>r.op==='create').length,0,'An emoji never submits');
+ await writer.event('direction-rehab1');assert.equal(field.value,'До 🧠 Мозг в деле после');await writer.event('direction-pso');assert.equal(field.value,'До 🧠 Мозг в деле после');
  field.setSelectionRange(field.value.length,field.value.length);await chips[12].fire('click');await chips[13].fire('click');await writer.event('emoji-toggle');assert.equal(writer.el('emoji-picker').hidden,true);assert.equal(writer.el('emoji-toggle').attributes.get('aria-expanded'),'false');
- await writer.event('compose-form','submit');await writer.idle();const record=[...s.records.values()][0];assert.ok(record,writer.el('notice').textContent);assert.ok(!JSON.stringify(s.requests).includes('До 🧠 после'));
- const reader=await harness(s.stores[2],'',s.options);await reader.hashchange('#m='+record.id);await reader.idle();assert.equal(reader.el('result-comment').textContent,'До 🧠 после🫁🫀');
+ await writer.event('compose-form','submit');await writer.idle();const record=[...s.records.values()][0];assert.ok(record,writer.el('notice').textContent);assert.ok(!JSON.stringify(s.requests).includes('До 🧠 Мозг в деле после'));
+ const reader=await harness(s.stores[2],'',s.options);await reader.hashchange('#m='+record.id);await reader.idle();assert.equal(reader.el('result-comment').textContent,'До 🧠 Мозг в деле после 🫁 Дышим ровно 🫀 Держим ритм');
  await writer.event('emoji-toggle');await writer.hide();assert.equal(field.value,'');assert.equal(writer.el('emoji-picker').hidden,true);
 });
 
 test('emoji insertion honors2000codepoint limit and cannot edit while sender is blocked',async()=>{
  const s=await directFixture(),app=await harness(s.stores[1],'',s.options);await app.event('show-write');app.el('recipient').value='cardiology';await app.event('recipient','change');await app.event('emoji-toggle');const field=app.el('compose-comment'),chip=app.el('emoji-picker').querySelectorAll('button')[0];
  field.value='🙂'.repeat(2000);field.setSelectionRange(field.value.length,field.value.length);await chip.fire('click');assert.equal([...field.value].length,2000);assert.match(app.el('notice').textContent,/не более 2000 символов/);
- field.setSelectionRange(0,2);await chip.fire('click');assert.equal([...field.value].length,2000);assert.ok(field.value.startsWith('🧠'));await app.event('show-read');assert.equal(app.el('emoji-toggle').disabled,true);field.value='Не менять';await chip.fire('click');assert.equal(field.value,'Не менять');
+ field.setSelectionRange(0,([...('🧠 Мозг в деле')].length+1)*2);await chip.fire('click');assert.equal([...field.value].length,2000);assert.ok(field.value.startsWith('🧠'));await app.event('show-read');assert.equal(app.el('emoji-toggle').disabled,true);field.value='Не менять';await chip.fire('click');assert.equal(field.value,'Не менять');
  const recipient=await harness(s.stores[2],'',s.options);assert.equal(recipient.el('emoji-toggle').disabled,true);recipient.el('compose-comment').value='Не менять';await recipient.el('emoji-picker').querySelectorAll('button')[0].fire('click');assert.equal(recipient.el('compose-comment').value,'Не менять');
 });
 
@@ -2216,4 +2219,39 @@ test('changing a replying specialist to another direction clears the old audienc
 
 test('new group discussion rejects an unsigned additional PSO role before encryption and persistence',async()=>{
  const s=await directFixture(['admin','neurologist','psychologist']),app=await harness(s.stores[2],'',s.options);s.members[1].role='admin';await app.event('show-write');app.el('compose-comment').value='Только проверенному составу';await app.event('compose-form','submit');await app.idle();assert.equal(s.records.size,0);assert.equal(s.stores[2].pending.size,0);assert.match(app.el('notice').textContent,/Допуск врача не подтверждён/);assert.equal(app.el('compose-comment').value,'Только проверенному составу');
+});
+
+test('all16 emoji captions insert their full known pair and smart spacing preserves punctuation and line breaks',async()=>{
+ const s=await directFixture(),app=await harness(s.stores[1],'',s.options);await app.event('show-write');const field=app.el('compose-comment'),chips=app.el('emoji-picker').querySelectorAll('button');
+ const pairs=['🧠 Мозг в деле','🧩 Собираем картину','💡 Есть идея','🗣️ Работаем над речью','💪 Набираем силу','🦵 Разминаемся','👣 Шаг за шагом','🎯 К цели','🙌 Получилось','👏 Отличная работа','🙂 С улыбкой','🌟 Маленькая победа','🫁 Дышим ровно','🫀 Держим ритм','🩺 Команда на посту','☕ Дежурим бодро'];
+ for(let i=0;i<16;i++){field.value='';field.setSelectionRange(0,0);await chips[i].fire('click');assert.equal(field.value,pairs[i]);assert.equal(app.el('comment-preview').hidden,false);assert.equal(app.el('comment-preview-text').textContent,pairs[i]);assert.equal(app.el('comment-preview-text').querySelectorAll('span').filter(x=>x.className==='comic-phrase').length,1);assert.equal(chips[i].querySelectorAll('span')[1].textContent,pairs[i].slice(pairs[i].indexOf(' ')+1));}
+ for(const [value,start,end,expected] of [['ДоПосле',2,2,'До ☕ Дежурим бодро После'],['()',1,1,'(☕ Дежурим бодро)'],['До\nпосле',3,3,'До\n☕ Дежурим бодро после'],['До заменить, после',3,11,'До ☕ Дежурим бодро, после'],['До ',3,3,'До ☕ Дежурим бодро']]){field.value=value;field.setSelectionRange(start,end);await chips[15].fire('click');assert.equal(field.value,expected);}
+ assert.equal(s.requests.filter(r=>r.op==='create').length,0);
+});
+
+test('comic formatting is safe and limited to exact known pairs in preview, received message and sender history',async()=>{
+ const s=await directFixture(),writer=await harness(s.stores[1],'',s.options);await writer.event('show-write');writer.el('recipient').value='cardiology';await writer.event('recipient','change');
+ const comment='<img src=x onerror=alert(1)>\nОсмотр без изменений. ☕ Дежурим бодро!\n🧠 Мозг в деле. Дежурим бодро; ☕ Дежурим бодрое; 🧠 Мозг в делении';writer.el('compose-comment').value=comment;await writer.event('compose-comment','input');
+ const check=element=>{assert.equal(element.textContent,comment);assert.equal(element.querySelectorAll('img').length,0);assert.equal(element.querySelectorAll('script').length,0);assert.deepEqual(element.querySelectorAll('span').filter(x=>x.className==='comic-phrase').map(x=>x.textContent),['☕ Дежурим бодро','🧠 Мозг в деле']);assert.deepEqual(element.querySelectorAll('span').filter(x=>x.className==='comic-symbol').map(x=>x.textContent),['☕','🧠']);assert.deepEqual(element.querySelectorAll('span').filter(x=>x.className==='comic-caption').map(x=>x.textContent),[' Дежурим бодро',' Мозг в деле']);assert.ok(element.querySelectorAll('span').some(x=>!x.className&&x.textContent.includes('Осмотр без изменений.')));};
+ check(writer.el('comment-preview-text'));assert.equal(writer.el('comment-preview').hidden,false);
+ await writer.event('compose-form','submit');await writer.idle();assert.equal(writer.el('comment-preview').hidden,true);assert.equal(writer.el('comment-preview-text').textContent,'');assert.equal(writer.el('comment-preview-text').children.length,0);
+ const record=[...s.records.values()][0];assert.ok(record,writer.el('notice').textContent);assert.ok(!JSON.stringify(s.requests).includes('Осмотр без изменений'));
+ const reader=await harness(s.stores[2],'',s.options);await reader.hashchange('#m='+record.id);await reader.idle();check(reader.el('result-comment'));reader.advance(30001);assert.equal(reader.el('result-comment').textContent,'');assert.equal(reader.el('result-comment').children.length,0);
+ await writer.event('show-read');await writer.event('box-outbox');await waitUntil(()=>writer.el('inbox-list').querySelectorAll('button').length===1,'comic sender history');await writer.el('inbox-list').querySelectorAll('button')[0].fire('click');await writer.idle();await writer.event('history-show');await writer.idle();check(writer.el('result-comment'));await writer.blur();assert.equal(writer.el('result-comment').children.length,0);
+});
+
+test('preview plaintext is erased on blur, navigation, background and failed delivery after encryption',async()=>{
+ const s=await directFixture(),writer=await harness(s.stores[1],'',s.options);await writer.event('show-write');writer.el('recipient').value='cardiology';await writer.event('recipient','change');
+ const setDraft=async()=>{writer.el('compose-comment').value='Осмотр 🧩 Собираем картину';await writer.event('compose-comment','input');assert.equal(writer.el('comment-preview').hidden,false);};
+ await setDraft();await writer.blur();assert.equal(writer.el('comment-preview').hidden,true);assert.equal(writer.el('comment-preview-text').children.length,0);assert.equal(writer.el('compose-comment').value,'Осмотр 🧩 Собираем картину');
+ await setDraft();await writer.event('show-settings');assert.equal(writer.el('comment-preview-text').textContent,'');assert.equal(writer.el('compose-comment').value,'');
+ await writer.event('show-write');await setDraft();await writer.hide();assert.equal(writer.el('comment-preview-text').children.length,0);assert.equal(writer.el('compose-comment').value,'');await writer.show();assert.equal(writer.el('comment-preview').hidden,true);
+ await setDraft();s.setFailure(true);await writer.event('compose-form','submit');await writer.idle();assert.equal(s.stores[1].pending.size,1);assert.equal(writer.el('comment-preview-text').children.length,0);assert.equal(writer.el('compose-comment').value,'');assert.ok(!JSON.stringify([...s.stores[1].pending.values()]).includes('Собираем картину'));
+});
+
+test('caption insertion counts the phrase and added spaces at2000codepoints and rejects atomically',async()=>{
+ const s=await directFixture(),app=await harness(s.stores[1],'',s.options);await app.event('show-write');const field=app.el('compose-comment'),chip=app.el('emoji-picker').querySelectorAll('button')[15],pair='☕ Дежурим бодро';
+ field.value='🙂'.repeat(2000-[...pair].length-1);field.setSelectionRange(field.value.length,field.value.length);await chip.fire('click');assert.equal([...field.value].length,2000);assert.ok(field.value.endsWith(' '+pair));assert.equal(field.validationMessage,'');assert.equal(app.el('comment-length').textContent,'2000 / 2000 символов');
+ const before=field.value,preview=app.el('comment-preview-text').textContent,caret=field.selectionStart;await chip.fire('click');assert.equal(field.value,before);assert.equal(field.selectionStart,caret);assert.equal(app.el('comment-preview-text').textContent,preview);assert.match(app.el('notice').textContent,/не более 2000/);
+ field.value='a'.repeat(2001);await app.event('compose-comment','input');assert.equal(field.attributes.get('aria-invalid'),'true');assert.match(field.validationMessage,/2000/);assert.equal(app.el('comment-preview').hidden,true);assert.equal(app.el('comment-preview-text').children.length,0);
 });

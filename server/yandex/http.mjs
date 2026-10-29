@@ -2,7 +2,7 @@
 // no arbitrary file access, no API caching, no plaintext/request logging.
 import {readFile} from 'node:fs/promises';
 const MAX_BODY=2100000;
-const files=['index.html','styles.css','app.mjs','care-routing.mjs','api-queue.mjs','updates.mjs','direct.mjs','messages.mjs','photos.mjs','device-unlock.mjs','recipient-trust.mjs','crypto.mjs','exchange.mjs','storage.mjs','sharing.mjs','push.mjs','team.mjs','shortlinks.mjs','shortlink-config.mjs','manifest.webmanifest','sw.js','icon-pso-v2-192.png','icon-pso-v2-512.png','apple-touch-icon-pso-v2.png','favicon-pso-v2.png','icon-192.png','icon-512.png','apple-touch-icon.png','robots.txt'];
+const files=['index.html','styles.css','fonts/pso-comic-cyrillic.woff2','fonts/Pangolin-OFL.txt','app.mjs','care-routing.mjs','api-queue.mjs','updates.mjs','direct.mjs','messages.mjs','photos.mjs','device-unlock.mjs','recipient-trust.mjs','crypto.mjs','exchange.mjs','storage.mjs','sharing.mjs','push.mjs','team.mjs','shortlinks.mjs','shortlink-config.mjs','manifest.webmanifest','sw.js','icon-pso-v2-192.png','icon-pso-v2-512.png','apple-touch-icon-pso-v2.png','favicon-pso-v2.png','icon-192.png','icon-512.png','apple-touch-icon.png','robots.txt'];
 const APIs=new Set(['pso-team','pso-direct','pso-push','pso-device-auth']);
 export function validateOrigin(value) {
   const u=new URL(value);
@@ -17,7 +17,7 @@ export function jsonReply(statusCode,value){return {statusCode,headers:{...secur
 const reject=(code=400)=>jsonReply(code,{error:'request_rejected'});
 export function createHttpRouter({allowedOrigin,handlers,assets=new URL('../../docs/',import.meta.url)}) {
  const origin=validateOrigin(allowedOrigin),host=new URL(origin).host;
- const policy="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; connect-src 'self'; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+ const policy="default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' blob: data:; connect-src 'self'; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
  const cached=new Map();
  async function asset(name){
   if(!cached.has(name))cached.set(name,(async()=>{
@@ -28,7 +28,7 @@ export function createHttpRouter({allowedOrigin,handlers,assets=new URL('../../d
     const html=data.toString('utf8'),pattern=/<meta\s+http-equiv=["']Content-Security-Policy["']\s+content=(["'])(.*?)\1\s*\/?\s*>/gis;
     if([...html.matchAll(pattern)].length!==1)throw new Error('CSP missing');
     data=Buffer.from(html.replace(pattern,`<meta http-equiv="Content-Security-Policy" content="${policy.replace(/; frame-ancestors 'none'/,'')}">`));
-  }else if(name==='sw.js')data=Buffer.from(data.toString('utf8').replace('github-v23-message-history','yandex-v14-message-history'));
+  }else if(name==='sw.js')data=Buffer.from(data.toString('utf8').replace('github-v24-emoji-captions','yandex-v15-emoji-captions'));
    else if(name==='manifest.webmanifest'){
     const manifest=JSON.parse(data);Object.assign(manifest,{id:'./',start_url:'./',scope:'./'});data=Buffer.from(JSON.stringify(manifest));
    }
@@ -71,7 +71,7 @@ export function createHttpRouter({allowedOrigin,handlers,assets=new URL('../../d
    const name=path==='/'?'index.html':path.slice(1);
    if(!files.includes(name))return reject(404);
    const data=await asset(name),ext=name.split('.').at(-1);
-   const type={html:'text/html; charset=utf-8',mjs:'text/javascript; charset=utf-8',js:'text/javascript; charset=utf-8',css:'text/css; charset=utf-8',png:'image/png',webmanifest:'application/manifest+json',txt:'text/plain; charset=utf-8'}[ext];
+   const type={html:'text/html; charset=utf-8',mjs:'text/javascript; charset=utf-8',js:'text/javascript; charset=utf-8',css:'text/css; charset=utf-8',png:'image/png',woff2:'font/woff2',webmanifest:'application/manifest+json',txt:'text/plain; charset=utf-8'}[ext];
    return {statusCode:200,headers:{...security,'Cache-Control':'no-cache','Content-Type':type,'Content-Security-Policy':policy,...(name==='sw.js'?{'Service-Worker-Allowed':'/'}:{})},isBase64Encoded:true,body:method==='HEAD'?'':data.toString('base64')};
   }catch{return reject(503);}
  };

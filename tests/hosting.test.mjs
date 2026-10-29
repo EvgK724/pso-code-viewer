@@ -132,7 +132,7 @@ test('service worker serves its own offline shell and leaves sibling app request
   for (const path of ['/', '/pso-code-viewer/']) {
     const handlers = new Map(), deleted = [], installed = [], lifecycle = [];
     const prefix = 'pso-viewer-' + encodeURIComponent(path) + '-shell-';
-    const current = prefix + 'github-v23-message-history';
+    const current = prefix + 'github-v24-emoji-captions';
     const unrelated = 'pso-viewer-%2Fanother-app%2F-shell-github-v1';
     const cached = {status:200, body:'offline-shell'};
     const cache = {
@@ -160,6 +160,7 @@ test('service worker serves its own offline shell and leaves sibling app request
     assert.ok(installed.includes('./api-queue.mjs'), 'The request queue must update with all API clients');
     assert.ok(installed.includes('./updates.mjs'), 'Update controls are part of the same shell');
     assert.ok(installed.includes('./push.mjs'), 'Notification client must update with its shell');
+    assert.ok(installed.includes('./fonts/pso-comic-cyrillic.woff2'), 'Comic captions remain available offline');
     assert.ok(installed.every(file => new URL(file, origin + path + 'sw.js').pathname.startsWith(path)));
     let activation;
     handlers.get('activate')({waitUntil(promise) { activation = promise; }});
@@ -197,8 +198,8 @@ test('same-origin hosting gives this release a separate service worker cache', a
   const response = await router({path:'/sw.js', httpMethod:'GET', headers:{host:new URL(origin).host}});
   assert.equal(response.statusCode, 200);
   const source = Buffer.from(response.body, 'base64').toString('utf8');
-  assert.match(source, /const CACHE = PREFIX \+ 'yandex-v14-message-history';/);
-  assert.ok(!source.includes('github-v23-message-history'));
+  assert.match(source, /const CACHE = PREFIX \+ 'yandex-v15-emoji-captions';/);
+  assert.ok(!source.includes('github-v24-emoji-captions'));
   assert.equal(response.headers['Cache-Control'], 'no-cache');
 });
 
