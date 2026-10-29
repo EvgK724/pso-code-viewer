@@ -19,7 +19,7 @@ const rid=()=>base64url(crypto.getRandomValues(new Uint8Array(16)));
 const vapid=await createVapidKeys();
 async function envelope(device,op,data={},issued=NOW){const unsigned={v:1,op,issued,nonce:rid(),card:await exportPublicCard(device,'Устройство'),data};return {...unsigned,signature:base64url(await crypto.subtle.sign({name:'ECDSA',hash:'SHA-256'},device.signing.privateKey,new TextEncoder().encode('PSO-TEAM-v1\0'+JSON.stringify(unsigned))))};}
 function req(envelope,{origin=ORIGIN,raw,headers={}}={}){return new Request(URL,{method:'POST',headers:{Origin:origin,'Content-Type':'application/json',...headers},body:raw??JSON.stringify({envelope})});}
-function fixture({unlock=true,sendState='accepted'}={}){
+function fixture({unlock=true,sendState='accepted',releaseStatus=null}={}){
  let clock=NOW;const roster=new Map(members.map((m,i)=>[m.id,{...m,state:i===5?'pending':'active',createdAt:NOW,approvedAt:i===5?null:NOW,revokedAt:null}]));const messages=new Map(),nonces=new Set(),pushes=[],leases=new Map(),audit=[];
  const active=id=>roster.get(id)?.state==='active';
  const store={
@@ -36,7 +36,7 @@ function fixture({unlock=true,sendState='accepted'}={}){
   async pushFinish(id,recipient,lease,status){const key=id+recipient;if(leases.get(key)?.lease===lease)leases.set(key,{lease,status});},
   async keys(){return vapid;},async unlockCheck(){return unlock;}
  };
- const handler=createDirectHandler({store,allowedOrigin:ORIGIN,now:()=>clock,send:async(s,k,p)=>{pushes.push(p);return{status:sendState};}});
+ const handler=createDirectHandler({store,allowedOrigin:ORIGIN,now:()=>clock,releaseStatus,send:async(s,k,p)=>{pushes.push(p);return{status:sendState};}});
  return{store,handler,roster,messages,pushes,leases,audit,setTime:t=>clock=t,async op(device,op,data={},options){return handler(req(await envelope(device,op,data,clock),options));}};
 }
 async function legacy(sender=bot,group='cardiology'){const index=group==='cardiology'?2:3;return{id:rid(),group,kind:sender===bot?'admission':'review',issued:NOW,expires:NOW+3600000,entries:[{recipientId:contacts[index].id,token:await sealSurname(sender,contacts[index],'Вымышленный',{department:group==='cardiology'?'ПСО':'ОРИТ',ttlMinutes:60,now:NOW})}]};}
@@ -86,4 +86,17 @@ test('unauthenticated requests, replay, origin, body limits, private errors fail
  assert.equal((await f.handler(req(e,{origin:'https://wrong.example'}))).status,403);assert.equal((await f.handler(req(e))).status,200);assert.equal((await f.handler(req(e))).status,409);
  assert.equal((await f.handler(req(e,{raw:'x'.repeat(MAX_DIRECT_BODY_BYTES+1)}))).status,413);
  f.store.list=async()=>{throw Error('sensitive DB detail');};const r=await f.op(cardio,'inbox');assert.equal(r.status,503);assert.equal((await r.text()).includes('sensitive'),false);
+});
+
+
+test('release registration accepts only authenticated exact capability requests and never accesses medical messages',async()=>{
+ const calls=[],f=fixture({releaseStatus:async(actor,data)=>{calls.push({actor,data});return{version:17,updateAvailable:data.clientVersion<17};}});
+ const valid={clientVersion:16,notificationsVersion:1};
+ const r=await f.op(neuro,'release_status',valid);assert.equal(r.status,200);assert.deepEqual(await r.json(),{version:17,updateAvailable:true});assert.deepEqual(calls,[{actor:members[1].id,data:valid}]);
+ for(const data of [{...valid,clientVersion:0},{...valid,clientVersion:1.5},{...valid,clientVersion:1000001},{...valid,notificationsVersion:2},{...valid,extra:true},{clientVersion:16}])assert.equal((await f.op(neuro,'release_status',data)).status,400);
+ assert.equal((await f.op(replacement,'release_status',valid)).status,403);assert.equal(calls.length,1);
+ const forged=await envelope(neuro,'release_status',valid);forged.data={clientVersion:17,notificationsVersion:1};assert.equal((await f.handler(req(forged))).status,403);assert.equal(calls.length,1);
+ assert.equal(f.messages.size,0);assert.equal(f.pushes.length,0);assert.equal(f.audit.length,0);
+ const missing=await fixture().op(neuro,'release_status',valid);assert.equal(missing.status,503);assert.equal((await missing.json()).error,'release_unavailable');
+ const denied=fixture({releaseStatus:async()=>({status:'denied'})});assert.equal((await denied.op(bot,'release_status',valid)).status,403);
 });

@@ -1,7 +1,7 @@
 // Transactional YDB document port of team-schema.sql and direct-schema.sql's
 // updated role limits. HTTP handlers verify signatures before using this store.
 // Documents contain public staff keys and ciphertext, never patient plaintext.
-import {INVITE_ROLES as INVITABLE_ROLES,roleGroup,isRehabGroup} from '../../docs/care-routing.mjs';
+import {INVITE_ROLES as INVITABLE_ROLES,REHAB_ROLES,memberRoles,hasRole,inRecipientGroup,roleGroup,isRehabGroup} from '../../docs/care-routing.mjs';
 import {revokeDeviceAuthTx} from './device-auth-store.mjs';
 
 const MINUTE = 60000, DAY = 86400000;
@@ -10,7 +10,7 @@ const INVITE_ROLES = new Set(INVITABLE_ROLES);
 // Rehab capacity is shared across specialties, not 25 seats per specialty.
 export function roleCapacityReached(members,role) {
   const group=roleGroup(role);
-  const peers=members.filter(m=>m.state==='active'&&(isRehabGroup(group)?roleGroup(m.role)===group:m.role===role));
+  const peers=members.filter(m=>m.state==='active'&&(isRehabGroup(group)?inRecipientGroup(m,group):hasRole(m,role)));
   if (role==='cardiologist') return peers.length>=1;
   if (role==='bot'||role==='intensivist'||isRehabGroup(group)) return peers.length>=25;
   return false;
@@ -24,9 +24,11 @@ export const validSpki = value => typeof value === 'string' && /^[A-Za-z0-9_-]{1
 const validToken = value => typeof value === 'string' && /^PSO1\.[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]\.[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]\.[A-Za-z0-9_-]{512}\.[A-Za-z0-9_-]{85}[AQgw]$/.test(value);
 const memberKey = id => `member:${id}`;
 const compare = (a,b) => a < b ? -1 : a > b ? 1 : 0;
-const memberView = m => ({id:m.device_id,name:m.name,role:m.role,card:m.card});
+export const multiRoleFields = (m,includeRoles=false) => includeRoles && memberRoles(m).length>1 ? {roles:memberRoles(m),roleProofs:m.role_proofs??[]} : {};
+export const canAddRole = (m,role) => memberRoles(m).length>0 && [m.role,...memberRoles(m),role].every(r=>['neurologist',...REHAB_ROLES].includes(r)) && !hasRole(m,role);
+const memberView = (m,includeRoles=false) => ({id:m.device_id,name:m.name,role:m.role,card:m.card,...(includeRoles&&memberRoles(m).length>1?{roles:memberRoles(m)}:{}),...(includeRoles&&m.pending_role?{pendingRole:m.pending_role}:{})});
 const roleFor = group => group === 'cardiology' ? 'cardiologist' : 'intensivist';
-const senderAllowed = (m,kind) => m?.state === 'active' && (kind === 'admission' ? m.role === 'bot' : ['admin','neurologist'].includes(m.role));
+const senderAllowed = (m,kind) => m?.state === 'active' && (kind === 'admission' ? m.role === 'bot' : (hasRole(m,'admin')||hasRole(m,'neurologist')));
 
 async function removeSubscription(tx,deviceId,expectedEndpointHash=null) {
   const key = `pushsub:${deviceId}`, subscription = await tx.get(key);
@@ -114,13 +116,13 @@ export function createTeamStore(db,{now=Date.now}={}) {
     accept(deviceId,nonce,op,issued,card,signingSpki) {
       return transaction((tx,at) => acceptTeamRequest(tx,{deviceId,nonce,op,issued,card,signingSpki},at));
     },
-    status(deviceId) {
+    status(deviceId,includeRoles=false) {
       return transaction(async tx => {
         const m = validId(deviceId) ? await tx.get(memberKey(deviceId)) : null;
-        return m ? {state:m.state,role:m.role,name:m.name} : {state:'unregistered',role:null,name:null};
+        return m ? {state:m.state,role:m.role,name:m.name,...(includeRoles&&memberRoles(m).length>1?{roles:memberRoles(m)}:{}),...(includeRoles&&m.pending_role?{pendingRole:m.pending_role}:{})} : {state:'unregistered',role:null,name:null};
       });
     },
-    directory(deviceId) {
+    directory(deviceId,includeRoles=false) {
       return transaction(async tx => {
         const actor=validId(deviceId)?await tx.get(memberKey(deviceId)):null;
         if (actor?.state !== 'active') return {status:'denied'};
@@ -128,7 +130,7 @@ export function createTeamStore(db,{now=Date.now}={}) {
           // Older installed bots validate a closed set of roles. Preserve their
           // directory contract; rehab has no bot sender or recipient.
           (actor.role !== 'bot' || !isRehabGroup(roleGroup(m.role))))
-          .sort((a,b) => compare(a.role,b.role)||compare(a.name,b.name)||compare(a.device_id,b.device_id)).map(memberView)};
+          .sort((a,b) => compare(a.role,b.role)||compare(a.name,b.name)||compare(a.device_id,b.device_id)).map(m=>memberView(m,includeRoles))};
       });
     },
     invite(adminId,idHash,name,role,organizerCard) {
@@ -170,9 +172,26 @@ export function createTeamStore(db,{now=Date.now}={}) {
         if (!validId(deviceId) || !validHash(idHash) || !validCard(card) || !validSpki(signingSpki)) return 'denied';
         const key = `invite:${idHash}`, invite = await tx.get(key);
         if (!invite || !await isAdmin(tx,invite.inviter_id)) return 'denied';
-        const old = await tx.get(memberKey(deviceId));
-        if (old) return old.invite_hash === idHash && invite.claimed_by === deviceId && old.signing_spki === signingSpki &&
-          ['pending','active'].includes(old.state) ? old.state : 'conflict';
+        let old = await tx.get(memberKey(deviceId));
+        if (old) {
+          if (old.signing_spki !== signingSpki || !['pending','active'].includes(old.state)) return 'conflict';
+          if (invite.claimed_by === deviceId) {
+            if (old.pending_invite_hash === idHash && old.pending_role === invite.role) return 'pending';
+            if (old.invite_hash === idHash || (old.state === 'active' && hasRole(old,invite.role))) return old.state;
+            return 'conflict';
+          }
+          if (old.state==='active' && old.pending_role) {
+            const pending=await tx.get(`invite:${old.pending_invite_hash}`);
+            if (!pending || pending.expires<=at) old={...old,pending_role:null,pending_invite_hash:null,pending_role_at:null};
+          }
+          if (old.state !== 'active' || old.pending_role || invite.expires <= at || invite.claimed_by != null ||
+              !INVITE_ROLES.has(invite.role) || !validName(invite.name) || !canAddRole(old,invite.role)) return 'conflict';
+          // Queue a role request without changing the approved identity, proof,
+          // authentication, message keys or access already in use on this phone.
+          await tx.put(memberKey(deviceId),{...old,pending_role:invite.role,pending_invite_hash:idHash,pending_role_at:at});
+          await tx.put(key,{...invite,claimed_by:deviceId},invite.expires+7*DAY);
+          return 'pending';
+        }
         if (invite.expires <= at || invite.claimed_by != null || !INVITE_ROLES.has(invite.role) || !validName(invite.name)) return 'denied';
         if ((await teamMembers(tx)).length >= 100) return 'limited';
         await tx.put(memberKey(deviceId),{device_id:deviceId,name:invite.name,role:invite.role,state:'pending',card,
@@ -181,11 +200,11 @@ export function createTeamStore(db,{now=Date.now}={}) {
         return 'pending';
       });
     },
-    pending(adminId) {
+    pending(adminId,includeRoles=false) {
       return transaction(async tx => {
         if (!await isAdmin(tx,adminId)) return {status:'denied'};
-        return {members:(await teamMembers(tx)).filter(m => m.state === 'pending')
-          .sort((a,b) => a.created_at-b.created_at||compare(a.device_id,b.device_id)).map(memberView)};
+        return {members:(await teamMembers(tx)).filter(m => m.state === 'pending'||(includeRoles&&m.state==='active'&&m.pending_role))
+          .sort((a,b) => a.created_at-b.created_at||compare(a.device_id,b.device_id)).map(m=>memberView(m,includeRoles))};
       });
     },
     approve(adminId,deviceId) {
@@ -205,7 +224,7 @@ export function createTeamStore(db,{now=Date.now}={}) {
         if (!await isAdmin(tx,adminId) || !validId(deviceId)) return 'denied';
         const member = await tx.get(memberKey(deviceId));
         if (!member || member.role === 'admin') return 'denied';
-        await tx.put(memberKey(deviceId),{...member,state:'revoked',approval_proof:null,revoked_at:member.revoked_at ?? at});
+        await tx.put(memberKey(deviceId),{...member,state:'revoked',approval_proof:null,role_proofs:[],pending_role:null,pending_invite_hash:null,pending_role_at:null,revoked_at:member.revoked_at ?? at});
         await removeSubscription(tx,deviceId);
         await revokeDeviceAuthTx(tx,deviceId);
         return 'revoked';
@@ -226,7 +245,7 @@ export function createTeamStore(db,{now=Date.now}={}) {
           old.issued === issued && old.expires === expires && JSON.stringify(old.entries) === JSON.stringify(normalized) ? 'exists' : 'conflict';
         if (await tx.get(`legacy:${idHash}`)) return 'conflict';
         if (issued > at+30000) return 'invalid';
-        const expected = (await teamMembers(tx)).filter(m => m.state === 'active' && m.card != null && m.role === roleFor(group))
+        const expected = (await teamMembers(tx)).filter(m => m.state === 'active' && m.card != null && hasRole(m,roleFor(group)))
           .map(m => m.device_id).sort(compare);
         if (!expected.length || JSON.stringify(expected) !== JSON.stringify(normalized.map(e => e.recipientId))) return 'roster_changed';
         if (!await consumeTeamQuotas(tx,[
@@ -244,7 +263,7 @@ export function createTeamStore(db,{now=Date.now}={}) {
         const message = await tx.get(`teammsg:${idHash}`);
         if (!message || message.expires <= at) return {status:'missing'};
         const member = await tx.get(memberKey(deviceId));
-        if (member?.state !== 'active' || member.role !== roleFor(message.group_name)) return {status:'denied'};
+        if (member?.state !== 'active' || !hasRole(member,roleFor(message.group_name))) return {status:'denied'};
         const entry = message.entries.find(e => e.recipientId === deviceId);
         if (!entry) return {status:'denied'};
         const sender = await tx.get(memberKey(message.sender_id));
@@ -260,7 +279,7 @@ export function createTeamStore(db,{now=Date.now}={}) {
         if (!message || message.sender_id !== senderId || message.expires <= at || !senderAllowed(await tx.get(memberKey(senderId)),message.kind)) return {targets};
         for (const {recipientId} of message.entries) {
           const member = await tx.get(memberKey(recipientId));
-          if (member?.state !== 'active' || member.role !== roleFor(message.group_name)) continue;
+          if (member?.state !== 'active' || !hasRole(member,roleFor(message.group_name))) continue;
           const subscription = await tx.get(`pushsub:${recipientId}`), key = `teampush:${idHash}:${recipientId}`;
           if (!subscription || !Number.isSafeInteger(subscription.refreshed_at) || subscription.refreshed_at < at-90*DAY ||
               !validHash(subscription.endpoint_hash) || !Array.isArray(subscription.senders) || !subscription.senders.includes(senderId) || await tx.get(key)) continue;

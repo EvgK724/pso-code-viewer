@@ -1,4 +1,4 @@
-import {INVITE_ROLES, ROLE_LABELS, GROUP_LABELS, roleGroup, rolesForGroup, isRehabGroup, canSendGroup, participatesInGroup, isReplyKind, isGroupConversationKind} from './care-routing.mjs';
+import {INVITE_ROLES, ROLE_LABELS, GROUP_LABELS, memberRoles, hasRole, inRecipientGroup, memberRoleLabels, isRehabGroup, canSendGroup, participatesInGroup, isReplyKind, isGroupConversationKind} from './care-routing.mjs';
 import {sealDemo, openDemo, tokenFromInput, linkForToken} from './crypto.mjs';
 import {exportPublicCard, importPublicCard, deviceIdentity, sealSurname, openSurname} from './exchange.mjs';
 import {readDevice, loadContacts, saveContact, deleteContact, getMyName, setMyName} from './storage.mjs';
@@ -8,6 +8,7 @@ import {SHORTLINK_ENDPOINT, PUSH_ENDPOINT, TEAM_ENDPOINT, DIRECT_ENDPOINT, DEVIC
 import {PushClient, pushKeyBytes} from './push.mjs';
 import {TeamClient, joinIDFromInput} from './team.mjs';
 import {installAppUpdates} from './updates.mjs';
+import {installReleaseNotices} from './release-notices.mjs';
 import {DirectClient, directIDFromInput, newMessageID, savePending, loadPending, removePending} from './direct.mjs';
 import {sealMessage, openMessage, openArchivedMessage, openBotArchivedMessage} from './messages.mjs';
 import {preparePhoto, photoObjectURL} from './photos.mjs';
@@ -26,12 +27,14 @@ let ready = false, busy = false, generation = 0, timer, endsAt = 0, demoLink = '
 let activeScreen = 'read';
 let composeDirection='pso', psoRecipient='';
 let deliveryRetryBusy=false, lastDeliveryRetry=-Infinity;
-let queuedIncoming = location.hash, activeIncoming = null;
+const openedForUpdate = location.hash === '#update';
+let queuedIncoming = openedForUpdate ? '' : location.hash, activeIncoming = null;
 let workerReady = null, pushBusy = false, pushEnabled = false, pushSupported = false, pushRefreshPending = false;
 let pushPublicKey = '', pushSubscription = null;
 let teamState={state:'unregistered',role:null,name:null}, teamMembers=[], teamBusy=false, joinID='', inviteLink='';
 let lastConfirmedTeam=null, teamConnectionMessage='';
 let appUpdates=null, appUpdateAvailable=false;
+let releaseNotices=null, releaseVersionAvailable=0;
 let organizerPin=null, invitationOrganizer=null;
 let revealedReply=null, draftReply=null;
 let historyRecord=null, historyFallback=false, historySource='own';
@@ -41,7 +44,16 @@ const standalone = navigator.standalone === true || globalThis.matchMedia?.('(di
 // An invitation must survive a reload/update. Unlike message links it contains
 // no patient payload; its fragment is not sent in HTTP requests or referrers.
 const isInvitationHash = hash => /^#(?:join|invite|i)=/.test(hash);
-if (queuedIncoming && !isInvitationHash(queuedIncoming)) history.replaceState(null, '', location.pathname);
+if (openedForUpdate || (queuedIncoming && !isInvitationHash(queuedIncoming))) history.replaceState(null, '', location.pathname);
+
+function renderReleaseNotice() {
+  const visible=teamState.state==='active'&&!hasRole(teamState,'bot')&&(appUpdateAvailable||releaseVersionAvailable>0);
+  $('release-notice').hidden=!visible;
+  if(!visible)return;
+  $('release-notice-heading').textContent=releaseVersionAvailable?'Доступна версия v'+releaseVersionAvailable:'Новая версия готова';
+  $('release-notice-text').textContent=appUpdateAvailable?'Обновление загружено. Завершите сообщение перед открытием новой версии.':'Вышла новая версия ПСО. Обновите приложение, когда закончите сообщение.';
+  $('release-update').textContent=appUpdateAvailable?'Открыть новую версию':'Проверить обновление';
+}
 
 function say(text, error = false) {
   const notice = $('notice');
@@ -68,7 +80,7 @@ function clearSensitive() { hideResult();clearHistory();closeEmojiPicker(); draf
 function renderReplyCompose() {
   $('reply-context').hidden=!draftReply;
   $('reply-recipient').textContent=draftReply?GROUP_LABELS[draftReply.group]:'';
-  $('reply-audience').textContent=draftReply?'Ответ получат специалисты этого направления и все неврологи и организаторы ПСО, кроме вас. Подключено устройств: '+teamMembers.filter(m=>m.id!==selfContact?.id&&participatesInGroup(m.role,draftReply.group)).length+'.':'';
+  $('reply-audience').textContent=draftReply?'Ответ получат специалисты этого направления и все неврологи и организаторы ПСО, кроме вас. Подключено устройств: '+teamMembers.filter(m=>m.id!==selfContact?.id&&participatesInGroup(m,draftReply.group)).length+'.':'';
   $('recipient-routing').hidden=!!draftReply;
   $('recipient').required=!draftReply;
   renderCareDirection();
@@ -84,7 +96,7 @@ function setBusy(value) {
   busy = value;
   updatePushButtons();
   updateTeamButtons();
-  for (const id of ['token','compose-surname','compose-comment','compose-photo','recipient','compose-orit','message-caption','expiry','my-name','contact-input','confirm-fingerprint']) $(id).disabled = value || !ready;
+  for (const id of ['token','compose-surname','compose-comment','compose-photo','recipient','rehab1-message-kind','compose-orit','message-caption','expiry','my-name','contact-input','confirm-fingerprint']) $(id).disabled = value || !ready;
   for (const id of ['demo','open','paste-open','export-card','inspect-contact']) $(id).disabled = value || !ready;
   $('copy-handoff').disabled = value || !$('handoff-link').value;
   $('recipient').disabled=value||!ready||!!draftReply;
@@ -145,7 +157,7 @@ function allowedScreen(screen) {
   return screen;
 }
 function renderNavigation() {
-  if((draftReply&&!participatesInGroup(teamState.role,draftReply.group))||(revealedReply&&!participatesInGroup(teamState.role,revealedReply.group))){clearSensitive();if(activeScreen==='write'&&!canCompose())activeScreen='read';}
+  if((draftReply&&!participatesInGroup(teamState,draftReply.group))||(revealedReply&&!participatesInGroup(teamState,revealedReply.group))){clearSensitive();if(activeScreen==='write'&&!canCompose())activeScreen='read';}
   renderHistorySource();
   for (const screen of Object.keys(screens)) {
     $('screen-' + screen).hidden = screen !== activeScreen;
@@ -158,8 +170,8 @@ function renderNavigation() {
   $('write-panel').hidden = activeScreen !== 'write';
   $('direct-panel').hidden = !directClient || activeScreen !== 'read';
   $('legacy-open').hidden = activeScreen !== 'read';
-  $('page-title').textContent = activeScreen==='write'?(draftReply?'Ответ группе':canDiscuss()&&!canReview()?'Написать группе':screens.write[0]):screens[activeScreen][0];
-  $('page-description').textContent = activeScreen==='write'?(draftReply?'Ответ специалистам направления и неврологам ПСО.':canDiscuss()&&!canReview()?'Обсуждение ранней реабилитации вместе с ПСО.':screens.write[1]):screens[activeScreen][1];
+  $('page-title').textContent = activeScreen==='write'?(draftReply?'Ответ группе':selectedKind()==='discussion'?'Написать группе':screens.write[0]):screens[activeScreen][0];
+  $('page-description').textContent = activeScreen==='write'?(draftReply?'Ответ специалистам направления и неврологам ПСО.':selectedKind()==='discussion'?'Обсуждение ранней реабилитации вместе с ПСО.':screens.write[1]):screens[activeScreen][1];
   renderReplyCompose();updateEmojiButtons();
 }
 function showScreen(screen, {preserveNotice=false, focus=false} = {}) {
@@ -439,6 +451,7 @@ $('copy-handoff').addEventListener('click', () => copyText($('handoff-link').val
 $('hide').addEventListener('click', () => hideResult('Фамилия скрыта.'));
 $('recipient').addEventListener('change', ()=>{psoRecipient=$('recipient').value;renderReplyCompose();invalidateComposed();});
 for(const direction of ['pso','rehab1','rehab2'])$('direction-'+direction).addEventListener('click',()=>selectCareDirection(direction));
+$('rehab1-message-kind').addEventListener('change',()=>{invalidateComposed();renderNavigation();});
 for (const id of ['compose-surname','compose-comment','expiry']) $(id).addEventListener('input', invalidateComposed);
 $('compose-orit').addEventListener('input', () => {
   if ($('message-caption').value !== 'test') $('message-caption').value = $('compose-orit').checked ? 'orit' : 'patient';
@@ -597,6 +610,7 @@ addEventListener('pagehide', suspendSensitive);
 
 const roleLabels=ROLE_LABELS;
 function selectedGroup(){if(canDiscuss()&&!canReview())return 'rehab1';return directClient&&isRehabGroup(composeDirection)?composeDirection:$('recipient').value;}
+function selectedKind(){return canDiscuss()&&(!canReview()||selectedGroup()==='rehab1'&&$('rehab1-message-kind').value==='discussion')?'discussion':'review';}
 function selectCareDirection(direction){
   if(!directClient||!canReview()||draftReply||busy||teamBusy||photoBusy||!ready||!['pso','rehab1','rehab2'].includes(direction))return;
   if(composeDirection===direction)return;
@@ -608,14 +622,16 @@ function selectCareDirection(direction){
   renderReplyCompose();invalidateComposed();
 }
 function renderCareDirection(){
-  const group=selectedGroup(),rehab=!!directClient&&isRehabGroup(group),discussion=canDiscuss()&&!canReview();
+  const group=selectedGroup(),rehab=!!directClient&&isRehabGroup(group),discussion=selectedKind()==='discussion';
+  $('rehab1-message-kind-picker').hidden=!!draftReply||!canReview()||!canDiscuss()||group!=='rehab1';
+  $('rehab1-message-kind').disabled=busy||teamBusy||photoBusy||!ready;
   $('discussion-context').hidden=!discussion||!!draftReply;
   $('care-directions').hidden=!directClient||!!draftReply||!canReview();
   for(const direction of ['pso','rehab1','rehab2'])$('direction-'+direction).setAttribute('aria-pressed',String(composeDirection===direction));
   $('pso-recipient-picker').hidden=rehab;
   $('recipient').required=!draftReply&&!rehab;
   $('recipient-summary').hidden=!directClient||!!draftReply;
-  const recipients=teamMembers.filter(member=>discussion?member.id!==selfContact?.id&&participatesInGroup(member.role,group):roleGroup(member.role)===group);
+  const recipients=teamMembers.filter(member=>discussion?member.id!==selfContact?.id&&participatesInGroup(member,group):member.id!==selfContact?.id&&inRecipientGroup(member,group));
   const count=recipients.length;
   $('recipient-summary').textContent=!group?'Выберите получателей в направлении ПСО.':(GROUP_LABELS[group]||'Группа')+' · подключено: '+count+'. '+(count?(discussion?'Сообщение получат специалисты I этапа и все неврологи и организаторы ПСО, кроме вас.':'Сообщение получат все подключённые участники этой группы.'):'В группе пока никого нет. Сначала пригласите специалистов.');
   $('rehab-members').hidden=!rehab;
@@ -623,8 +639,8 @@ function renderCareDirection(){
   $('rehab-delivery-note').hidden=!rehab;
 }
 function canHistory(){return teamState.state==='active'&&teamState.role!=='bot';}
-function canReview(){return teamState.state==='active'&&['admin','neurologist'].includes(teamState.role);}
-function canDiscuss(){return !!directClient&&teamState.state==='active'&&roleGroup(teamState.role)==='rehab1';}
+function canReview(){return teamState.state==='active'&&(hasRole(teamState,'admin')||hasRole(teamState,'neurologist'));}
+function canDiscuss(){return !!directClient&&teamState.state==='active'&&inRecipientGroup(teamState,'rehab1');}
 function canReply(){return !!directClient&&teamState.state==='active'&&teamState.role!=='bot';}
 function canCompose(){return canReview()||canDiscuss()||!!draftReply&&canReply();}
 function canAdmin(){return teamState.state==='active'&&teamState.role==='admin';}
@@ -660,8 +676,8 @@ function renderTeam(){
   if(!teamClient){$('team-panel').hidden=true;$('team-admin').hidden=true;return;}
   $('team-panel').hidden=false;
   const displayTeam=teamState.state==='unavailable'?lastConfirmedTeam:teamState;
-  const identity=displayTeam?.state==='active'?displayTeam.name+' · '+roleLabels[displayTeam.role]:'';
-  $('team-state').textContent=teamState.state==='active'?identity:teamState.state==='unavailable'?(identity?identity+'. ':'')+(teamConnectionMessage||'Нет связи с командой. Действия недоступны. Нажмите «Обновить».'):({pending:'Подключение ожидает подтверждения администратора.',revoked:'Доступ этого телефона отключён.',unregistered:'Откройте приглашение от администратора.'})[teamState.state];
+  const identity=displayTeam?.state==='active'?displayTeam.name+' · '+memberRoleLabels(displayTeam):'';
+  $('team-state').textContent=teamState.state==='active'?identity+(teamState.pendingRole?' · Ожидает подтверждения: '+roleLabels[teamState.pendingRole]:''):teamState.state==='unavailable'?(identity?identity+'. ':'')+(teamConnectionMessage||'Нет связи с командой. Действия недоступны. Нажмите «Обновить».'):({pending:'Подключение ожидает подтверждения администратора.',revoked:'Доступ этого телефона отключён.',unregistered:'Откройте приглашение от администратора.'})[teamState.state];
   $('show-write').hidden=!canCompose();
   if(activeScreen==='write'&&!canCompose())showScreen('read',{preserveNotice:true});
   if(directClient)$('inbox-status').textContent=teamState.state==='active'?'':$('team-state').textContent;
@@ -672,6 +688,7 @@ function renderTeam(){
   $('team-code-box').hidden=!['pending','active'].includes(teamState.state);
   updateTeamButtons();
   renderNavigation();
+  renderReleaseNotice();
 }
 async function refreshTeam(){
   if(!teamClient||!device||teamBusy)return;
@@ -698,10 +715,11 @@ async function refreshTeam(){
   if(deviceUnlock)await refreshUnlock();
   if(pushEnabled)await refreshNotifications();
   await retryDelivery();
+  void releaseNotices?.check();
 }
 async function notificationContacts(){
   const local=await loadContacts(),seen=new Set(local.map(c=>c.id));
-  if(teamState.state==='active')for(const member of teamMembers){if(['admin','neurologist','bot'].includes(member.role)&&!seen.has(member.id)){local.push(member);seen.add(member.id);}}
+  if(teamState.state==='active')for(const member of teamMembers){if(memberRoles(member).some(role=>['admin','neurologist','bot'].includes(role))&&!seen.has(member.id)){local.push(member);seen.add(member.id);}}
   return local;
 }
 async function prepareJoin(input,fromIncoming=false){
@@ -724,7 +742,8 @@ async function prepareJoin(input,fromIncoming=false){
     joinID=id;$('join-panel').hidden=false;$('join-link').value=trusted?String(input).trim():appBase+'#join='+id;
     if(trusted){invitationOrganizer=trusted.organizerCard;$('organizer-code').textContent=trusted.fingerprint;$('organizer-confirm').checked=false;$('organizer-trust').hidden=!!organizerPin;}
     else if(directClient&&!organizerPin)say('Попросите организатора прислать новое приглашение с ключом команды.',true);
-    $('join-hint').textContent=standalone?'Нажмите «Подключить этот телефон». Администратор подтвердит вашу роль.':'Скопируйте приглашение, откройте синий значок и нажмите «Вставить и открыть».';
+    $('team-claim').textContent=teamState.state==='active'?'Запросить дополнительную роль':'Подключить этот телефон';
+    $('join-hint').textContent=standalone?(teamState.state==='active'?'Новая роль добавится после подтверждения организатором. Текущий доступ, ключ и сообщения сохранятся.':'Нажмите «Подключить этот телефон». Администратор подтвердит вашу роль.'):'Скопируйте приглашение, откройте прежний значок приложения и нажмите «Вставить и открыть». Для второй роли не создавайте новый значок.';
     $('team-panel').hidden=false;$('token').value='';updateTeamButtons();
     $('team-panel').scrollIntoView({block:'start',behavior:'auto'});
     return true;
@@ -739,7 +758,7 @@ async function renderTeamAdmin(){
     const pending=await teamClient.pending(device);
     for(const member of pending){
       const row=document.createElement('div');row.className='contact-item';
-      const name=document.createElement('strong');name.textContent=member.name+' · '+roleLabels[member.role];
+      const name=document.createElement('strong');name.textContent=member.name+' · '+memberRoleLabels(member);
       const code=document.createElement('p');code.className='device-id fingerprint';code.textContent=member.fingerprint;
       const label=document.createElement('label');label.className='check-label';const check=document.createElement('input');check.type='checkbox';const wording=document.createElement('span');wording.textContent='Сверил этот код с врачом лично или по известному номеру';label.append(check,wording);
       const approve=document.createElement('button');approve.type='button';approve.className='button button-secondary';approve.textContent='Подтвердить';approve.disabled=true;approve.teamConfirmation=check;
@@ -750,7 +769,7 @@ async function renderTeamAdmin(){
     if(!pending.length){const empty=document.createElement('p');empty.textContent='Новых заявок нет.';$('team-pending').append(empty);}
     $('team-members').replaceChildren();
     for(const member of teamMembers){
-      const row=document.createElement('div');row.className='contact-item';const name=document.createElement('strong');name.textContent=member.name+' · '+roleLabels[member.role];row.append(name);
+      const row=document.createElement('div');row.className='contact-item';const name=document.createElement('strong');name.textContent=member.name+' · '+memberRoleLabels(member);row.append(name);
       if(member.id!==selfContact.id){const remove=document.createElement('button');remove.type='button';remove.className='button button-secondary';remove.textContent='Отключить';let confirm=false;remove.addEventListener('click',async()=>{if(busy||teamBusy||!canAdmin())return;if(!confirm){confirm=true;remove.textContent='Подтвердить отключение';return;}teamBusy=true;updateTeamButtons();try{await teamClient.change(device,'revoke',member.id);say('Доступ отключён.');}catch(e){say(e.message,true);}finally{teamBusy=false;await refreshTeam();}});row.append(remove);}
       $('team-members').append(row);
     }
@@ -781,7 +800,7 @@ $('team-refresh').addEventListener('click',()=>refreshTeam());
 $('copy-join').addEventListener('click',()=>copyText($('join-link').value,'join-link','Приглашение скопировано. Откройте синий значок → «Вставить и открыть».'));
 $('team-claim').addEventListener('click',async()=>{
   if(!teamClient||!joinID||!standalone||busy||teamBusy||['unavailable','revoked'].includes(teamState.state))return;teamBusy=true;updateTeamButtons();
-  try{if(directClient&&!organizerPin)throw new Error('Сначала подтвердите ключ организатора по коду ниже.');if(invitationOrganizer&&(await importPublicCard(invitationOrganizer)).id!==organizerPin?.id)throw new Error('Ключ организатора не совпадает с сохранённым на этом телефоне.');await teamClient.claim(device,joinID);joinID='';if(isInvitationHash(location.hash))history.replaceState(null,'',location.pathname);$('join-panel').hidden=true;$('join-link').value='';say('Заявка отправлена. Сообщите администратору контрольный код ниже.');}
+  try{if(directClient&&!organizerPin)throw new Error('Сначала подтвердите ключ организатора по коду ниже.');if(invitationOrganizer&&(await importPublicCard(invitationOrganizer)).id!==organizerPin?.id)throw new Error('Ключ организатора не совпадает с сохранённым на этом телефоне.');const wasActive=teamState.state==='active',claim=await teamClient.claim(device,joinID);joinID='';if(isInvitationHash(location.hash))history.replaceState(null,'',location.pathname);$('join-panel').hidden=true;$('join-link').value='';say(claim.state==='active'?'Эта роль уже подключена на этом телефоне.':wasActive?'Заявка на дополнительную роль отправлена. Нынешний доступ продолжает работать.':'Заявка отправлена. Сообщите администратору контрольный код ниже.');}
   catch(e){say(e.message,true);}finally{teamBusy=false;await refreshTeam();}
 });
 $('invite-form').addEventListener('submit',async event=>{
@@ -883,7 +902,7 @@ async function init() {
   setBusy(true);
   if ('serviceWorker' in navigator) {
     appUpdates = installAppUpdates({navigator,document,
-      onReady(){appUpdateAvailable=true;$('app-update').textContent='Открыть новую версию';},
+      onReady(){appUpdateAvailable=true;$('app-update').textContent='Открыть новую версию';renderReleaseNotice();},
       onStatus(state){if(appUpdates&&['current','ready'].includes(state)){workerReady=appUpdates.ready;workerReady.catch(()=>{});}$('app-update-status').textContent=appUpdateAvailable?
         'Обновление загружено. Скопируйте готовые ссылки и нажмите кнопку.':
         ({checking:'Проверяем обновление…',offline:'Не удалось проверить обновление. Проверьте интернет и повторите.',current:'Установлена актуальная версия.',ready:'Обновление загружено.',failed:'Не удалось загрузить обновление. Проверьте подключение и повторите.',unsupported:'Этот браузер не поддерживает обновления приложения.'})[state]||'';}
@@ -892,6 +911,12 @@ async function init() {
     // Keep registration failures separate from existing key/decryption operations.
     workerReady.catch(() => {});
   }
+  if(directClient)releaseNotices=installReleaseNotices({navigator,document,
+    isEligible:()=>!!device&&ready&&teamState.state==='active'&&!hasRole(teamState,'bot'),
+    request:data=>directClient.request(device,'release_status',data),
+    onAvailable:version=>{releaseVersionAvailable=version;renderReleaseNotice();},
+    checkUpdate:()=>appUpdates?.check()
+  });
   if (shortLinks || teamClient) {
     $('copy-composed').textContent = 'Скопировать ссылку';
     if (pushClient) { $('encrypt').textContent = 'Создать ссылку и уведомить'; $('push-compose-help').hidden = false; }
@@ -912,18 +937,22 @@ async function init() {
   if(teamClient) { $('message-caption').value='test';$('encrypt').textContent=directClient?'Отправить врачу':'Создать проверочную ссылку';$('push-compose-help').hidden=false; }
   $('direct-fields').hidden=!directClient;$('direct-panel').hidden=!directClient;
   $('legacy-open').open=!directClient||teamState.state==='unregistered';
-  if(directClient){$('compose-surname').required=false;$('legacy-output').hidden=true;setInterval(async()=>{if(!document.hidden){await refreshInbox();await retryPending(false);await retryDelivery();}},60000);}
+  if(directClient){$('compose-surname').required=false;$('legacy-output').hidden=true;setInterval(async()=>{if(!document.hidden){await refreshInbox();await retryPending(false);await retryDelivery();void releaseNotices?.check();}},60000);}
   $('device-unlock-settings').hidden=!deviceUnlock;
   renderNavigation();
   void initNotifications();
+  if(openedForUpdate){void appUpdates?.check();void releaseNotices?.check(true);}
 }
-$('app-update').addEventListener('click',async()=>{
+async function requestAppUpdate(){
   if(busy||teamBusy||pushBusy){$('app-update-status').textContent='Дождитесь завершения текущей операции.';return;}
   if(appUpdateAvailable){clearSensitive();location.reload();return;}
   if(!appUpdates){$('app-update-status').textContent='Этот браузер не поддерживает обновления приложения.';return;}
   $('app-update').disabled=true;
-  try{await appUpdates.check();}finally{$('app-update').disabled=false;}
-});
+  $('release-update').disabled=true;
+  try{await appUpdates.check();$('release-notice-status').textContent=$('app-update-status').textContent;}finally{$('app-update').disabled=false;$('release-update').disabled=false;}
+}
+$('app-update').addEventListener('click',requestAppUpdate);
+$('release-update').addEventListener('click',requestAppUpdate);
 
 function messageTitle(item){return item.kind==='group_reply'?'Ответ группе':item.kind==='discussion'?'Обсуждение · I этап':item.kind==='reply'?'Личный ответ':isRehabGroup(item.group)?'Запрос на реабилитацию':item.kind==='review'?'Проверочная история':'Новый пациент';}
 function dateLabel(time){return new Date(time).toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'});}
@@ -984,7 +1013,7 @@ function renderHistoryDetail(record){
   $('history-expiry').textContent='Получателям доступно до '+historyDate(record.meta.expires)+'. Ваша история — до '+historyDate(record.archiveUntil)+'.';
   $('history-recipients').replaceChildren();
   for(const recipient of record.recipients){
-    const row=document.createElement('li'),name=document.createElement('strong');name.textContent=recipient.name+' · '+(ROLE_LABELS[recipient.role]||'Получатель');row.append(name);
+    const row=document.createElement('li'),name=document.createElement('strong');name.textContent=recipient.name+' · '+(memberRoleLabels(recipient)||'Получатель');row.append(name);
     const deviceCode=document.createElement('p');deviceCode.className='message-meta';deviceCode.textContent='Устройство: '+recipient.id.slice(0,10);row.append(deviceCode);
     const viewed=document.createElement('p');viewed.className='message-meta';viewed.textContent=recipient.openedAt?'Открыто на устройстве: '+historyDate(recipient.openedAt):'Открытие пока не отмечено';row.append(viewed);
     const push=document.createElement('p');push.className='field-help compact-help';push.textContent=recipient.pushState==='accepted'?'Принято службой уведомлений'+(recipient.pushAcceptedAt?': '+historyDate(recipient.pushAcceptedAt):'')+'.':recipient.pushState==='queued'&&record.meta.expires>Date.now()?'Уведомление ожидает повторной отправки.':record.meta.expires<=Date.now()?'Срок доступа для получателей истёк. Подтверждения службы уведомлений нет.':'Нет подтверждения от службы уведомлений.';row.append(push);
@@ -1045,15 +1074,15 @@ async function revealDirect(id,fromIncoming=false){
     if(!organizerPin)throw new Error('Сначала подключите ключ организатора через его личное приглашение.');
     let sender;
     if(record.sender.id===organizerPin.id&&record.senderRole==='admin')sender={...organizerPin,name:record.senderName,role:'admin',verified:true};
-    else sender=await verifyRecipientGrant({id:record.sender.id,name:record.senderName,role:record.senderRole,card:record.senderCard,approvalProof:record.senderApprovalProof},organizerPin);
-    if(!canSendGroup(sender.role,record.meta.group,record.meta.kind)||(isRehabGroup(record.meta.group)||isGroupConversationKind(record.meta.kind))&&!record.payload)throw new Error('Роль отправителя не разрешает это сообщение.');
+    else sender=await verifyRecipientGrant({id:record.sender.id,name:record.senderName,role:record.senderRole,...(record.senderRoles?{roles:record.senderRoles,roleProofs:record.senderRoleProofs}:{}),card:record.senderCard,approvalProof:record.senderApprovalProof},organizerPin);
+    if(!canSendGroup(sender,record.meta.group,record.meta.kind)||(isRehabGroup(record.meta.group)||isGroupConversationKind(record.meta.kind))&&!record.payload)throw new Error('Роль отправителя не разрешает это сообщение.');
     const ownRecord=(await directClient.directory(device)).find(member=>member.id===selfContact.id);
-    const ownRole=ownRecord?.id===organizerPin.id&&ownRecord.role==='admin'?'admin':(await verifyRecipientGrant(ownRecord,organizerPin)).role;
+    const ownRole=ownRecord?.id===organizerPin.id&&ownRecord.role==='admin'?'admin':await verifyRecipientGrant(ownRecord,organizerPin);
     if(record.meta.kind==='reply'){
-      if(!record.payload||!['admin','neurologist','cardiologist','intensivist'].includes(ownRole))throw new Error('Ответ недоступен этому получателю.');
+      if(!record.payload||!memberRoles(ownRole).some(role=>['admin','neurologist','cardiologist','intensivist'].includes(role)))throw new Error('Ответ недоступен этому получателю.');
     }else if(isGroupConversationKind(record.meta.kind)){
       if(!record.payload||!participatesInGroup(ownRole,record.meta.group))throw new Error('Обсуждение адресовано другому направлению.');
-    }else if(record.meta.group!==roleGroup(ownRole))throw new Error('Сообщение адресовано другой группе врачей.');
+    }else if(!inRecipientGroup(ownRole,record.meta.group))throw new Error('Сообщение адресовано другой группе врачей.');
     if(current!==generation||document.hidden)return;
     const data=record.payload?await openMessage(device,record.token,record.payload,[sender]):await openSurname(device,record.token,[sender]);
     if(current!==generation||document.hidden)return;
@@ -1102,7 +1131,7 @@ async function composeDirectReply(){
   setBusy(true);say('Шифруем ответ для всей группы…');
   try{
     if(context.expires<=issued)throw new Error('Срок исходного сообщения истёк. Ответ больше недоступен.');
-    if(!canSendGroup(teamState.role,context.group,'group_reply'))throw new Error('Ответ в этом направлении недоступен для вашей роли.');
+    if(!canSendGroup(teamState,context.group,'group_reply'))throw new Error('Ответ в этом направлении недоступен для вашей роли.');
     const recipients=await trustedConversationDirectory(context.group);
     if(current!==generation||document.hidden)return;
     const id=newMessageID(),meta={id,group:context.group,kind:'group_reply',replyTo:context.id,issued,expires};
@@ -1142,7 +1171,7 @@ async function retryPending(announce=true){
   directPendingBusy=true;setBusy(busy);let sent=0;
   try{for(const data of await loadPending()){
     if(teamBusy||!canReply())break;
-    if(!canSendGroup(teamState.role,data.group,data.kind))continue;
+    if(!canSendGroup(teamState,data.group,data.kind))continue;
     try{await directClient.create(device,data);await removePending(data.id);sent++;}
     catch(e){if(announce)say(e.status===409&&e.code!=='group_too_large'?'Состав получателей изменился. Старая зашифрованная запись не отправлена. Создайте её заново после удаления из очереди.':e.message,true);break;}
   }if(sent&&announce)say('Сохранено для получателей: '+sent+'.');await refreshPending();void refreshInbox();}
@@ -1151,12 +1180,12 @@ async function retryPending(announce=true){
 async function composeDirectReview(){
   if(draftReply)return composeDirectReply();
   if(!(canReview()||canDiscuss())||teamBusy||photoBusy){say('Новое сообщение недоступно для вашей роли.',true);return;}
-  hideResult();const current=generation,group=selectedGroup(),kind=canReview()?'review':'discussion',issued=Date.now(),expires=issued+Number($('expiry').value)*60000;
+  hideResult();const current=generation,group=selectedGroup(),kind=selectedKind(),issued=Date.now(),expires=issued+Number($('expiry').value)*60000;
   let content={surname:$('compose-surname').value,department:$('compose-orit').checked?'ОРИТ':'ПСО',comment:$('compose-comment').value,photo:directPhoto};
   let queued=false;
   setBusy(true);say('Шифруем для получателей…');
   try{
-    if(!canSendGroup(teamState.role,group,kind))throw new Error('Выберите доступное направление.');
+    if(!canSendGroup(teamState,group,kind))throw new Error('Выберите доступное направление.');
     const recipients=kind==='discussion'?await trustedConversationDirectory(group):await trustedGroupDirectory(group);if(!recipients.length)throw new Error('В выбранной группе пока нет подключённых специалистов.');
     if(recipients.length>25)throw new Error('В группе больше 25 устройств. Обратитесь к организатору.');
     const id=newMessageID(),sealed=await sealMessage(device,recipients,content,{id,group,kind,issued,expires},{archive:true});
@@ -1205,44 +1234,52 @@ $('compose-photo').addEventListener('change',async()=>{
   finally{photoBusy=false;setBusy(busy);}
 });
 addEventListener('online',async()=>{await refreshInbox();await retryPending(false);await retryDelivery();});
+async function memberProofs(member){
+  const roles=memberRoles(member);
+  const proofs=await Promise.all(roles.map(role=>makeRecipientGrant(device,{id:member.id,card:member.card,name:member.name,role})));
+  return {approvalProof:proofs[0],...(roles.length>1?{roles,roleProofs:proofs.slice(1)}:{})};
+}
 async function renderDirectAdmin(){
   if(teamState.state!=='active'||teamState.role!=='admin')return;
   $('team-pending').replaceChildren();$('team-members').replaceChildren();
   try{
-    const members=await directClient.members(device),pending=members.filter(m=>m.state==='pending');
+    const members=await directClient.members(device),pending=members.filter(m=>m.state==='pending'||m.state==='active'&&m.pendingRole);
     for(const member of pending){
-      const row=document.createElement('div');row.className='contact-item';const title=document.createElement('strong');title.textContent=member.name+' · '+roleLabels[member.role];
+      const adding=member.state==='active'&&!!member.pendingRole;
+      const row=document.createElement('div');row.className='contact-item';const title=document.createElement('strong');title.textContent=member.name+' · '+memberRoleLabels(member)+(adding?' → добавить: '+roleLabels[member.pendingRole]:'');
       const code=document.createElement('p');code.className='fingerprint device-id';code.textContent=member.fingerprint;
       const label=document.createElement('label');label.className='check-label';const check=document.createElement('input');check.type='checkbox';const text=document.createElement('span');text.textContent='Сверил код с врачом лично или по известному номеру';label.append(check,text);
-      const old=document.createElement('select');old.setAttribute('aria-label','Вместо прежнего телефона');const first=document.createElement('option');first.value='';first.textContent='Новый участник';old.append(first);
+      const old=document.createElement('select');old.hidden=adding;old.disabled=adding;old.setAttribute('aria-label','Вместо прежнего телефона');const first=document.createElement('option');first.value='';first.textContent='Новый участник';old.append(first);
       for(const previous of members.filter(m=>m.id!==member.id&&m.role!=='admin'&&m.state!=='pending')){const option=document.createElement('option');option.value=previous.id;option.textContent='Заменить телефон: '+previous.name+(previous.state==='revoked'?' · отключён':'');old.append(option);}
-      const approve=document.createElement('button');approve.type='button';approve.className='button button-primary';approve.textContent='Подтвердить подключение';approve.disabled=true;approve.teamConfirmation=check;
+      const approve=document.createElement('button');approve.type='button';approve.className='button button-primary';approve.textContent=adding?'Добавить роль':'Подтвердить подключение';approve.disabled=true;approve.teamConfirmation=check;
       check.addEventListener('change',()=>{approve.disabled=!check.checked||busy||teamBusy||!canAdmin();});
       approve.addEventListener('click',async()=>{
         if(!check.checked||busy||teamBusy||!canAdmin())return;
         teamBusy=true;updateTeamButtons();approve.textContent='Подтверждаем…';
-        let stage=old.value?'Замена телефона':'Подтверждение телефона';say(stage+'…');
+        let stage=adding?'Добавление роли':old.value?'Замена телефона':'Подтверждение телефона';say(stage+'…');
         try{
-          if(old.value){const previous=members.find(m=>m.id===old.value);const proof=await makeRecipientGrant(device,{...member,name:previous.name,role:previous.role});await directClient.replace(device,old.value,member.id,proof);}
+          if(adding){await directClient.certify(device,member.id,await makeRecipientGrant(device,{id:member.id,card:member.card,name:member.name,role:member.pendingRole}));}
+          else if(old.value){const previous=members.find(m=>m.id===old.value),proofs=await memberProofs({...member,name:previous.name,role:previous.role,...(previous.roles?{roles:previous.roles}:{})});await directClient.replace(device,old.value,member.id,proofs.approvalProof,proofs.roleProofs);}
           else{await teamClient.change(device,'approve',member.id);stage='Подписание доступа';say(stage+'…');await directClient.certify(device,member.id,await makeRecipientGrant(device,member));}
           row.hidden=true;
-          say(old.value?'Новый телефон подключён, прежний отключён. Старые сообщения на новый ключ не переносятся.':'Подключение подтверждено.');
+          say(adding?'Роль добавлена. Прежние роли, ключ и сообщения сохранены.':old.value?'Новый телефон подключён, прежний отключён. Старые сообщения на новый ключ не переносятся.':'Подключение подтверждено.');
         }catch(e){say(actionError(e,stage),true);}
-        finally{approve.textContent='Подтвердить подключение';teamBusy=false;await refreshTeam();}
+        finally{approve.textContent=adding?'Добавить роль':'Подтвердить подключение';teamBusy=false;await refreshTeam();}
       });
       row.append(title,code,label,old,approve);$('team-pending').append(row);
     }
     if(!pending.length){const p=document.createElement('p');p.textContent='Новых заявок нет.';$('team-pending').append(p);}
     for(const member of members.filter(m=>m.state!=='pending')){
-      const row=document.createElement('details');row.className='member-editor';const summary=document.createElement('summary');summary.textContent=member.name+' · '+roleLabels[member.role]+(member.state==='revoked'?' · отключён':'');row.append(summary);
+      const row=document.createElement('details');row.className='member-editor';const summary=document.createElement('summary');summary.textContent=member.name+' · '+memberRoleLabels(member)+(member.state==='revoked'?' · отключён':'');row.append(summary);
       const inner=document.createElement('div');inner.className='details-body';const info=document.createElement('p');info.className='fingerprint';info.textContent=member.fingerprint;inner.append(info);
       if(member.role!=='admin'&&member.state==='active'){
         const name=document.createElement('input');name.type='text';name.maxLength=60;name.value=member.name;name.setAttribute('aria-label','Имя врача');
-        const role=document.createElement('select');role.setAttribute('aria-label','Роль врача');for(const key of INVITE_ROLES){const o=document.createElement('option');o.value=key;o.textContent=roleLabels[key];role.append(o);}role.value=member.role;
-        const save=document.createElement('button');save.type='button';save.className='button button-secondary';save.textContent='Сохранить изменения';save.addEventListener('click',async()=>{if(busy||teamBusy||!canAdmin())return;teamBusy=true;updateTeamButtons();try{await directClient.update(device,{id:member.id,name:name.value.trim(),role:role.value,state:'active',approvalProof:await makeRecipientGrant(device,{...member,name:name.value.trim(),role:role.value})});say('Данные участника обновлены.');}catch(e){say(e.message,true);}finally{teamBusy=false;await refreshTeam();}});
+        const role=document.createElement('select');role.setAttribute('aria-label','Роль врача');for(const key of INVITE_ROLES){const o=document.createElement('option');o.value=key;o.textContent=roleLabels[key];role.append(o);}role.value=member.role;role.disabled=memberRoles(member).length>1;
+        if(memberRoles(member).length>1){const rolesInfo=document.createElement('p');rolesInfo.className='field-help';rolesInfo.textContent=memberRoleLabels(member)+'. Дополнительные роли подключаются приглашением на этот же телефон.';inner.append(rolesInfo);}
+        const save=document.createElement('button');save.type='button';save.className='button button-secondary';save.textContent='Сохранить изменения';save.addEventListener('click',async()=>{if(busy||teamBusy||!canAdmin())return;teamBusy=true;updateTeamButtons();try{const changed={...member,name:name.value.trim(),role:role.value};await directClient.update(device,{id:member.id,name:changed.name,role:changed.role,state:'active',...await memberProofs(changed)});say('Данные участника обновлены.');}catch(e){say(e.message,true);}finally{teamBusy=false;await refreshTeam();}});
         const revoke=document.createElement('button');revoke.type='button';revoke.className='button button-secondary danger-button';revoke.textContent='Отключить доступ';let confirmed=false;
         revoke.addEventListener('click',async()=>{if(busy||teamBusy||!canAdmin())return;if(!confirmed){confirmed=true;revoke.textContent='Подтвердить отключение';return;}teamBusy=true;updateTeamButtons();try{await directClient.update(device,{id:member.id,name:member.name,role:member.role,state:'revoked'});say('Доступ отключён. Уже просмотренное удалить с чужого телефона нельзя.');}catch(e){say(e.message,true);}finally{teamBusy=false;await refreshTeam();}});
-        const certify=document.createElement('button');certify.type='button';certify.className='button button-secondary';certify.textContent='Подтвердить ключ для новых сообщений';let checked=false;certify.addEventListener('click',async()=>{if(busy||teamBusy||!canAdmin())return;if(!checked){checked=true;certify.textContent='Код сверил — подписать доступ';return;}teamBusy=true;try{await directClient.certify(device,member.id,await makeRecipientGrant(device,member));say('Ключ подписан организатором.');}catch(e){say(e.message,true);}finally{teamBusy=false;await refreshTeam();}});
+        const certify=document.createElement('button');certify.type='button';certify.className='button button-secondary';certify.textContent='Подтвердить ключ для новых сообщений';let checked=false;certify.addEventListener('click',async()=>{if(busy||teamBusy||!canAdmin())return;if(!checked){checked=true;certify.textContent='Код сверил — подписать доступ';return;}teamBusy=true;try{if(memberRoles(member).length>1)await directClient.update(device,{id:member.id,name:member.name,role:member.role,state:'active',...await memberProofs(member)});else await directClient.certify(device,member.id,await makeRecipientGrant(device,member));say('Ключ подписан организатором.');}catch(e){say(e.message,true);}finally{teamBusy=false;await refreshTeam();}});
         inner.append(name,role,save,certify,revoke);
       }else{const p=document.createElement('p');p.textContent=member.state==='revoked'?'Для возврата создайте новое приглашение и подтвердите телефон.':'Устройство организатора.';inner.append(p);}
       row.append(inner);$('team-members').append(row);
@@ -1284,14 +1321,14 @@ init();
 
 async function trustedGroupDirectory(group){
   if(!organizerPin)throw new Error('Сначала подключите ключ организатора через его личное приглашение.');
-  const roles=rolesForGroup(group),all=await directClient.directory(device);
-  const members=all.filter(member=>roles.includes(member.role));
+  const all=await directClient.directory(device);
+  const members=all.filter(member=>member.id!==selfContact.id&&inRecipientGroup(member,group));
   return verifyRecipientDirectory(members,organizerPin);
 }
 
 async function trustedConversationDirectory(group){
   if(!organizerPin)throw new Error('Сначала подключите ключ организатора через его личное приглашение.');
-  const all=await directClient.directory(device),members=all.filter(member=>member.id!==selfContact.id&&participatesInGroup(member.role,group));
+  const all=await directClient.directory(device),members=all.filter(member=>member.id!==selfContact.id&&participatesInGroup(member,group));
   if(!members.length)throw new Error('В направлении и ПСО пока нет других подключённых участников.');
   if(members.length>25)throw new Error('В направлении вместе с ПСО больше 25 устройств. Сообщение не отправлено. Обратитесь к организатору.');
   const verified=[],ids=new Set();

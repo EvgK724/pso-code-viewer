@@ -8,19 +8,31 @@ export const GROUP_LABELS = Object.freeze({cardiology:'ПСО · Кардиол�
 const members = Object.freeze({cardiology:Object.freeze(['cardiologist']),orit:Object.freeze(['intensivist']),rehab1:Object.freeze(REHAB_ROLES.slice(0,4)),rehab2:Object.freeze(['rehab2_physician'])});
 export const rolesForGroup = group => members[group] || [];
 export const roleGroup = role => GROUPS.find(group => rolesForGroup(group).includes(role)) || null;
+// A phone has one stable primary role and can hold additional signed clinical
+// roles. Malformed combinations and nonclinical additions fail closed.
+export function memberRoles(value) {
+  const primary=typeof value==='string'?value:!Array.isArray(value)?value?.role:undefined;
+  const roles=Array.isArray(value)?value:typeof value==='string'?[value]:value?.roles===undefined?[primary]:value.roles;
+  if(!Array.isArray(roles)||!roles.length||roles.length>ROLES.length||roles.some(role=>!ROLES.includes(role))||new Set(roles).size!==roles.length||
+      !Array.isArray(value)&&(!ROLES.includes(primary)||roles[0]!==primary)||roles.length>1&&roles.some(role=>!['neurologist',...REHAB_ROLES].includes(role)))return [];
+  return [...roles];
+}
+export const hasRole = (value,role) => memberRoles(value).includes(role);
+export const inRecipientGroup = (value,group) => GROUPS.includes(group)&&memberRoles(value).some(role=>rolesForGroup(group).includes(role));
+export const memberRoleLabels = value => memberRoles(value).map(role=>ROLE_LABELS[role]).join(' + ');
 export const isRehabGroup = group => group === 'rehab1' || group === 'rehab2';
 export const isReplyKind = kind => kind === 'reply' || kind === 'group_reply';
 export const isGroupConversationKind = kind => kind === 'group_reply' || kind === 'discussion';
-// PSO clinicians and the specialists of exactly one direction take part in
+// PSO clinicians and the specialists assigned to that direction take part in
 // group conversations. A bot never receives or replies to these messages.
-export const participatesInGroup = (role,group) => GROUPS.includes(group) &&
-  (role === 'admin' || role === 'neurologist' || roleGroup(role) === group);
+export const participatesInGroup = (value,group) => GROUPS.includes(group) &&
+  (hasRole(value,'admin') || hasRole(value,'neurologist') || inRecipientGroup(value,group));
 export function canSendGroup(role,group,kind) {
   if (!GROUPS.includes(group)) return false;
   if (kind === 'group_reply') return participatesInGroup(role,group);
   if (kind === 'discussion') return group === 'rehab1' && participatesInGroup(role,group);
-  if (isRehabGroup(group)) return kind === 'review' && ['admin','neurologist'].includes(role);
-  if (kind === 'admission') return role === 'bot';
-  if (kind === 'review') return ['admin','neurologist'].includes(role);
-  return kind === 'reply' && ['admin','neurologist','cardiologist','intensivist'].includes(role);
+  if (isRehabGroup(group)) return kind === 'review' && (hasRole(role,'admin')||hasRole(role,'neurologist'));
+  if (kind === 'admission') return hasRole(role,'bot');
+  if (kind === 'review') return (hasRole(role,'admin')||hasRole(role,'neurologist'));
+  return kind === 'reply' && memberRoles(role).some(value=>['admin','neurologist','cardiologist','intensivist'].includes(value));
 }

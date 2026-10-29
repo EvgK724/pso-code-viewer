@@ -132,7 +132,7 @@ test('service worker serves its own offline shell and leaves sibling app request
   for (const path of ['/', '/pso-code-viewer/']) {
     const handlers = new Map(), deleted = [], installed = [], lifecycle = [];
     const prefix = 'pso-viewer-' + encodeURIComponent(path) + '-shell-';
-    const current = prefix + 'github-v25-update-recovery';
+    const current = prefix + 'github-v26-multiple-roles';
     const unrelated = 'pso-viewer-%2Fanother-app%2F-shell-github-v1';
     const cached = {status:200, body:'offline-shell'};
     const cache = {
@@ -198,8 +198,8 @@ test('same-origin hosting gives this release a separate service worker cache', a
   const response = await router({path:'/sw.js', httpMethod:'GET', headers:{host:new URL(origin).host}});
   assert.equal(response.statusCode, 200);
   const source = Buffer.from(response.body, 'base64').toString('utf8');
-  assert.match(source, /const CACHE = PREFIX \+ 'yandex-v16-update-recovery';/);
-  assert.ok(!source.includes('github-v25-update-recovery'));
+  assert.match(source, /const CACHE = PREFIX \+ 'yandex-v17-multiple-roles';/);
+  assert.ok(!source.includes('github-v26-multiple-roles'));
   assert.equal(response.headers['Cache-Control'], 'no-cache');
 });
 

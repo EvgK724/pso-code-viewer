@@ -82,3 +82,13 @@ test('invitation info rejects missing, spent, expired and malformed responses wi
  for(const status of [403,404,409])await assert.rejects(client(()=>reply({},status)).invitationInfo(other,id),e=>e.status===status);
  let calls=0;await assert.rejects(client(()=>{calls++;return reply(info);}).invitationInfo(other,'bad'));assert.equal(calls,0);
 });
+
+test('additional role status preserves active membership and requests modern role projection',async()=>{
+ const active={state:'active',role:'neurologist',name:'Давыдова',pendingRole:'rehab1_physician'};
+ let sent;assert.deepEqual(await client(e=>{sent=e;return reply(active);}).status(device),active);assert.deepEqual(sent.data,{includeRoles:true});
+ const multi={...active,roles:['neurologist','rehab1_physician']};delete multi.pendingRole;
+ assert.deepEqual(await client(()=>reply(multi)).status(device),multi);
+ const directory=await client(e=>{sent=e;return reply({members:[{...member(1,'neurologist'),roles:multi.roles}]});}).directory(device);
+ assert.deepEqual(directory[0].roles,multi.roles);assert.equal(sent.data.includeRoles,true);
+ for(const bad of [{...multi,roles:[]},{...multi,roles:['rehab1_physician','neurologist']},{...multi,roles:['neurologist','bot']},{...multi,roles:['neurologist','neurologist']},{...active,pendingRole:'neurologist'},{...active,pendingRole:'admin'},{state:'unregistered',role:null,name:null,roles:[]}])await assert.rejects(client(()=>reply(bad)).status(device));
+});

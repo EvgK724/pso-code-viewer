@@ -1,6 +1,6 @@
 // Role-bound, device-signed team workflow. Patient plaintext never reaches here.
 // The database rechecks roles and the exact active recipient set atomically.
-import {ROLES,INVITE_ROLES,REHAB_ROLES} from '../docs/care-routing.mjs';
+import {ROLES,INVITE_ROLES,REHAB_ROLES,memberRoles} from '../docs/care-routing.mjs';
 import {importPublicCard} from '../docs/exchange.mjs';
 import {createVapidKeys, sendWebPush} from './web-push.mjs';
 
@@ -15,6 +15,8 @@ const DIAGNOSTIC_CODES = new Set(['database_conflict','database_deadline','datab
 const DIAGNOSTIC_STATUSES = new Set([400010,400020,400030,400040,400050,400060,400070,400080,400090,400100,400120,400130,400140,400150,400160,400170,400180,400190,400200,401010,401020,401030,401034,402030,402040,402050]);
 const enc = new TextEncoder();
 const exact = (value, keys) => value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).sort().join(',') === keys;
+const optional = (value,keys,allowed) => value&&typeof value==='object'&&!Array.isArray(value)&&Object.keys(value).every(k=>keys.split(',').includes(k)||allowed.includes(k))&&keys.split(',').filter(Boolean).every(k=>Object.hasOwn(value,k));
+const flags = (value,allowed) => optional(value,'',allowed)&&Object.values(value).every(v=>v===true);
 const b64 = value => btoa(String.fromCharCode(...new Uint8Array(value))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
 class Rejected extends Error {
   constructor(status=400, code='request_rejected') { super('Request rejected'); this.status=status; this.code=code; }
@@ -60,8 +62,8 @@ function tokenParts(token) {
   return p;
 }
 function member(value) {
-  if(!exact(value,'card,id,name,role')||!ROLES.includes(value.role)||typeof value.card!=='string'||!value.card.startsWith('PSO-CARD1.')||value.card.length>5000)throw new Error('Invalid team storage response');
-  bytes(value.id,32);name(value.name);return {id:value.id,name:value.name,role:value.role,card:value.card};
+  if(!optional(value,'card,id,name,role',['roles','pendingRole'])||!memberRoles(value).length||(Object.hasOwn(value,'pendingRole')&&!INVITE_ROLES.includes(value.pendingRole))||typeof value.card!=='string'||!value.card.startsWith('PSO-CARD1.')||value.card.length>5000)throw new Error('Invalid team storage response');
+  bytes(value.id,32);name(value.name);return {id:value.id,name:value.name,role:value.role,card:value.card,...(Object.hasOwn(value,'roles')?{roles:value.roles}:{}),...(Object.hasOwn(value,'pendingRole')?{pendingRole:value.pendingRole}:{})};
 }
 function members(value) {
   if(!Array.isArray(value)||value.length>100)throw new Error('Invalid team storage response');
@@ -149,9 +151,9 @@ export function createTeamHandler({store,allowedOrigin,crypto=globalThis.crypto,
       if(!await crypto.subtle.verify({name:'ECDSA',hash:'SHA-256'},owner.signingPublicKey,signature,enc.encode(DOMAIN+JSON.stringify(unsigned))))throw new Rejected(403);
       const data=e.data;let idHash,normalizedCreate;
       if(e.op==='status') {
-        if(!exact(data,''))throw new Rejected();
+        if(!flags(data,['includeRoles']))throw new Rejected();
       } else if(['directory','pending'].includes(e.op)) {
-        if(!exact(data,'')&&!(exact(data,'includeRehab')&&data.includeRehab===true))throw new Rejected();
+        if(!flags(data,['includeRehab','includeRoles']))throw new Rejected();
       } else if(e.op==='invite') {
         if(!(exact(data,'id,name,role')||exact(data,'id,name,organizerCard,role'))||!INVITE_ROLES.includes(data.role))throw new Rejected();
         name(data.name);idHash=await hash(crypto,bytes(data.id,16));
@@ -188,13 +190,15 @@ export function createTeamHandler({store,allowedOrigin,crypto=globalThis.crypto,
       if(accepted!=='ok')failure(accepted);
       stage=e.op;
       if(e.op==='status') {
-        const result=await store.status(owner.id);
-        if(!exact(result,'name,role,state')||!['unregistered','pending','active','revoked'].includes(result.state)||
+        const result=await store.status(owner.id,data.includeRoles===true);
+        if(!optional(result,'name,role,state',['roles','pendingRole'])||!['unregistered','pending','active','revoked'].includes(result.state)||
           !(result.role===null||ROLES.includes(result.role))||!(result.name===null||typeof result.name==='string'))throw new Error('Invalid status');
-        return response(200,{state:result.state,role:result.role,name:result.name});
+        if(result.role!==null&&!memberRoles(result).length)throw new Error('Invalid roles');
+        if(Object.hasOwn(result,'pendingRole')&&!INVITE_ROLES.includes(result.pendingRole))throw new Error('Invalid pending role');
+        return response(200,result);
       }
       if(e.op==='directory'||e.op==='pending') {
-        const result=await store[e.op](owner.id);if(result?.status&&result.status!=='ok')failure(result.status);
+        const result=await store[e.op](owner.id,data.includeRoles===true);if(result?.status&&result.status!=='ok')failure(result.status);
         const listing=members(result?.members);
         return response(200,{members:data.includeRehab===true?listing:listing.filter(m=>!REHAB_ROLES.includes(m.role))});
       }

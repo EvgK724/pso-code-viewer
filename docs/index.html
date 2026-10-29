@@ -31,6 +31,12 @@
       </section>
 
       <p id="notice" class="notice" role="status" aria-live="polite" tabindex="-1"></p>
+      <section id="release-notice" class="release-notice" aria-labelledby="release-notice-heading" hidden>
+        <h2 id="release-notice-heading">Доступно обновление</h2>
+        <p id="release-notice-text" role="status"></p>
+        <button id="release-update" type="button" class="button button-secondary">Проверить обновление</button>
+        <p id="release-notice-status" class="field-help" role="status"></p>
+      </section>
         <section id="handoff-panel" class="handoff-panel" aria-labelledby="handoff-heading" hidden>
           <h2 id="handoff-heading">Открыть в установленном просмотрщике</h2>
           <p id="handoff-hint">Откройте эту ссылку через синий значок на экране «Домой».</p>
@@ -121,6 +127,10 @@
               <div id="pso-recipient-picker">
                 <label for="recipient">Кому отправить</label>
                 <select id="recipient" name="recipient" required><option value="">Выберите группу врачей</option></select>
+              </div>
+              <div id="rehab1-message-kind-picker" hidden>
+                <label for="rehab1-message-kind">Тип сообщения</label>
+                <select id="rehab1-message-kind"><option value="review">Проверочная история</option><option value="discussion">Обсуждение команды</option></select>
               </div>
               <p id="recipient-summary" class="recipient-summary" role="status" aria-live="polite" hidden></p>
               <p id="rehab-members" class="field-help" hidden></p>

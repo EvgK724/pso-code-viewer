@@ -35,6 +35,7 @@ async function runtimeFixture(){
     './direct-store.mjs':{createDirectStore:()=>({})},
     './push-store.mjs':{createPushStore:()=>({keys:()=>{}})},
     './device-auth-store.mjs':{createDeviceAuthStore:()=>({unlockCheck:()=>{}})},
+    './release-notifications.mjs':{createReleaseNotifications:()=>({status:async()=>({version:17,updateAvailable:false})})},
     '../team-handler.mjs':{createTeamHandler:handler,safeServiceDiagnostic},
     '../direct-handler.mjs':{createDirectHandler:handler},
     '../push-handler.mjs':{createPushHandler:handler},

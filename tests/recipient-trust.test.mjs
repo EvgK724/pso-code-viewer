@@ -77,6 +77,77 @@ test('directory verification rejects duplicate, uncertified and tampered entries
   await assert.rejects(verifyRecipientDirectory({},rootCard,now));
 });
 
+async function dualRoleMember() {
+  const clinician={...member,role:'neurologist'};
+  const approvalProof=await makeRecipientGrant(organizer,clinician,{now});
+  const rehabProof=await makeRecipientGrant(organizer,{...clinician,role:'rehab1_physician'},{now});
+  return {...clinician,approvalProof,roles:['neurologist','rehab1_physician'],roleProofs:[rehabProof]};
+}
+
+test('second clinical role needs its own v1 grant and preserves the original device and primary proof',async()=>{
+  const dual=await dualRoleMember();
+  const checked=await verifyRecipientGrant(dual,rootCard,now);
+  assert.equal(checked.id,subject.id);assert.equal(checked.card,doctorCard);
+  assert.equal(checked.role,'neurologist');assert.deepEqual(checked.roles,dual.roles);
+  assert.strictEqual(checked.approvalProof,dual.approvalProof);
+  assert.strictEqual(checked.roleProofs[0],dual.roleProofs[0]);
+  assert.equal(checked.approvalProof.grant.v,1);assert.equal(checked.roleProofs[0].grant.v,1);
+  const legacy={...dual};delete legacy.roles;delete legacy.roleProofs;
+  const legacyChecked=await verifyRecipientGrant(legacy,rootCard,now);
+  assert.equal(legacyChecked.id,checked.id);assert.equal(legacyChecked.role,checked.role);
+  assert.equal(Object.hasOwn(legacyChecked,'roles'),false,'Legacy projection stays a single-role certificate');
+  assert.equal((await verifyRecipientDirectory([dual],rootCard,now)).length,1,'Two roles identify one phone');
+});
+
+test('unsigned, omitted, duplicated and mismatched additional role capabilities fail closed',async()=>{
+  const dual=await dualRoleMember();
+  const badMembers=[
+    {...dual,roles:undefined}, {...dual,roleProofs:undefined},
+    {...dual,roles:['neurologist']}, {...dual,roles:['neurologist','neurologist']},
+    {...dual,roles:['rehab1_physician','neurologist']},
+    {...dual,roles:['neurologist','rehab2_physician']},
+    {...dual,roles:['neurologist','rehab1_physician','psychologist']},
+    {...dual,roleProofs:[]}, {...dual,roleProofs:[dual.approvalProof]},
+    {...dual,roleProofs:[dual.roleProofs[0],dual.roleProofs[0]]}
+  ];
+  const missingRoles={...dual};delete missingRoles.roles;badMembers.push(missingRoles);
+  const missingProofs={...dual};delete missingProofs.roleProofs;badMembers.push(missingProofs);
+  for(const bad of badMembers) await assert.rejects(verifyRecipientGrant(bad,rootCard,now));
+});
+
+test('each extra role is bound to the same exact doctor, device, organizer and live validity period',async()=>{
+  const dual=await dualRoleMember();
+  const forgedRoles=[
+    await makeRecipientGrant(attacker,{...member,role:'rehab1_physician'},{now}),
+    await makeRecipientGrant(organizer,{...member,role:'rehab1_physician',id:other.id,card:attackerCard},{now}),
+    await makeRecipientGrant(organizer,{...member,role:'rehab1_physician',name:'Другой врач'},{now}),
+    await makeRecipientGrant(organizer,{...member,role:'rehab1_physician'},{now:now-60000,ttlMs:60000})
+  ];
+  const tampered=clone(dual.roleProofs[0]);tampered.grant.role='rehab2_physician';forgedRoles.push(tampered);
+  for(const roleProof of forgedRoles)
+    await assert.rejects(verifyRecipientGrant({...dual,roleProofs:[roleProof]},rootCard,now));
+  await assert.rejects(verifyRecipientDirectory([dual,{...dual,id:other.id,card:attackerCard}],rootCard,now));
+});
+
+test('multiple rehabilitation roles are signed independently, while bot/admin/PSO specialist mixtures are rejected',async()=>{
+  const dual=await dualRoleMember();
+  const rehab2Proof=await makeRecipientGrant(organizer,{...member,role:'rehab2_physician'},{now});
+  const triple={...dual,roles:[...dual.roles,'rehab2_physician'],roleProofs:[...dual.roleProofs,rehab2Proof]};
+  assert.deepEqual((await verifyRecipientGrant(triple,rootCard,now)).roles,triple.roles);
+  const rehabOnly={...dual,role:'rehab1_physician',approvalProof:dual.roleProofs[0],roles:['rehab1_physician','rehab2_physician'],roleProofs:[rehab2Proof]};
+  assert.deepEqual((await verifyRecipientGrant(rehabOnly,rootCard,now)).roles,rehabOnly.roles);
+  for(const role of ['bot','cardiologist','intensivist']) {
+    const extra=await makeRecipientGrant(organizer,{...member,role},{now});
+    await assert.rejects(verifyRecipientGrant({...dual,roles:['neurologist',role],roleProofs:[extra]},rootCard,now));
+    await assert.rejects(verifyRecipientGrant({...dual,role,approvalProof:extra,roles:[role,'rehab1_physician']},rootCard,now));
+    assert.equal((await verifyRecipientGrant({...member,role,approvalProof:extra},rootCard,now)).role,role);
+  }
+  const self={id:root.id,name:'Организатор',role:'admin',card:rootCard};
+  const selfProof=await makeRecipientGrant(organizer,self,{now});
+  const clinical=await makeRecipientGrant(organizer,{...self,role:'rehab1_physician'},{now});
+  await assert.rejects(verifyRecipientGrant({...self,approvalProof:selfProof,roles:['admin','rehab1_physician'],roleProofs:[clinical]},rootCard,now));
+});
+
 test('pin requires explicit confirmation, persists only public card and rejects silent key replacement',async()=>{
   const storage=store();assert.equal(await loadOrganizerCard({storage}),null);
   await assert.rejects(pinOrganizerCard(rootCard,{storage,now}),/Подтвердите/);

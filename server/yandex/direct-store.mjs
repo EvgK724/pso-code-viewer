@@ -1,13 +1,13 @@
 // Native YDB port of direct-schema.sql. All authorization and recipient roster
 // reads are repeated in the same serializable transaction as the mutation.
 // Large encrypted photos live separately from metadata and queue indices.
-import {INVITE_ROLES,GROUPS,roleGroup,isRehabGroup,isReplyKind,isGroupConversationKind,participatesInGroup,canSendGroup} from '../../docs/care-routing.mjs';
+import {INVITE_ROLES,GROUPS,memberRoles,hasRole,inRecipientGroup,roleGroup,isRehabGroup,isReplyKind,isGroupConversationKind,participatesInGroup,canSendGroup} from '../../docs/care-routing.mjs';
 import { randomUUID } from 'node:crypto';
-import { acceptTeamRequest, isAdmin, teamMembers, validId, validNonce, validHash, validName, roleCapacityReached } from './team-store.mjs';
+import { acceptTeamRequest, isAdmin, teamMembers, validId, validNonce, validHash, validName, roleCapacityReached, multiRoleFields, canAddRole } from './team-store.mjs';
 import { deletePushSubscriptionTx } from './push-store.mjs';
 import { revokeDeviceAuthTx } from './device-auth-store.mjs';
 
-const DAY = 86400000, OPS = new Set(['create','inbox','outbox','open','ack','retry','admin_members','admin_update','admin_replace','directory','admin_certify','history','history_open']);
+const DAY = 86400000, OPS = new Set(['create','inbox','outbox','open','ack','retry','admin_members','admin_update','admin_replace','directory','admin_certify','history','history_open','release_status']);
 // 32 candidates bound the worst case below the adapter's 512-operation cap:
 // current membership/subscription reads plus three queue index updates each.
 const PUSH_SCAN_LIMIT = 32, PUSH_SKIP_BACKOFF = 30000;
@@ -18,12 +18,12 @@ const bytes = x => Buffer.byteLength(JSON.stringify(x),'utf8');
 const object = x => x !== null && typeof x === 'object' && !Array.isArray(x);
 const memberKey = id => `member:${id}`;
 const HUMAN_ROLES = new Set(['admin','neurologist','cardiologist','intensivist']);
-const senderAllowed = (m,kind,group) => m?.state === 'active' && canSendGroup(m.role,group,kind);
+const senderAllowed = (m,kind,group) => m?.state === 'active' && canSendGroup(m,group,kind);
 // Existing private replies retain their old audience. New group conversations
 // bind each delivered entry to the recipient's role at the moment of sending.
 const recipientAllowed = (actor,m,e) => actor?.state === 'active' && !!e && (isGroupConversationKind(m.kind)
-  ? e.recipient_role===actor.role&&participatesInGroup(actor.role,m.group_name)
-  : m.kind === 'reply' ? HUMAN_ROLES.has(actor.role) && e.recipient_role === actor.role : roleGroup(actor.role) === m.group_name);
+  ? hasRole(actor,e.recipient_role)&&participatesInGroup(actor,m.group_name)
+  : m.kind === 'reply' ? HUMAN_ROLES.has(e.recipient_role) && hasRole(actor,e.recipient_role) : inRecipientGroup(actor,m.group_name));
 const padded = n => String(n).padStart(16,'0');
 // Fixed-width ASCII inverse preserves SQL ORDER BY issued DESC,id DESC.
 const inverse = text => [...text].map(c => (127-c.charCodeAt(0)).toString(16).padStart(2,'0')).join('');
@@ -48,9 +48,14 @@ async function scanAll(tx,prefix) {
 async function approved(tx,m,at) {
   if (m?.state !== 'active') return false;
   if (m.role === 'admin') return true;
-  const g = m.approval_proof?.grant;
-  return !!g && g.subjectId === m.device_id && g.name === m.name && g.role === m.role &&
-    Number.isSafeInteger(g.expires) && g.expires > at && await isAdmin(tx,g.issuerId);
+  const roles=memberRoles(m), proofs=[m.approval_proof,...(m.role_proofs??[])];
+  if (!roles.length || proofs.length!==roles.length) return false;
+  for(let i=0;i<roles.length;i++) {
+    const g=proofs[i]?.grant;
+    if (!g || g.subjectId!==m.device_id || g.name!==m.name || g.role!==roles[i] ||
+      !Number.isSafeInteger(g.expires) || g.expires<=at || !await isAdmin(tx,g.issuerId)) return false;
+  }
+  return true;
 }
 
 function boundProof(proof,admin,id,name,role,at) {
@@ -81,8 +86,8 @@ async function audit(tx,at,actor,action,message=null,target=null) {
   await tx.put(`directaudit:${padded(at)}:${randomUUID()}`,{actor_id:actor,action,message_id:message,target_id:target,created_at:at},at+7*DAY);
 }
 
-const directoryMember = m => ({id:m.device_id,name:m.name,role:m.role,card:m.card,approvalProof:m.approval_proof ?? null});
-const adminMember = m => ({...directoryMember(m),state:m.state,createdAt:m.created_at,approvedAt:m.approved_at ?? null,revokedAt:m.revoked_at ?? null});
+const directoryMember = (m,includeRoles=false) => ({id:m.device_id,name:m.name,role:m.role,card:m.card,approvalProof:m.approval_proof ?? null,...multiRoleFields(m,includeRoles)});
+const adminMember = (m,includeRoles=false) => ({...directoryMember(m,includeRoles),state:m.state,createdAt:m.created_at,approvedAt:m.approved_at ?? null,revokedAt:m.revoked_at ?? null,...(includeRoles&&m.pending_role?{pendingRole:m.pending_role}:{})});
 
 // Metadata and ciphertext are budgeted together. A bounded set of daily buckets
 // avoids scanning 90 days of per-message rate quota rows on each send.
@@ -130,7 +135,7 @@ export function createDirectStore(db,{now=Date.now}={}) {
         return acceptTeamRequest(tx,{deviceId,nonce,op:'status',issued,card,signingSpki},at);
       });
     },
-    directory(deviceId) {
+    directory(deviceId,includeRoles=false) {
       return transaction(async tx => {
         const actor=validId(deviceId)?await tx.get(memberKey(deviceId)):null;
         if (actor?.state !== 'active') return status('denied');
@@ -138,13 +143,13 @@ export function createDirectStore(db,{now=Date.now}={}) {
           // Older installed bots validate a closed set of roles. Preserve their
           // directory contract; rehab has no bot sender or recipient.
           (actor.role !== 'bot' || !isRehabGroup(roleGroup(m.role))))
-          .sort((a,b) => cmp(a.role,b.role)||cmp(a.name,b.name)||cmp(a.device_id,b.device_id)).map(directoryMember)};
+          .sort((a,b) => cmp(a.role,b.role)||cmp(a.name,b.name)||cmp(a.device_id,b.device_id)).map(m=>directoryMember(m,includeRoles&&actor.role!=='bot'))};
       });
     },
-    members(adminId) {
+    members(adminId,includeRoles=false) {
       return transaction(async tx => {
         if (!await isAdmin(tx,adminId)) return status('denied');
-        return {members:(await teamMembers(tx)).sort((a,b) => cmp(a.state,b.state)||cmp(a.name,b.name)||cmp(a.device_id,b.device_id)).map(adminMember)};
+        return {members:(await teamMembers(tx)).sort((a,b) => cmp(a.state,b.state)||cmp(a.name,b.name)||cmp(a.device_id,b.device_id)).map(m=>adminMember(m,includeRoles))};
       });
     },
     certify(adminId,deviceId,proof) {
@@ -152,8 +157,22 @@ export function createDirectStore(db,{now=Date.now}={}) {
         if (!await isAdmin(tx,adminId) || !validId(deviceId)) return status('denied');
         const m = await tx.get(memberKey(deviceId));
         if (m?.state !== 'active' || m.role === 'admin') return status('denied');
-        if (!boundProof(proof,adminId,deviceId,m.name,m.role,at)) return status('invalid');
-        await tx.put(memberKey(deviceId),{...m,approval_proof:proof});
+        const requested=proof?.grant?.role;
+        if (requested===m.role) {
+          if (!boundProof(proof,adminId,deviceId,m.name,m.role,at)) return status('invalid');
+          await tx.put(memberKey(deviceId),{...m,approval_proof:proof});
+        } else if (m.pending_role===requested) {
+          if (!canAddRole(m,requested) || !boundProof(proof,adminId,deviceId,m.name,requested,at)) return status('invalid');
+          const invite=await tx.get(`invite:${m.pending_invite_hash}`);
+          if (!invite || invite.claimed_by!==deviceId || invite.role!==requested || invite.inviter_id!==adminId || invite.expires<=at) return status('denied');
+          const others=(await teamMembers(tx)).filter(x=>x.device_id!==deviceId);
+          if (roleCapacityReached(others,requested)) return status('conflict');
+          await tx.put(memberKey(deviceId),{...m,roles:[...memberRoles(m),requested],role_proofs:[...(m.role_proofs??[]),proof],pending_role:null,pending_invite_hash:null,pending_role_at:null});
+        } else if (hasRole(m,requested)) {
+          // An identical replay succeeds; a newly signed proof renews this one role.
+          if (!boundProof(proof,adminId,deviceId,m.name,requested,at)) return status('invalid');
+          await tx.put(memberKey(deviceId),{...m,role_proofs:memberRoles(m).slice(1).map((r,i)=>r===requested?proof:m.role_proofs[i])});
+        } else return status('denied');
         await audit(tx,at,adminId,'certified',null,deviceId);
         return {state:'active'};
       });
@@ -209,11 +228,11 @@ export function createDirectStore(db,{now=Date.now}={}) {
             const originalEntry=await tx.get(entryKey(parent.id,senderId));
             if(parent.sender_id!==senderId&&!recipientAllowed(sender,parent,originalEntry))return 'denied';
           }
-          recipients=(await teamMembers(tx)).filter(m=>m.state==='active'&&m.device_id!==senderId&&participatesInGroup(m.role,data.group))
+          recipients=(await teamMembers(tx)).filter(m=>m.state==='active'&&m.device_id!==senderId&&participatesInGroup(m,data.group))
             .sort((a,b)=>cmp(a.device_id,b.device_id));
           if(recipients.length>25)return 'group_too_large';
         } else {
-          recipients = (await teamMembers(tx)).filter(m => m.state === 'active' && roleGroup(m.role) === data.group)
+          recipients = (await teamMembers(tx)).filter(m => m.state === 'active' && m.device_id !== senderId && inRecipientGroup(m,data.group))
             .sort((a,b) => cmp(a.device_id,b.device_id));
         }
         const entries = [...data.entries].sort((a,b) => cmp(a?.recipientId,b?.recipientId));
@@ -251,8 +270,8 @@ export function createDirectStore(db,{now=Date.now}={}) {
           const archive={...m,archive_until:archiveUntil,sender_token:hasSenderToken?data.senderToken:null,
             organizer_id:hasOrganizer?data.organizerId:null,organizer_token:hasOrganizer?data.organizerToken:null,
             sender_approval_proof:hasOrganizer?sender.approval_proof:null,
-            sender_card:sender.card,sender_name:sender.name,sender_role:sender.role,
-            recipients:recipients.map(r=>({id:r.device_id,name:r.name,role:r.role,openedAt:null,pushState:'queued',pushAcceptedAt:null}))};
+            sender_card:sender.card,sender_name:sender.name,sender_role:sender.role,...(memberRoles(sender).length>1?{sender_roles:memberRoles(sender)}:{}),
+            recipients:recipients.map(r=>({id:r.device_id,name:r.name,role:r.role,...(memberRoles(r).length>1?{roles:memberRoles(r)}:{}),openedAt:null,pushState:'queued',pushAcceptedAt:null}))};
           if(!await reserveArchive(tx,archive,payloadBytes,at))return 'history_full';
           await tx.put(archiveKey(m.id),archive,archiveUntil);
           const historyPrefix=hasOrganizer?`directbothistory:${data.organizerId}`:`directhistory:${senderId}`;
@@ -262,7 +281,7 @@ export function createDirectStore(db,{now=Date.now}={}) {
         if (hasPayload) await tx.put(`directpayload:${m.id}`,data.payload,hasSenderToken?archiveUntil:m.expires);
         await tx.put(`directout:${senderId}:${newest(m.issued,m.id)}`,{message_id:m.id,...(isGroupConversationKind(m.kind)?{kind:m.kind}:{})},m.expires);
         for (const item of entries) {
-          const e = {message_id:m.id,recipient_id:item.recipientId,token:item.token,opened_at:null,push_state:'queued',push_attempts:0,lease_until:0,next_attempt:0,endpoint_hash:null,...(data.kind === 'reply'||isGroupConversationKind(data.kind) ? {recipient_role:recipients.find(r=>r.device_id===item.recipientId).role} : {})};
+          const e = {message_id:m.id,recipient_id:item.recipientId,token:item.token,opened_at:null,push_state:'queued',push_attempts:0,lease_until:0,next_attempt:0,endpoint_hash:null,...(data.kind === 'reply'||isGroupConversationKind(data.kind) ? {recipient_role:data.kind==='reply'?memberRoles(recipients.find(r=>r.device_id===item.recipientId)).find(r=>HUMAN_ROLES.has(r)):recipients.find(r=>r.device_id===item.recipientId).role} : {})};
           await tx.put(entryKey(m.id,e.recipient_id),e,m.expires);
           await tx.put(`directin:${e.recipient_id}:${newest(m.issued,m.id)}`,{message_id:m.id,group_name:m.group_name,...(isGroupConversationKind(m.kind)?{kind:m.kind}:{})},m.expires);
           await putQueue(tx,m,e);
@@ -306,7 +325,7 @@ export function createDirectStore(db,{now=Date.now}={}) {
         return {items,next:page.length===100?lastScanned:null};
       });
     },
-    open(deviceId,id,ack=false) {
+    open(deviceId,id,ack=false,includeRoles=false) {
       return transaction(async (tx,at) => {
         const actor = validId(deviceId) ? await tx.get(memberKey(deviceId)) : null;
         if (actor?.state !== 'active') return status('denied');
@@ -329,7 +348,7 @@ export function createDirectStore(db,{now=Date.now}={}) {
         if (m.has_payload && !payload) return status('missing');
         await audit(tx,at,deviceId,'retrieved',id);
         return {meta:messageMeta(m),payload,senderApprovalProof:sender.approval_proof ?? null,
-          senderCard:sender.card,senderName:sender.name,senderRole:sender.role,token:e.token};
+          senderCard:sender.card,senderName:sender.name,senderRole:sender.role,token:e.token,...(includeRoles&&memberRoles(sender).length>1?{senderRoles:memberRoles(sender),senderRoleProofs:sender.role_proofs??[]}:{})};
       });
     },
     history(deviceId,cursor=null,source=null) {
@@ -349,7 +368,7 @@ export function createDirectStore(db,{now=Date.now}={}) {
         return {items,next:more?{id:items.at(-1).id,issued:items.at(-1).issued}:null};
       });
     },
-    historyOpen(deviceId,id) {
+    historyOpen(deviceId,id,includeRoles=false) {
       return transaction(async(tx,at)=>{
         const actor=validId(deviceId)?await tx.get(memberKey(deviceId)):null;
         if(actor?.state!=='active')return status('denied');
@@ -360,38 +379,47 @@ export function createDirectStore(db,{now=Date.now}={}) {
         if(archive.sender_token&&!payload)return status('missing');
         return {meta:messageMeta(archive),payload,senderToken:archive.sender_token,
           organizerToken:archive.organizer_token??null,senderApprovalProof:archive.sender_approval_proof??null,
-          createdAt:archive.created_at,archiveUntil:archive.archive_until,recipients:archive.recipients,
-          senderCard:archive.sender_card,senderName:archive.sender_name,senderRole:archive.sender_role};
+          createdAt:archive.created_at,archiveUntil:archive.archive_until,recipients:archive.recipients.map(r=>{const {roles,...old}=r;return includeRoles?r:old;}),
+          senderCard:archive.sender_card,senderName:archive.sender_name,senderRole:archive.sender_role,...(includeRoles&&archive.sender_roles?{senderRoles:archive.sender_roles}:{})};
       });
     },
-    update(adminId,deviceId,name,role,state,proof=null) {
+    update(adminId,deviceId,name,role,state,proof=null,roles=null,roleProofs=null) {
       return transaction(async (tx,at) => {
         if (!await isAdmin(tx,adminId) || !validId(deviceId) || adminId === deviceId) return status('denied');
         const m = await tx.get(memberKey(deviceId));
         if (m?.state !== 'active' || m.role === 'admin') return status('denied');
         if (!validName(name) || !EDIT_ROLES.has(role) || !['active','revoked'].includes(state)) return status('invalid');
+        const current=memberRoles(m), nextRoles=state==='revoked'?current:roles===null?[role]:memberRoles({role,roles});
+        if (!nextRoles.length || (current.length>1 && JSON.stringify(nextRoles)!==JSON.stringify(current)) ||
+            (current.length===1&&nextRoles.length>1)) return status('invalid');
         if (state === 'active') {
-          if (!boundProof(proof,adminId,deviceId,name,role,at)) return status('invalid');
+          if (!boundProof(proof,adminId,deviceId,name,role,at) ||
+              (nextRoles.length>1 && (!Array.isArray(roleProofs)||roleProofs.length!==nextRoles.length-1||nextRoles.slice(1).some((r,i)=>!boundProof(roleProofs[i],adminId,deviceId,name,r,at))))) return status('invalid');
           const others = (await teamMembers(tx)).filter(x => x.device_id !== deviceId);
-          if (roleCapacityReached(others,role)) return status('conflict');
+          if (nextRoles.some(r=>roleCapacityReached(others,r))) return status('conflict');
         }
-        await tx.put(memberKey(deviceId),{...m,name,role,state,approval_proof:state === 'active' ? proof : null,revoked_at:state === 'revoked' ? at : m.revoked_at ?? null});
+        const {roles:oldRoles,role_proofs:oldProofs,...base}=m;
+        await tx.put(memberKey(deviceId),{...base,name,role,state,approval_proof:state === 'active' ? proof : null,
+          ...(nextRoles.length>1?{roles:nextRoles,role_proofs:state==='active'?roleProofs:oldProofs}:{}),
+          ...(state==='revoked'?{pending_role:null,pending_invite_hash:null,pending_role_at:null}:{}),revoked_at:state === 'revoked' ? at : m.revoked_at ?? null});
         if (state === 'revoked') await clearDeviceAccess(tx,deviceId);
         await audit(tx,at,adminId,state === 'revoked' ? 'revoked' : 'updated',null,deviceId);
         return {state};
       });
     },
-    replace(adminId,oldId,newId,proof) {
+    replace(adminId,oldId,newId,proof,roleProofs=null) {
       return transaction(async (tx,at) => {
         if (!await isAdmin(tx,adminId) || !validId(oldId) || !validId(newId) || oldId === newId || oldId === adminId) return status('denied');
         const old = await tx.get(memberKey(oldId)), next = await tx.get(memberKey(newId));
         if (!old || old.role === 'admin' || !['active','revoked'].includes(old.state) || next?.state !== 'pending' || next.role === 'admin') return status('denied');
-        if (!boundProof(proof,adminId,newId,old.name,old.role,at)) return status('invalid');
+        const roles=memberRoles(old);
+        if (!boundProof(proof,adminId,newId,old.name,old.role,at) || !roles.length ||
+            (roles.length>1&&(!Array.isArray(roleProofs)||roleProofs.length!==roles.length-1||roles.slice(1).some((r,i)=>!boundProof(roleProofs[i],adminId,newId,old.name,r,at))))) return status('invalid');
         const others = (await teamMembers(tx)).filter(m => m.device_id !== oldId);
-        if (roleCapacityReached(others,old.role)) return status('conflict');
-        await tx.put(memberKey(oldId),{...old,state:'revoked',approval_proof:null,revoked_at:old.revoked_at ?? at});
+        if (roles.some(r=>roleCapacityReached(others,r))) return status('conflict');
+        await tx.put(memberKey(oldId),{...old,state:'revoked',approval_proof:null,pending_role:null,pending_invite_hash:null,pending_role_at:null,revoked_at:old.revoked_at ?? at});
         await clearDeviceAccess(tx,oldId);
-        await tx.put(memberKey(newId),{...next,state:'active',name:old.name,role:old.role,approval_proof:proof,approved_at:at});
+        await tx.put(memberKey(newId),{...next,state:'active',name:old.name,role:old.role,approval_proof:proof,...(roles.length>1?{roles,role_proofs:roleProofs}:{}),pending_role:null,pending_invite_hash:null,pending_role_at:null,approved_at:at});
         await audit(tx,at,adminId,'replaced_old',null,oldId);
         await audit(tx,at,adminId,'replaced_new',null,newId);
         return {state:'active'};

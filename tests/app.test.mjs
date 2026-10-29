@@ -20,6 +20,7 @@ import * as messages from '../docs/messages.mjs';
 import * as photos from '../docs/photos.mjs';
 import * as recipientTrust from '../docs/recipient-trust.mjs';
 import * as appUpdatesModule from '../docs/updates.mjs';
+import * as releaseNoticesModule from '../docs/release-notices.mjs';
 import * as deviceUnlock from '../docs/device-unlock.mjs';
 import {createShortlinkHandler} from '../server/shortlink-handler.mjs';
 
@@ -132,7 +133,7 @@ async function harness(persistent, initialHash = '', {
     hidden:initialHidden,
     getElementById:el,
     createElement:tag => new Element(tag),
-    addEventListener(type, fn) { docListeners.set(type, fn); }
+    addEventListener(type, fn) { const listeners=docListeners.get(type)||[];listeners.push(fn);docListeners.set(type,listeners); }
   };
   if (nativeCopy !== undefined) {
     document.createRange = () => ({selectNode(node) { this.node = node; }});
@@ -226,6 +227,7 @@ async function harness(persistent, initialHash = '', {
     './direct.mjs':{...direct,DirectClient:InjectedDirectClient,savePending:async data=>persistent.pending.set(data.id,data),loadPending:async()=>[...persistent.pending.values()],removePending:async id=>persistent.pending.delete(id)},
     './messages.mjs':messages,'./photos.mjs':photos,'./device-unlock.mjs':{...deviceUnlock,DeviceUnlockClient:InjectedDeviceUnlockClient},
     './recipient-trust.mjs':{...recipientTrust,loadOrganizerCard:options=>recipientTrust.loadOrganizerCard({...options,storage:pinStorage}),pinOrganizerCard:(card,options)=>recipientTrust.pinOrganizerCard(card,{...options,storage:pinStorage})},
+    './release-notices.mjs':{installReleaseNotices:options=>releaseNoticesModule.installReleaseNotices({...options,now:()=>clock})},
     './updates.mjs':{installAppUpdates:useRealUpdates?appUpdatesModule.installAppUpdates:()=>({ready:Promise.resolve(registration),check:async()=>{}})}
   };
   const module = new vm.SourceTextModule(appSource, {context, identifier:origin + appPath + 'app.mjs', initializeImportMeta(meta) { meta.url = origin + appPath + 'app.mjs'; }});
@@ -265,8 +267,8 @@ async function harness(persistent, initialHash = '', {
     async event(id, type = 'click') { await el(id).fire(type); },
     async idle() { await waitUntil(() => !el('open').disabled, 'async operation completion'); },
     async retryIdle() { await waitUntil(()=>deliveryRetryStarted===deliveryRetryCompleted,'delivery retry completion'); },
-    async hide() { document.hidden = true; await docListeners.get('visibilitychange')(); },
-    async show() { document.hidden = false; await docListeners.get('visibilitychange')(); },
+    async hide() { document.hidden = true; for(const listener of docListeners.get('visibilitychange')||[])await listener(); },
+    async show() { document.hidden = false; for(const listener of docListeners.get('visibilitychange')||[])await listener(); },
     async blur() { await globalListeners.get('blur')?.(); },
     async pagehide() { await globalListeners.get('pagehide')(); },
     async hashchange(hash) { location.hash = hash; await globalListeners.get('hashchange')(); },
@@ -1527,8 +1529,9 @@ async function directFixture(roles=['admin','neurologist','cardiologist']){
   if(envelope.op==='directory')return respond({members:members.filter(m=>!m.state||m.state==='active')});
   if(envelope.op==='admin_members')return respond({members:members.map(m=>({state:'active',...m}))});
   if(envelope.op==='admin_certify'){
-   const target=members.find(m=>m.id===envelope.data.id);await recipientTrust.verifyRecipientGrant({...target,approvalProof:envelope.data.approvalProof},root.card);
-   target.approvalProof=envelope.data.approvalProof;return respond({state:'active'});
+   const target=members.find(m=>m.id===envelope.data.id);
+   if(target.pendingRole){const roles=[...careRouting.memberRoles(target),target.pendingRole],roleProofs=[...(target.roleProofs||[]),envelope.data.approvalProof];await recipientTrust.verifyRecipientGrant({...target,roles,roleProofs},root.card);Object.assign(target,{roles,roleProofs});delete target.pendingRole;}
+   else{await recipientTrust.verifyRecipientGrant({...target,approvalProof:envelope.data.approvalProof},root.card);target.approvalProof=envelope.data.approvalProof;}return respond({state:'active'});
   }
   if(envelope.op==='admin_update'){
    const target=members.find(m=>m.id===envelope.data.id);if(envelope.data.state==='active')await recipientTrust.verifyRecipientGrant({...target,...envelope.data},root.card);
@@ -1536,7 +1539,7 @@ async function directFixture(roles=['admin','neurologist','cardiologist']){
   }
   if(envelope.op==='admin_replace'){
    const previous=members.find(m=>m.id===envelope.data.oldId),next=members.find(m=>m.id===envelope.data.newId);
-   assert.equal(next.state,'pending');const updated={...next,name:previous.name,role:previous.role,approvalProof:envelope.data.approvalProof};await recipientTrust.verifyRecipientGrant(updated,root.card);
+   assert.equal(next.state,'pending');const updated={...next,name:previous.name,role:previous.role,approvalProof:envelope.data.approvalProof,...(previous.roles?{roles:previous.roles,roleProofs:envelope.data.roleProofs}:{})};await recipientTrust.verifyRecipientGrant(updated,root.card);
    Object.assign(next,updated,{state:'active'});previous.state='revoked';return respond({state:'active'});
   }
   if(envelope.op==='create'){
@@ -1564,7 +1567,7 @@ async function directFixture(roles=['admin','neurologist','cardiologist']){
    if(openGate)await openGate;
    const r=records.get(envelope.data.id);if(!r)return respond({error:'not_found'},404);
    const entry=r.entries.find(e=>e.recipientId===member.id);if(!entry)return respond({error:'forbidden'},403);
-   return respond(openTransform({token:entry.token,payload:r.payload||null,senderCard:r.sender.card,senderName:r.sender.name,senderRole:r.sender.role,senderApprovalProof:r.sender.approvalProof,meta:{id:r.id,group:r.group,kind:r.kind,issued:r.issued,expires:r.expires,...(careRouting.isReplyKind(r.kind)?{replyTo:r.replyTo}:{})}}));
+   return respond(openTransform({token:entry.token,payload:r.payload||null,senderCard:r.sender.card,senderName:r.sender.name,senderRole:r.sender.role,...(r.sender.roles?{senderRoles:r.sender.roles,senderRoleProofs:r.sender.roleProofs}:{}),senderApprovalProof:r.sender.approvalProof,meta:{id:r.id,group:r.group,kind:r.kind,issued:r.issued,expires:r.expires,...(careRouting.isReplyKind(r.kind)?{replyTo:r.replyTo}:{})}}));
   }
   if(envelope.op==='ack'){records.get(envelope.data.id).opened.add(member.id);return respond({openedAt:Date.now()});}
   return respond({error:'unsupported'},400);
@@ -2267,4 +2270,80 @@ test('failed service worker download shows a retryable update error and recovere
  assert.doesNotMatch(app.el('app-update-status').textContent,/не поддерживает|недоступна в этом браузере/);assert.equal(app.workerRegistrations(),1);
  await app.event('app-update');assert.equal(app.workerRegistrations(),2);assert.equal(app.el('app-update-status').textContent,'Установлена актуальная версия.');
  await app.event('push-enable');await app.pushIdle();assert.match(app.el('push-status').textContent,/Уведомления включены/);assert.equal(persistent.device,device);assert.equal(app.workerRegistrations(),2);
+});
+
+function multiRoleOptions(service,{claimRole}={}){
+ const reply=value=>new Response(JSON.stringify(value),{headers:{'Content-Type':'application/json'}});
+ return {...service.options,standalone:true,teamFetch:async(url,options)=>{
+   const envelope=JSON.parse(options.body).envelope,owner=await exchange.importPublicCard(envelope.card),member=service.members.find(value=>value.id===owner.id);
+   if(envelope.op==='status')return reply({state:member.state||'active',name:member.name,role:member.role,...(member.roles?{roles:member.roles}:{}),...(member.pendingRole?{pendingRole:member.pendingRole}:{})});
+   if(envelope.op==='directory')return reply({members:service.members.filter(member=>!member.state||member.state==='active').map(({id,name,role,card,roles})=>({id,name,role,card,...(roles?{roles}:{})}))});
+   if(envelope.op==='claim'&&claimRole){member.pendingRole=claimRole;return reply({state:'pending'});}
+   return service.options.teamFetch(url,options);
+ }};
+}
+async function addFixtureRole(service,index,extra){
+ const member=service.members[index],roles=[member.role,extra],roleProofs=[await recipientTrust.makeRecipientGrant(service.stores[0].device,{id:member.id,name:member.name,card:member.card,role:extra})];
+ Object.assign(member,{roles,roleProofs});return member;
+}
+
+test('second invitation keeps active neurologist key and adds only the requested rehabilitation role after organizer confirmation',async()=>{
+ const s=await directFixture(['admin','neurologist','rehab1_physician']),originalDevice=s.stores[1].device,primaryProof=s.members[1].approvalProof;
+ const options=multiRoleOptions(s,{claimRole:'rehab1_physician'}),id=team.randomTeamID();
+ const link=await recipientTrust.trustedInvitationURL(origin+appPath,id,s.members[0].card),doctor=await harness(s.stores[1],new URL(link).hash,options);
+ await waitUntil(()=>!doctor.el('join-panel').hidden,'additional-role invitation');
+ assert.equal(doctor.el('team-claim').textContent,'Запросить дополнительную роль');assert.match(doctor.el('join-hint').textContent,/Текущий доступ, ключ и сообщения сохранятся/);
+ await doctor.event('team-claim');await doctor.idle();assert.equal(s.stores[1].device,originalDevice);assert.equal(doctor.el('show-write').hidden,false);assert.match(doctor.el('team-state').textContent,/Невролог ПСО.*Ожидает подтверждения: Реабилитолог/);assert.equal(s.members[1].roles,undefined);assert.equal(s.members[1].approvalProof,primaryProof);
+ const admin=await harness(s.stores[0],'',options);await waitUntil(()=>admin.el('team-pending').querySelectorAll('button').length===1,'additional role review');
+ assert.match(admin.el('team-pending').textContent,/Невролог ПСО.*добавить: Реабилитолог/);
+ const button=admin.el('team-pending').querySelectorAll('button')[0],check=admin.el('team-pending').querySelectorAll('input')[0];assert.equal(button.textContent,'Добавить роль');assert.equal(admin.el('team-pending').querySelectorAll('select')[0].hidden,true);
+ await button.fire('click');assert.equal(s.requests.filter(e=>e.op==='admin_certify').length,0);
+ check.checked=true;await check.fire('change');await button.fire('click');await admin.idle();
+ const request=s.requests.find(e=>e.op==='admin_certify');assert.equal(request.data.approvalProof.grant.role,'rehab1_physician');assert.equal(request.data.approvalProof.grant.subjectId,s.members[1].id);assert.equal(s.members[1].approvalProof,primaryProof);assert.deepEqual(s.members[1].roles,['neurologist','rehab1_physician']);
+ await doctor.event('team-refresh');await doctor.idle();assert.equal(s.stores[1].device,originalDevice);assert.match(doctor.el('team-state').textContent,/Невролог ПСО \+ Реабилитолог/);assert.doesNotMatch(doctor.el('team-state').textContent,/Ожидает подтверждения/);assert.equal(s.members.length,3);
+});
+
+test('dual-role phone receives its rehabilitation reviews and sends neurological reviews and team discussions without duplicate self delivery',async()=>{
+ const s=await directFixture(['admin','neurologist','neurologist','rehab1_physician','psychologist','cardiologist','rehab2_physician','bot']);await addFixtureRole(s,1,'rehab1_physician');
+ const options=multiRoleOptions(s),other=await harness(s.stores[2],'',options);await other.event('show-write');await other.event('direction-rehab1');other.el('compose-comment').value='Осмотр для первого этапа';await other.event('compose-form','submit');await other.idle();
+ const incoming=[...s.records.values()][0];assert.deepEqual(new Set(incoming.entries.map(e=>e.recipientId)),new Set([1,3,4].map(i=>s.members[i].id)));assert.equal(incoming.entries.filter(e=>e.recipientId===s.members[1].id).length,1);
+ const doctor=await harness(s.stores[1],'',options);await doctor.hashchange('#m='+incoming.id);await doctor.idle();assert.equal(doctor.el('result-comment').textContent,'Осмотр для первого этапа');
+ await directSend(doctor,{comment:'Сообщение невролога кардиологу'});assert.equal([...s.records.values()][1].group,'cardiology');
+ await doctor.event('show-write');await doctor.event('direction-rehab1');assert.equal(doctor.el('rehab1-message-kind-picker').hidden,false);doctor.el('compose-comment').value='Проверочная история своей группе';await doctor.event('compose-form','submit');await doctor.idle();
+ const review=[...s.records.values()][2];assert.equal(review.kind,'review');assert.deepEqual(new Set(review.entries.map(e=>e.recipientId)),new Set([3,4].map(i=>s.members[i].id)));
+ doctor.el('rehab1-message-kind').value='discussion';await doctor.event('rehab1-message-kind','change');doctor.el('compose-comment').value='Обсуждение первой реабилитации';await doctor.event('compose-form','submit');await doctor.idle();
+ const discussion=[...s.records.values()][3];assert.equal(discussion.kind,'discussion');assert.equal(discussion.group,'rehab1');assert.deepEqual(new Set(discussion.entries.map(e=>e.recipientId)),new Set([0,2,3,4].map(i=>s.members[i].id)));assert.equal(new Set(discussion.entries.map(e=>e.recipientId)).size,discussion.entries.length);
+ const specialist=await harness(s.stores[4],'',options);await specialist.hashchange('#m='+discussion.id);await specialist.idle();assert.equal(specialist.el('result-comment').textContent,'Обсуждение первой реабилитации');
+});
+
+test('editing a dual-role member name renews both signatures while preserving primary role and device',async()=>{
+ const s=await directFixture(['admin','neurologist','rehab1_physician']);await addFixtureRole(s,1,'rehab1_physician');const options=multiRoleOptions(s),admin=await harness(s.stores[0],'',options);
+ const editor=admin.el('team-members').children.find(element=>element.textContent.includes('Невролог ПСО + Реабилитолог'));assert.ok(editor);
+ const input=editor.querySelectorAll('input')[0],select=editor.querySelectorAll('select')[0],save=editor.querySelectorAll('button').find(button=>button.textContent==='Сохранить изменения');assert.equal(select.disabled,true);input.value='Давыдова';await save.fire('click');await admin.idle();
+ const request=s.requests.find(e=>e.op==='admin_update');assert.deepEqual(request.data.roles,['neurologist','rehab1_physician']);assert.equal(request.data.approvalProof.grant.role,'neurologist');assert.equal(request.data.roleProofs[0].grant.role,'rehab1_physician');assert.equal(request.data.roleProofs[0].grant.name,'Давыдова');assert.equal((await recipientTrust.verifyRecipientGrant(s.members[1],s.members[0].card)).id,s.members[1].id);
+});
+
+test('replacing a dual-role phone signs both roles for the new key and revokes the old device',async()=>{
+ const s=await directFixture(['admin','neurologist','neurologist']);await addFixtureRole(s,1,'rehab1_physician');s.members[2].state='pending';const admin=await harness(s.stores[0],'',multiRoleOptions(s));
+ await waitUntil(()=>admin.el('team-pending').querySelectorAll('button').length===1,'multi-role phone replacement');
+ const pending=admin.el('team-pending'),button=pending.querySelectorAll('button')[0],check=pending.querySelectorAll('input')[0],selection=pending.querySelectorAll('select')[0];selection.value=s.members[1].id;check.checked=true;await check.fire('change');await button.fire('click');await admin.idle();
+ const request=s.requests.find(e=>e.op==='admin_replace');assert.ok(request,admin.el('notice').textContent);assert.equal(request.data.approvalProof.grant.subjectId,s.members[2].id);assert.equal(request.data.approvalProof.grant.role,'neurologist');assert.equal(request.data.roleProofs[0].grant.subjectId,s.members[2].id);assert.equal(request.data.roleProofs[0].grant.role,'rehab1_physician');assert.deepEqual(s.members[2].roles,['neurologist','rehab1_physician']);assert.equal(s.members[1].state,'revoked');assert.equal((await recipientTrust.verifyRecipientGrant(s.members[2],s.members[0].card)).id,s.members[2].id);
+});
+
+test('new release has a separate update banner for human participants and preserves their draft',async()=>{
+ const s=await directFixture(),respond=value=>new Response(JSON.stringify(value),{headers:{'Content-Type':'application/json'}});let releaseReply,releaseCalls=0;
+ const gate=new Promise(resolve=>{releaseReply=resolve;});
+ const options={...s.options,directFetch:async(url,init)=>{const e=JSON.parse(init.body).envelope;if(e.op==='release_status'){releaseCalls++;await gate;return respond({version:18,updateAvailable:true});}return s.options.directFetch(url,init);}};
+ const app=await harness(s.stores[1],'',options);await waitUntil(()=>releaseCalls>0,'release capability registration');assert.equal(app.el('release-notice').hidden,true);
+ await app.event('show-write');app.el('compose-comment').value='Неотправленный вопрос коллеге';releaseReply();
+ await waitUntil(()=>app.el('release-notice').hidden===false,'release banner');
+ assert.match(app.el('release-notice-heading').textContent,/v18/);assert.equal(app.el('release-update').textContent,'Проверить обновление');
+ assert.equal(app.el('compose-comment').value,'Неотправленный вопрос коллеге');
+ assert.equal(app.el('inbox-list').children.length,0,'release is not a fabricated patient message');
+});
+
+test('bot client never requests release notices and update launch opens no patient link',async()=>{
+ const s=await directFixture(['admin','neurologist','bot']);let botNotices=0;
+ const options={...s.options,directFetch:async(url,init)=>{const e=JSON.parse(init.body).envelope;if(e.op==='release_status'){botNotices++;return new Response(JSON.stringify({version:18,updateAvailable:true}),{headers:{'Content-Type':'application/json'}});}return s.options.directFetch(url,init);}};
+ const bot=await harness(s.stores[2],'#update',options);await bot.idle();assert.equal(botNotices,0);assert.equal(bot.el('release-notice').hidden,true);assert.equal(bot.location.hash,'');assert.equal(bot.el('result').hidden,true);
 });
