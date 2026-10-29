@@ -54,6 +54,7 @@ function say(text, error = false) {
   }
 }
 function hideResult(message = '') {
+  clearCommentPreview();
   generation++; clearInterval(timer); endsAt = 0; $('result').hidden = true;
   revealedReply=null; $('reply-message').hidden=true;
   for (const id of ['surname','department','case-code','countdown','result-comment']) $(id).textContent = '';
@@ -63,7 +64,7 @@ function hideResult(message = '') {
 }
 function clearPhoto(){directPhoto=null;$('compose-photo').value='';$('photo-preview').hidden=true;$('photo-preview').removeAttribute('src');$('photo-remove').hidden=true;$('photo-status').textContent='';if(previewURL){URL.revokeObjectURL(previewURL);previewURL='';}}
 function clearHistory(){historyRecord=null;$('history-detail').hidden=true;$('history-recipients').replaceChildren();$('history-show').hidden=true;}
-function clearSensitive() { hideResult();clearHistory();closeEmojiPicker(); draftReply=null; $('compose-surname').value = ''; $('compose-comment').value=''; clearPhoto(); renderReplyCompose(); }
+function clearSensitive() { hideResult();clearHistory();closeEmojiPicker(); draftReply=null; $('compose-surname').value = ''; $('compose-comment').value='';updateCommentPreview(); clearPhoto(); renderReplyCompose(); }
 function renderReplyCompose() {
   $('reply-context').hidden=!draftReply;
   $('reply-recipient').textContent=draftReply?GROUP_LABELS[draftReply.group]:'';
@@ -589,7 +590,7 @@ addEventListener('hashchange', () => {
   clearSensitive(); setCandidate(null);
   flushIncoming();
 });
-addEventListener('blur',()=>{if(!$('result').hidden)suspendSensitive();});
+addEventListener('blur',()=>{clearCommentPreview();if(!$('result').hidden)suspendSensitive();});
 document.addEventListener('visibilitychange', () => { if (document.hidden) suspendSensitive(); else { tick(); flushIncoming(); if(directClient)void refreshInbox().then(()=>retryDelivery()); } });
 addEventListener('pagehide', suspendSensitive);
 
@@ -821,16 +822,55 @@ const emojiGroups=[
 ];
 function updateEmojiButtons(){const disabled=busy||teamBusy||photoBusy||!ready||!directClient||!canCompose()||activeScreen!=='write';$('emoji-toggle').disabled=disabled;for(const button of $('emoji-picker').querySelectorAll('button'))button.disabled=disabled;}
 function closeEmojiPicker(){$('emoji-picker').hidden=true;$('emoji-toggle').setAttribute('aria-expanded','false');}
-function insertCommentEmoji(symbol){
+const comicPairs=emojiGroups.flatMap(([,entries])=>entries.map(([symbol,label])=>symbol+' '+label));
+function comicSegments(value){
+  const parts=[];let cursor=0;
+  while(cursor<value.length){
+    let found=-1,pair='';
+    for(const candidate of comicPairs){
+      let at=value.indexOf(candidate,cursor);
+      while(at>=0&&/^[\p{L}\p{M}\p{N}_]/u.test(value.slice(at+candidate.length)))at=value.indexOf(candidate,at+candidate.length);
+      if(at>=0&&(found<0||at<found)){found=at;pair=candidate;}
+    }
+    if(found<0){parts.push({text:value.slice(cursor),comic:false});break;}
+    if(found>cursor)parts.push({text:value.slice(cursor,found),comic:false});
+    parts.push({text:pair,comic:true});cursor=found+pair.length;
+  }
+  return parts;
+}
+function renderComicText(target,value){
+  target.replaceChildren();let comic=false;
+  for(const part of comicSegments(value)){
+    const span=document.createElement('span');
+    if(part.comic){const split=part.text.indexOf(' '),symbol=document.createElement('span'),caption=document.createElement('span');span.className='comic-phrase';symbol.className='comic-symbol';symbol.textContent=part.text.slice(0,split);caption.className='comic-caption';caption.textContent=part.text.slice(split);span.append(symbol,caption);comic=true;}
+    else span.textContent=part.text;
+    target.append(span);
+  }
+  return comic;
+}
+function clearCommentPreview(){$('comment-preview-text').replaceChildren();$('comment-preview').hidden=true;}
+function updateCommentPreview(){
+  const field=$('compose-comment'),length=[...field.value].length,invalid=length>2000;
+  field.setCustomValidity?.(invalid?'Комментарий: не более 2000 символов.':'');field.setAttribute('aria-invalid',String(invalid));
+  $('comment-length').textContent=length>=1800?length+' / 2000 символов':'';$('comment-length').hidden=length<1800;
+  if(!directClient||activeScreen!=='write'||document.hidden||!canCompose()){clearCommentPreview();return;}
+  const hasPair=renderComicText($('comment-preview-text'),field.value);
+  $('comment-preview').hidden=!hasPair;if(!hasPair)$('comment-preview-text').replaceChildren();
+}
+$('compose-comment').addEventListener('input',updateCommentPreview);
+function insertCommentEmoji(symbol,label){
   if(busy||teamBusy||photoBusy||!ready||!directClient||!canCompose()||activeScreen!=='write')return;
   const field=$('compose-comment'),start=Number.isInteger(field.selectionStart)?field.selectionStart:field.value.length,end=Number.isInteger(field.selectionEnd)?field.selectionEnd:start;
-  const value=field.value.slice(0,start)+symbol+field.value.slice(end);
+  const before=field.value.slice(0,start),after=field.value.slice(end),pair=symbol+' '+label;
+  const leading=before&&!/[\s([{«“]$/u.test(before)?' ':'';
+  const trailing=after&&!/^[\s.,!?;:…)}\]»”]/u.test(after)?' ':'';
+  const insertion=leading+pair+trailing,value=before+insertion+after;
   if([...value].length>2000){say('Комментарий: не более 2000 символов. Сократите текст перед вставкой эмодзи.',true);return;}
-  field.value=value;invalidateComposed();field.focus({preventScroll:true});field.setSelectionRange?.(start+symbol.length,start+symbol.length);
+  field.value=value;invalidateComposed();updateCommentPreview();field.focus({preventScroll:true});field.setSelectionRange?.(start+insertion.length,start+insertion.length);
 }
 function installEmojiPicker(){
   for(const [label,entries] of emojiGroups){const section=document.createElement('section'),heading=document.createElement('h3'),buttons=document.createElement('div');heading.textContent=label;buttons.className='emoji-chips';
-    for(const [symbol,title] of entries){const button=document.createElement('button');button.type='button';button.textContent=symbol;button.title=title;button.setAttribute('aria-label',title);button.addEventListener('click',()=>insertCommentEmoji(symbol));buttons.append(button);}
+    for(const [symbol,title] of entries){const button=document.createElement('button'),icon=document.createElement('span'),caption=document.createElement('span');button.type='button';button.title=title;button.setAttribute('aria-label',title);icon.className='emoji-symbol';icon.setAttribute('aria-hidden','true');icon.textContent=symbol;caption.className='emoji-caption';caption.textContent=title;button.append(icon,caption);button.addEventListener('click',()=>insertCommentEmoji(symbol,title));buttons.append(button);}
     section.append(heading,buttons);$('emoji-picker').append(section);
   }
 }
@@ -982,7 +1022,7 @@ async function revealHistory(){
     if(current!==generation||document.hidden)return;
     if(data.messageId!==record.meta.id||data.group!==record.meta.group||data.kind!==record.meta.kind||data.issued!==record.meta.issued||data.expires!==record.meta.expires||isReplyKind(record.meta.kind)&&data.replyTo!==record.meta.replyTo)throw new Error('Содержимое не соответствует записи истории.');
     $('surname').textContent=data.surname||(isReplyKind(record.meta.kind)?'Ваш ответ':'Ваше сообщение');$('department').textContent=data.department;
-    $('result-label').textContent=(record.organizerToken?'История бота · ':'Моя история · ')+messageTitle(record.meta);$('result-comment').textContent=data.comment||'';$('case-code').textContent=(record.organizerToken?'Отправлено ботом · ':'Отправлено вами · ')+historyDate(record.createdAt);
+    $('result-label').textContent=(record.organizerToken?'История бота · ':'Моя история · ')+messageTitle(record.meta);renderComicText($('result-comment'),data.comment||'');$('case-code').textContent=(record.organizerToken?'Отправлено ботом · ':'Отправлено вами · ')+historyDate(record.createdAt);
     if(data.photo){photoURL=photoObjectURL(data.photo);$('result-photo').src=photoURL;$('result-photo').hidden=false;}
     $('result').hidden=false;endsAt=performance.now()+Math.min(30000,Math.max(0,record.archiveUntil-Date.now()));tick();timer=setInterval(tick,250);
     say('Ваша копия расшифрована на этом телефоне.');$('result').scrollIntoView({block:'center',behavior:'auto'});$('surname').focus({preventScroll:true});
@@ -1023,7 +1063,7 @@ async function revealDirect(id,fromIncoming=false){
     if(data.expires!==record.meta.expires||data.issued!==record.meta.issued)throw new Error('Время сообщения не совпадает с подписанным содержимым.');
     $('surname').textContent=data.surname||(isReplyKind(record.meta.kind)?'Ответ группе':record.meta.kind==='discussion'?'Обсуждение':'Проверочная история');$('department').textContent=data.department;
     $('result-label').textContent=messageTitle(record.meta);
-    $('result-comment').textContent=data.comment||'';$('case-code').textContent='Отправитель: '+data.senderName;
+    renderComicText($('result-comment'),data.comment||'');$('case-code').textContent='Отправитель: '+data.senderName;
     if(data.photo){photoURL=photoObjectURL(data.photo);$('result-photo').src=photoURL;$('result-photo').hidden=false;}
     $('result').hidden=false;$('token').value='';endsAt=performance.now()+Math.min(30000,Math.max(0,data.expires-Date.now()));tick();timer=setInterval(tick,250);
     if(!$('result').hidden&&canReply()&&participatesInGroup(ownRole,record.meta.group)){
@@ -1067,7 +1107,7 @@ async function composeDirectReply(){
     if(current!==generation||document.hidden)return;
     const id=newMessageID(),meta={id,group:context.group,kind:'group_reply',replyTo:context.id,issued,expires};
     const sealed=await sealMessage(device,recipients,content,meta,{archive:true});
-    content=null;$('compose-surname').value='';$('compose-comment').value='';clearPhoto();
+    content=null;$('compose-surname').value='';$('compose-comment').value='';updateCommentPreview();clearPhoto();
     if(current!==generation||document.hidden)return;
     const request={...meta,...sealed};await savePending(request);queued=true;
     const result=await directClient.create(device,request);await removePending(id);queued=false;
@@ -1120,7 +1160,7 @@ async function composeDirectReview(){
     const recipients=kind==='discussion'?await trustedConversationDirectory(group):await trustedGroupDirectory(group);if(!recipients.length)throw new Error('В выбранной группе пока нет подключённых специалистов.');
     if(recipients.length>25)throw new Error('В группе больше 25 устройств. Обратитесь к организатору.');
     const id=newMessageID(),sealed=await sealMessage(device,recipients,content,{id,group,kind,issued,expires},{archive:true});
-    content=null;$('compose-surname').value='';$('compose-comment').value='';clearPhoto();
+    content=null;$('compose-surname').value='';$('compose-comment').value='';updateCommentPreview();clearPhoto();
     if(current!==generation||document.hidden)return;
     const request={id,group,kind,issued,expires,...sealed};await savePending(request);queued=true;
     const result=await directClient.create(device,request);await removePending(id);queued=false;

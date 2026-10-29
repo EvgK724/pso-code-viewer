@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#111214">
   <meta name="referrer" content="no-referrer">
   <meta name="robots" content="noindex, nofollow, noarchive">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; worker-src 'self'; connect-src 'self' https://spugfikalpihorcwcdqc.supabase.co; manifest-src 'self'; base-uri 'none'; form-action 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data: blob:; worker-src 'self'; connect-src 'self' https://spugfikalpihorcwcdqc.supabase.co; manifest-src 'self'; base-uri 'none'; form-action 'none'">
   <meta name="description" content="ПСО: просмотр сообщений и проверочные истории для команды.">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -137,7 +137,9 @@
               <button id="photo-remove" class="button button-secondary" type="button" hidden>Убрать фото</button>
               <div class="comment-heading"><label for="compose-comment">Комментарий</label><button id="emoji-toggle" type="button" class="text-button" aria-expanded="false" aria-controls="emoji-picker">🙂 Эмодзи</button></div>
               <div id="emoji-picker" class="emoji-picker" aria-label="Эмодзи для комментария" hidden></div>
-              <textarea id="compose-comment" rows="6" maxlength="2000" autocomplete="off" spellcheck="false" autocorrect="off" placeholder="Напишите, что нужно уточнить или проверить"></textarea>
+              <textarea id="compose-comment" rows="6" aria-describedby="comment-length" autocomplete="off" spellcheck="false" autocorrect="off" placeholder="Напишите, что нужно уточнить или проверить"></textarea>
+              <p id="comment-length" class="field-help compact-help" role="status" hidden></p>
+              <section id="comment-preview" class="comment-preview" aria-label="Предварительный просмотр комментария" hidden><p class="eyebrow">Так будет выглядеть</p><p id="comment-preview-text" class="message-comment"></p></section>
             </div>
             </div>
             <div class="compose-routing">
