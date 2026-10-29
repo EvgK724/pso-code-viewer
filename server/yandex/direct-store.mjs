@@ -1,8 +1,9 @@
 // Native YDB port of direct-schema.sql. All authorization and recipient roster
 // reads are repeated in the same serializable transaction as the mutation.
 // Large encrypted photos live separately from metadata and queue indices.
+import {INVITE_ROLES,GROUPS,roleGroup,isRehabGroup,canSendGroup} from '../../docs/care-routing.mjs';
 import { randomUUID } from 'node:crypto';
-import { acceptTeamRequest, isAdmin, teamMembers, validId, validNonce, validHash, validName } from './team-store.mjs';
+import { acceptTeamRequest, isAdmin, teamMembers, validId, validNonce, validHash, validName, roleCapacityReached } from './team-store.mjs';
 import { deletePushSubscriptionTx } from './push-store.mjs';
 import { revokeDeviceAuthTx } from './device-auth-store.mjs';
 
@@ -10,17 +11,16 @@ const DAY = 86400000, OPS = new Set(['create','inbox','outbox','open','ack','ret
 // 32 candidates bound the worst case below the adapter's 512-operation cap:
 // current membership/subscription reads plus three queue index updates each.
 const PUSH_SCAN_LIMIT = 32, PUSH_SKIP_BACKOFF = 30000;
-const EDIT_ROLES = new Set(['neurologist','cardiologist','intensivist','bot']);
+const EDIT_ROLES = new Set(INVITE_ROLES);
 const cmp = (a,b) => a < b ? -1 : a > b ? 1 : 0;
 const bytes = x => Buffer.byteLength(JSON.stringify(x),'utf8');
 const object = x => x !== null && typeof x === 'object' && !Array.isArray(x);
 const memberKey = id => `member:${id}`;
-const roleFor = group => group === 'cardiology' ? 'cardiologist' : 'intensivist';
 const HUMAN_ROLES = new Set(['admin','neurologist','cardiologist','intensivist']);
-const senderAllowed = (m,kind) => m?.state === 'active' && (kind === 'reply' ? HUMAN_ROLES.has(m.role) : kind === 'admission' ? m.role === 'bot' : kind === 'review' && ['admin','neurologist'].includes(m.role));
+const senderAllowed = (m,kind,group) => m?.state === 'active' && canSendGroup(m.role,group,kind);
 // Replies are private to one original sender. A later role change must not
 // turn an old reply entry into access under another role.
-const recipientAllowed = (actor,m,e) => actor?.state === 'active' && !!e && (m.kind === 'reply' ? HUMAN_ROLES.has(actor.role) && e.recipient_role === actor.role : actor.role === roleFor(m.group_name));
+const recipientAllowed = (actor,m,e) => actor?.state === 'active' && !!e && (m.kind === 'reply' ? HUMAN_ROLES.has(actor.role) && e.recipient_role === actor.role : roleGroup(actor.role) === m.group_name);
 const padded = n => String(n).padStart(16,'0');
 // Fixed-width ASCII inverse preserves SQL ORDER BY issued DESC,id DESC.
 const inverse = text => [...text].map(c => (127-c.charCodeAt(0)).toString(16).padStart(2,'0')).join('');
@@ -101,8 +101,12 @@ export function createDirectStore(db,{now=Date.now}={}) {
     },
     directory(deviceId) {
       return transaction(async tx => {
-        if (!validId(deviceId) || (await tx.get(memberKey(deviceId)))?.state !== 'active') return status('denied');
-        return {members:(await teamMembers(tx)).filter(m => m.state === 'active' && m.card != null)
+        const actor=validId(deviceId)?await tx.get(memberKey(deviceId)):null;
+        if (actor?.state !== 'active') return status('denied');
+        return {members:(await teamMembers(tx)).filter(m => m.state === 'active' && m.card != null &&
+          // Older installed bots validate a closed set of roles. Preserve their
+          // directory contract; rehab has no bot sender or recipient.
+          (actor.role !== 'bot' || !isRehabGroup(roleGroup(m.role))))
           .sort((a,b) => cmp(a.role,b.role)||cmp(a.name,b.name)||cmp(a.device_id,b.device_id)).map(directoryMember)};
       });
     },
@@ -126,13 +130,14 @@ export function createDirectStore(db,{now=Date.now}={}) {
     create(senderId,requestHash,data) {
       return transaction(async (tx,at) => {
         if (!validId(senderId) || !validHash(requestHash) || !object(data) || !validNonce(data.id) ||
-            !['cardiology','orit'].includes(data.group) || !['admission','review','reply'].includes(data.kind) ||
+            !GROUPS.includes(data.group) || !['admission','review','reply'].includes(data.kind) ||
             !Number.isSafeInteger(data.issued) || !Number.isSafeInteger(data.expires) || data.issued <= 0 ||
             data.expires <= data.issued || data.expires-data.issued > DAY || !Array.isArray(data.entries) ||
             data.entries.length < 1 || data.entries.length > 25 || bytes(data) > 2050000) return 'invalid';
         if (data.kind === 'reply' ? !validNonce(data.replyTo) || data.replyTo === data.id || !object(data.payload) || data.payload.replyTo !== data.replyTo : Object.hasOwn(data,'replyTo')) return 'invalid';
         const sender = await tx.get(memberKey(senderId));
-        if (!senderAllowed(sender,data.kind) || !await approved(tx,sender,at)) return 'denied';
+        if (!senderAllowed(sender,data.kind,data.group) || !await approved(tx,sender,at)) return 'denied';
+        if (isRehabGroup(data.group) && (data.kind !== 'review' || !object(data.payload) || data.entries.some(e => typeof e?.token !== 'string' || !e.token.startsWith('PSO2.')))) return 'invalid';
         if (data.expires <= at || data.issued > at+30000) return 'invalid';
         const old = await tx.get(messageKey(data.id));
         if (old) return old.sender_id === senderId && old.request_hash === requestHash ? 'exists' : 'conflict';
@@ -143,10 +148,10 @@ export function createDirectStore(db,{now=Date.now}={}) {
           const originalEntry = await tx.get(entryKey(parent.id,senderId));
           if (parent.group_name !== data.group || !recipientAllowed(sender,parent,originalEntry)) return 'denied';
           const recipient = await tx.get(memberKey(parent.sender_id));
-          if (parent.sender_id === senderId || !senderAllowed(recipient,'reply')) return 'denied';
+          if (parent.sender_id === senderId || !senderAllowed(recipient,'reply',data.group)) return 'denied';
           recipients = [recipient];
         } else {
-          recipients = (await teamMembers(tx)).filter(m => m.state === 'active' && m.role === roleFor(data.group))
+          recipients = (await teamMembers(tx)).filter(m => m.state === 'active' && roleGroup(m.role) === data.group)
             .sort((a,b) => cmp(a.device_id,b.device_id));
         }
         const entries = [...data.entries].sort((a,b) => cmp(a?.recipientId,b?.recipientId));
@@ -247,8 +252,8 @@ export function createDirectStore(db,{now=Date.now}={}) {
         if (!validName(name) || !EDIT_ROLES.has(role) || !['active','revoked'].includes(state)) return status('invalid');
         if (state === 'active') {
           if (!boundProof(proof,adminId,deviceId,name,role,at)) return status('invalid');
-          const others = (await teamMembers(tx)).filter(x => x.device_id !== deviceId && x.state === 'active' && x.role === role);
-          if ((role === 'cardiologist' && others.length > 0) || (['bot','intensivist'].includes(role) && others.length >= 25)) return status('conflict');
+          const others = (await teamMembers(tx)).filter(x => x.device_id !== deviceId);
+          if (roleCapacityReached(others,role)) return status('conflict');
         }
         await tx.put(memberKey(deviceId),{...m,name,role,state,approval_proof:state === 'active' ? proof : null,revoked_at:state === 'revoked' ? at : m.revoked_at ?? null});
         if (state === 'revoked') await clearDeviceAccess(tx,deviceId);
@@ -262,8 +267,8 @@ export function createDirectStore(db,{now=Date.now}={}) {
         const old = await tx.get(memberKey(oldId)), next = await tx.get(memberKey(newId));
         if (!old || old.role === 'admin' || !['active','revoked'].includes(old.state) || next?.state !== 'pending' || next.role === 'admin') return status('denied');
         if (!boundProof(proof,adminId,newId,old.name,old.role,at)) return status('invalid');
-        const others = (await teamMembers(tx)).filter(m => m.device_id !== oldId && m.state === 'active' && m.role === old.role);
-        if ((old.role === 'cardiologist' && others.length > 0) || (['bot','intensivist'].includes(old.role) && others.length >= 25)) return status('conflict');
+        const others = (await teamMembers(tx)).filter(m => m.device_id !== oldId);
+        if (roleCapacityReached(others,old.role)) return status('conflict');
         await tx.put(memberKey(oldId),{...old,state:'revoked',approval_proof:null,revoked_at:old.revoked_at ?? at});
         await clearDeviceAccess(tx,oldId);
         await tx.put(memberKey(newId),{...next,state:'active',name:old.name,role:old.role,approval_proof:proof,approved_at:at});
@@ -279,7 +284,12 @@ export function createDirectStore(db,{now=Date.now}={}) {
         if (id !== null && !validNonce(id)) return status('invalid');
         const canAll = ['bot','admin'].includes(actor.role);
         const prefix = id ? `directpush:message:${id}:` : canAll ? 'directpush:all:' : `directpush:sender:${actorId}:`;
-        const targets = []; let after, examined=0;
+        // Persist only a bot scan cursor, never change skipped rehab entries.
+        // Otherwise a front page of rehab notifications could starve old PSO work.
+        const cursorKey = actor.role === 'bot' && id === null ? `directbotcursor:${actorId}` : null;
+        const savedCursor = cursorKey ? await tx.get(cursorKey) : null;
+        const targetLimit=id===null?20:25;
+        const targets = []; let after=savedCursor?.after, examined=0, lastExamined=null, exhausted=false;
         for (;;) {
           const pageSize=Math.min(100,PUSH_SCAN_LIMIT-examined);
           if(pageSize<=0)break;
@@ -287,18 +297,20 @@ export function createDirectStore(db,{now=Date.now}={}) {
           let future = false;
           for (const row of page) {
             if (Number(row.key.slice(prefix.length,prefix.length+16)) > at) { future=true; break; }
-            examined++;
+            examined++;lastExamined=row.key;
             const m = await tx.get(messageKey(row.value.message_id));
             if (!m || m.expires <= at) { await removeQueueRow(tx,prefix,row); continue; }
             // A message-filtered request by another doctor must never mutate
             // the real sender's queue or postpone their notifications.
             if (!canAll && m.sender_id !== actorId) continue;
+            // The bot must not trigger or mutate rehabilitation notifications.
+            if (actor.role === 'bot' && isRehabGroup(m.group_name)) continue;
             const e = await tx.get(entryKey(m.id,row.value.recipient_id));
             if (!e || e.push_state === 'accepted' || e.push_attempts >= 8 || e.lease_until > at || e.next_attempt > at) {
               await removeQueueRow(tx,prefix,row); continue;
             }
             const recipient = await tx.get(memberKey(e.recipient_id)), sender = await tx.get(memberKey(m.sender_id));
-            const eligible = recipientAllowed(recipient,m,e) && senderAllowed(sender,m.kind);
+            const eligible = recipientAllowed(recipient,m,e) && senderAllowed(sender,m.kind,m.group_name);
             const sub = eligible ? await tx.get(`pushsub:${e.recipient_id}`) : null;
             if (!eligible || !sub || sub.refreshed_at < at-90*DAY) {
               // Bounded scans must make durable progress past devices without
@@ -315,10 +327,15 @@ export function createDirectStore(db,{now=Date.now}={}) {
             await tx.put(entryKey(m.id,e.recipient_id),claimed,m.expires);
             await putQueue(tx,m,claimed);
             targets.push({id:m.id,recipientId:e.recipient_id,expires:m.expires,subscription:sub.subscription,lease:claimed.push_attempts});
-            if (targets.length === 20) break;
+            if (targets.length === targetLimit) break;
           }
-          if (targets.length === 20 || future || examined >= PUSH_SCAN_LIMIT || page.length < pageSize) break;
+          exhausted = future || (page.length < pageSize && examined < PUSH_SCAN_LIMIT && targets.length < targetLimit);
+          if (targets.length === targetLimit || future || examined >= PUSH_SCAN_LIMIT || page.length < pageSize) break;
           after = page.at(-1).key;
+        }
+        if (cursorKey) {
+          if (exhausted || !lastExamined) await tx.delete(cursorKey);
+          else await tx.put(cursorKey,{after:lastExamined},at+DAY);
         }
         return {targets};
       });

@@ -5,7 +5,7 @@ import {runApiRequest,readApiError,apiDiagnosticText,API_REQUEST_TIMEOUT_MS} fro
 const DOMAIN='PSO-TEAM-v1\0', enc=new TextEncoder();
 const ID=/^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/, LINK=/^[A-Za-z0-9_-]{21}[AQgw]$/;
 const OPS=['create','inbox','outbox','open','ack','retry','admin_members','admin_update','admin_replace','directory','admin_certify'];
-const ROLES=['admin','neurologist','intensivist','cardiologist','bot'];
+import {ROLES,GROUPS,isRehabGroup,canSendGroup} from './care-routing.mjs';
 const b64=x=>btoa(String.fromCharCode(...new Uint8Array(x))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
 const exact=(v,k)=>v&&typeof v==='object'&&!Array.isArray(v)&&Object.keys(v).sort().join(',')===k;
 const label=v=>typeof v==='string'&&v.trim()===v&&v.length>0&&[...v].length<=60&&!/[\p{Cc}\p{Cf}]/u.test(v);
@@ -50,24 +50,25 @@ export class DirectClient {
     if(!['inbox','outbox'].includes(box))throw new Error('Неизвестный список.');
     const r=await this.request(device,box,{cursor});
     if(!exact(r,'items,next')||!Array.isArray(r.items)||r.items.length>100||!(r.next===null||exact(r.next,'id,issued')&&LINK.test(r.next.id)&&Number.isSafeInteger(r.next.issued)))throw new Error('Не удалось проверить список сообщений.');
-    const ids=new Set();for(const m of r.items){if(!exact(m,'expires,group,id,issued,kind,openedAt,openedCount,recipientCount,senderId,senderName')||!LINK.test(m.id)||ids.has(m.id)||!ID.test(m.senderId)||!label(m.senderName)||!['cardiology','orit'].includes(m.group)||!['admission','review','reply'].includes(m.kind)||!Number.isSafeInteger(m.issued)||!Number.isSafeInteger(m.expires)||m.expires<=m.issued||!(m.openedAt===null||Number.isSafeInteger(m.openedAt))||!Number.isInteger(m.recipientCount)||m.recipientCount<0||m.recipientCount>25||!Number.isInteger(m.openedCount)||m.openedCount<0||m.openedCount>m.recipientCount)throw new Error('Не удалось проверить сообщение.');ids.add(m.id);}
+    const ids=new Set();for(const m of r.items){if(!exact(m,'expires,group,id,issued,kind,openedAt,openedCount,recipientCount,senderId,senderName')||!LINK.test(m.id)||ids.has(m.id)||!ID.test(m.senderId)||!label(m.senderName)||!GROUPS.includes(m.group)||(!['admission','review','reply'].includes(m.kind)||(isRehabGroup(m.group)&&m.kind!=='review'))||!Number.isSafeInteger(m.issued)||!Number.isSafeInteger(m.expires)||m.expires<=m.issued||!(m.openedAt===null||Number.isSafeInteger(m.openedAt))||!Number.isInteger(m.recipientCount)||m.recipientCount<0||m.recipientCount>25||!Number.isInteger(m.openedCount)||m.openedCount<0||m.openedCount>m.recipientCount)throw new Error('Не удалось проверить сообщение.');ids.add(m.id);}
     return r;
   }
   async open(device,id,{unlockToken=''}={}){
     if(!LINK.test(id))throw new Error('Неверный код сообщения.');
     const r=await this.request(device,'open',unlockToken?{id,unlockToken}:{id});
-    if(!exact(r,'meta,payload,senderApprovalProof,senderCard,senderName,senderRole,token')||!exact(r.meta,r.meta?.kind==='reply'?'expires,group,id,issued,kind,replyTo':'expires,group,id,issued,kind')||r.meta.id!==id||!label(r.senderName)||!ROLES.includes(r.senderRole)||typeof r.token!=='string'||r.token.length>1600||!Number.isSafeInteger(r.meta.issued)||r.meta.issued<=0||r.meta.issued>this.now()+30000||!Number.isSafeInteger(r.meta.expires)||r.meta.expires<=this.now()||r.meta.expires<=r.meta.issued||r.meta.expires-r.meta.issued>86400000||!['admission','review','reply'].includes(r.meta.kind)||(r.meta.kind==='reply'&&(!LINK.test(r.meta.replyTo)||r.meta.replyTo===r.meta.id||!r.payload||!r.token.startsWith('PSO2.')))||!['cardiology','orit'].includes(r.meta.group))throw new Error('Не удалось проверить сообщение.');
+    if(!exact(r,'meta,payload,senderApprovalProof,senderCard,senderName,senderRole,token')||!exact(r.meta,r.meta?.kind==='reply'?'expires,group,id,issued,kind,replyTo':'expires,group,id,issued,kind')||r.meta.id!==id||!label(r.senderName)||!ROLES.includes(r.senderRole)||typeof r.token!=='string'||r.token.length>1600||!Number.isSafeInteger(r.meta.issued)||r.meta.issued<=0||r.meta.issued>this.now()+30000||!Number.isSafeInteger(r.meta.expires)||r.meta.expires<=this.now()||r.meta.expires<=r.meta.issued||r.meta.expires-r.meta.issued>86400000||!['admission','review','reply'].includes(r.meta.kind)||(r.meta.kind==='reply'&&(!LINK.test(r.meta.replyTo)||r.meta.replyTo===r.meta.id||!r.payload||!r.token.startsWith('PSO2.')))||!GROUPS.includes(r.meta.group))throw new Error('Не удалось проверить сообщение.');
+    if(isRehabGroup(r.meta.group)&&(!canSendGroup(r.senderRole,r.meta.group,r.meta.kind)||!r.payload||!r.token.startsWith('PSO2.')))throw new Error('Неверное сообщение реабилитации.');
     const sender=await importPublicCard(r.senderCard);if(r.token.split('.')[2]!==sender.id)throw new Error('Подпись отправителя не соответствует записи.');
     return {...r,sender:{...sender,name:r.senderName,verified:true}};
   }
   async create(device,data){const r=await this.request(device,'create',data);if(!exact(r,'expires,id,push')||r.id!==data.id||r.expires!==data.expires||!['accepted','partial','queued'].includes(r.push))throw new Error('Сервис не подтвердил сохранение. Повторите отправку из очереди.');return r;}
   async ack(device,id){const r=await this.request(device,'ack',{id});if(!exact(r,'openedAt')||!Number.isSafeInteger(r.openedAt))throw new Error('Не подтверждено открытие.');return r;}
   async retry(device){return this.request(device,'retry',{});}
-  async members(device){const r=await this.request(device,'admin_members',{});if(!exact(r,'members')||!Array.isArray(r.members)||r.members.length>500)throw new Error('Не удалось получить команду.');
+  async members(device){const r=await this.request(device,'admin_members',{includeRehab:true});if(!exact(r,'members')||!Array.isArray(r.members)||r.members.length>500)throw new Error('Не удалось получить команду.');
     const list=[];for(const m of r.members){if(!ID.test(m.id)||!label(m.name)||!ROLES.includes(m.role)||!['active','pending','revoked'].includes(m.state)||typeof m.card!=='string')throw new Error('Не удалось проверить участника.');const card=await importPublicCard(m.card);if(card.id!==m.id)throw new Error('Ключ участника изменился.');list.push({...card,...m,verified:m.state==='active'});}return list;}
   async update(device,member){const data={id:member.id,name:member.name,role:member.role,state:member.state};if(member.approvalProof)data.approvalProof=member.approvalProof;return this.request(device,'admin_update',data);}
   async replace(device,oldId,newId,approvalProof){return this.request(device,'admin_replace',{oldId,newId,approvalProof});}
-  async directory(device){const r=await this.request(device,'directory',{});if(!exact(r,'members')||!Array.isArray(r.members)||r.members.length>100)throw new Error('Не удалось проверить состав команды.');return r.members;}
+  async directory(device){const r=await this.request(device,'directory',{includeRehab:true});if(!exact(r,'members')||!Array.isArray(r.members)||r.members.length>100)throw new Error('Не удалось проверить состав команды.');return r.members;}
   async certify(device,id,approvalProof){return this.request(device,'admin_certify',{id,approvalProof});}
 }
 

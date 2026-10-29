@@ -308,3 +308,24 @@ summary:focus-visible { border-radius: 8px; }
   .bottom-nav button[aria-pressed="true"] svg { color: inherit; }
   .photo-picker { border-color: ButtonText; }
 }
+
+/* Care directions: large quiet controls; routing stays visible before patient input. */
+.care-directions { margin: 0 0 22px; }
+.care-directions h2 { font-size: 19px; line-height: 1.4; margin: 0 0 12px; }
+.direction-buttons { display: grid; grid-template-columns: 1fr; gap: 10px; }
+.direction-buttons button { display: flex; flex-direction: column; align-items: flex-start; text-align: left; gap: 5px; min-height: 72px; width: 100%; padding: 15px 17px; border: 1px solid #667b93; border-radius: 16px; background: #1c222b; color: var(--text); font-family: inherit; cursor: pointer; }
+.direction-buttons strong { font-size: 18px; font-weight: 650; line-height: 1.35; }
+.direction-buttons span { font-size: 14px; line-height: 1.4; color: #b7c2cf; }
+.direction-buttons button[aria-pressed="true"] { background: #263b50; border: 2px solid #82b9eb; padding: 14px 16px; }
+.direction-buttons button[aria-pressed="true"] strong { color: #d8eaff; }
+.direction-buttons button:focus-visible { outline: 3px solid var(--orange); outline-offset: 3px; }
+.direction-buttons button:disabled { opacity: .55; cursor: default; }
+.recipient-routing { margin: 0 0 25px; padding-bottom: 22px; border-bottom: 1px solid var(--border); }
+.recipient-routing select { margin-bottom: 12px; }
+.recipient-summary { margin: 0; font-size: 17px; line-height: 1.5; color: var(--text); overflow-wrap: anywhere; }
+.recipient-routing .field-help { margin-top: 9px; margin-bottom: 0; font-size: 14px; line-height: 1.55; }
+@media (forced-colors: active) {
+  .direction-buttons button { color: ButtonText; background: Canvas; border-color: ButtonText; }
+  .direction-buttons button[aria-pressed="true"] { background: Highlight; border-color: Highlight; }
+  .direction-buttons button[aria-pressed="true"] strong, .direction-buttons button[aria-pressed="true"] span { color: HighlightText; }
+}

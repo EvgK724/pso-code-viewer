@@ -1,3 +1,4 @@
+import {INVITE_ROLES, ROLE_LABELS, GROUP_LABELS, roleGroup, rolesForGroup, isRehabGroup, canSendGroup} from './care-routing.mjs';
 import {sealDemo, openDemo, tokenFromInput, linkForToken} from './crypto.mjs';
 import {exportPublicCard, importPublicCard, deviceIdentity, sealSurname, openSurname} from './exchange.mjs';
 import {readDevice, loadContacts, saveContact, deleteContact, getMyName, setMyName} from './storage.mjs';
@@ -23,6 +24,8 @@ const $ = id => document.getElementById(id);
 let device, selfContact, contacts = [], candidate = null;
 let ready = false, busy = false, generation = 0, timer, endsAt = 0, demoLink = '';
 let activeScreen = 'read';
+let composeDirection='pso', psoRecipient='';
+let deliveryRetryBusy=false, lastDeliveryRetry=-Infinity;
 let queuedIncoming = location.hash, activeIncoming = null;
 let workerReady = null, pushBusy = false, pushEnabled = false, pushSupported = false, pushRefreshPending = false;
 let pushPublicKey = '', pushSubscription = null;
@@ -64,7 +67,8 @@ function renderReplyCompose() {
   $('reply-recipient').textContent=draftReply?draftReply.recipient.name:'';
   $('recipient-routing').hidden=!!draftReply;
   $('recipient').required=!draftReply;
-  if(directClient)$('encrypt').textContent=draftReply?'Отправить ответ':'Отправить врачу';
+  renderCareDirection();
+  if(directClient)$('encrypt').textContent=draftReply?'Отправить ответ':isRehabGroup(selectedGroup())?'Отправить всей группе':'Отправить врачу';
 }
 function tick() {
   if (!endsAt) return;
@@ -80,7 +84,8 @@ function setBusy(value) {
   for (const id of ['demo','open','paste-open','export-card','inspect-contact']) $(id).disabled = value || !ready;
   $('copy-handoff').disabled = value || !$('handoff-link').value;
   $('recipient').disabled=value||!ready||!!draftReply;
-  $('encrypt').disabled = value || photoBusy || !ready || (!draftReply&&!$('recipient').value) || (teamClient && (!canCompose() || teamBusy));
+  for(const direction of ['pso','rehab1','rehab2'])$('direction-'+direction).disabled=value||teamBusy||photoBusy||!ready||!canReview();
+  $('encrypt').disabled = value || photoBusy || !ready || (!draftReply&&!selectedGroup()) || (teamClient && (!canCompose() || teamBusy));
   $('reply-message').disabled=value||teamBusy||!ready||!canReply()||!revealedReply;
   $('cancel-reply').disabled=value;
   $('inbox-refresh').disabled=value||inboxBusy||!ready;$('inbox-more').disabled=value||inboxBusy||!inboxNext;
@@ -120,8 +125,8 @@ function suspendSensitive() {
 }
 const screens = {
   read: ['Сообщения', 'Входящие и исходящие сообщения вашей команды.'],
-  write: ['Новое сообщение', 'Фамилия, фото и комментарий для врача.'],
-  team: ['Команда', 'Подключение, приглашения и доступ врачей.'],
+  write: ['Новое сообщение', 'Фамилия, фото и комментарий для выбранной группы.'],
+  team: ['Команда', 'Подключение, приглашения и доступ специалистов.'],
   settings: ['Настройки', 'Уведомления, защита и помощь.']
 };
 function allowedScreen(screen) {
@@ -291,6 +296,7 @@ function renderContacts() {
     for (const [value,label] of [['cardiology','ПСО · Кардиолог'],['orit','ПСО · ОРИТ']]) {const option=document.createElement('option');option.value=value;option.textContent=label;selector.append(option);}
   }
   if ([...selector.options].some(option => option.value === selected)) selector.value = selected;
+  renderCareDirection();
   setBusy(busy);
 }
 async function reveal(input, fromIncoming = false) {
@@ -419,7 +425,8 @@ $('token').addEventListener('input', clearHandoff);
 $('paste-open').addEventListener('click', pasteAndOpen);
 $('copy-handoff').addEventListener('click', () => copyText($('handoff-link').value, 'handoff-link', 'Ссылка скопирована. Откройте синий значок «ПСО Код» на экране «Домой» и нажмите «Вставить и открыть».', 'handoff-full-link'));
 $('hide').addEventListener('click', () => hideResult('Фамилия скрыта.'));
-$('recipient').addEventListener('change', invalidateComposed);
+$('recipient').addEventListener('change', ()=>{psoRecipient=$('recipient').value;renderReplyCompose();invalidateComposed();});
+for(const direction of ['pso','rehab1','rehab2'])$('direction-'+direction).addEventListener('click',()=>selectCareDirection(direction));
 for (const id of ['compose-surname','compose-comment','expiry']) $(id).addEventListener('input', invalidateComposed);
 $('compose-orit').addEventListener('input', () => {
   if ($('message-caption').value !== 'test') $('message-caption').value = $('compose-orit').checked ? 'orit' : 'patient';
@@ -571,11 +578,36 @@ addEventListener('hashchange', () => {
   clearSensitive(); setCandidate(null);
   flushIncoming();
 });
-document.addEventListener('visibilitychange', () => { if (document.hidden) suspendSensitive(); else { tick(); flushIncoming(); if(directClient)void refreshInbox(); } });
+document.addEventListener('visibilitychange', () => { if (document.hidden) suspendSensitive(); else { tick(); flushIncoming(); if(directClient)void refreshInbox().then(()=>retryDelivery()); } });
 addEventListener('pagehide', suspendSensitive);
 
 
-const roleLabels={admin:'Администратор',neurologist:'Невролог',intensivist:'Реаниматолог',cardiologist:'Кардиолог',bot:'Бот поступлений'};
+const roleLabels=ROLE_LABELS;
+function selectedGroup(){return directClient&&isRehabGroup(composeDirection)?composeDirection:$('recipient').value;}
+function selectCareDirection(direction){
+  if(!directClient||!canReview()||draftReply||busy||teamBusy||photoBusy||!ready||!['pso','rehab1','rehab2'].includes(direction))return;
+  if(composeDirection===direction)return;
+  if(composeDirection==='pso')psoRecipient=$('recipient').value;
+  composeDirection=direction;
+  if(direction==='pso')$('recipient').value=psoRecipient;
+  // Direction changes alter recipients, never copy plaintext to persistent storage.
+  // Keep the current editable content so switching the route does not lose a draft.
+  renderReplyCompose();invalidateComposed();
+}
+function renderCareDirection(){
+  const group=selectedGroup(),rehab=!!directClient&&isRehabGroup(group);
+  $('care-directions').hidden=!directClient||!!draftReply||!canReview();
+  for(const direction of ['pso','rehab1','rehab2'])$('direction-'+direction).setAttribute('aria-pressed',String(composeDirection===direction));
+  $('pso-recipient-picker').hidden=rehab;
+  $('recipient').required=!draftReply&&!rehab;
+  $('recipient-summary').hidden=!directClient||!!draftReply;
+  const recipients=teamMembers.filter(member=>roleGroup(member.role)===group);
+  const count=recipients.length;
+  $('recipient-summary').textContent=!group?'Выберите получателей в направлении ПСО.':(GROUP_LABELS[group]||'Группа')+' · подключено: '+count+'. '+(count?'Сообщение получат все подключённые участники этой группы.':'В группе пока никого нет. Сначала пригласите специалистов.');
+  $('rehab-members').hidden=!rehab;
+  $('rehab-members').textContent=group==='rehab1'?'Реабилитолог, медицинский психолог, логопед и методист ЛФК — I этап.':group==='rehab2'?'Реабилитологи отделения медицинской реабилитации — II этап.':'';
+  $('rehab-delivery-note').hidden=!rehab;
+}
 function canReview(){return teamState.state==='active'&&['admin','neurologist'].includes(teamState.role);}
 function canReply(){return !!directClient&&teamState.state==='active'&&['admin','neurologist','cardiologist','intensivist'].includes(teamState.role);}
 function canCompose(){return canReview()||!!draftReply&&canReply();}
@@ -648,6 +680,7 @@ async function refreshTeam(){
   if(directClient){await refreshInbox();await refreshPending();}
   if(deviceUnlock)await refreshUnlock();
   if(pushEnabled)await refreshNotifications();
+  await retryDelivery();
 }
 async function notificationContacts(){
   const local=await loadContacts(),seen=new Set(local.map(c=>c.id));
@@ -792,12 +825,12 @@ async function init() {
     $('device-id').textContent = identity.fingerprint; $('status').textContent = 'Ключ этого просмотрщика готов';
     ready = true;
     if(teamClient) await refreshTeam();
-    renderContacts(); setBusy(false);
+    renderContacts(); setBusy(false);await retryDelivery();
   } catch (error) { ready = false; $('status').textContent = 'Не удалось подготовить просмотрщик'; say(error.message, true); setBusy(false); }
   if(teamClient) { $('message-caption').value='test';$('encrypt').textContent=directClient?'Отправить врачу':'Создать проверочную ссылку';$('push-compose-help').hidden=false; }
   $('direct-fields').hidden=!directClient;$('direct-panel').hidden=!directClient;
   $('legacy-open').open=!directClient||teamState.state==='unregistered';
-  if(directClient){$('compose-surname').required=false;$('legacy-output').hidden=true;setInterval(async()=>{if(!document.hidden){await refreshInbox();await retryPending(false);}},60000);}
+  if(directClient){$('compose-surname').required=false;$('legacy-output').hidden=true;setInterval(async()=>{if(!document.hidden){await refreshInbox();await retryPending(false);await retryDelivery();}},60000);}
   $('device-unlock-settings').hidden=!deviceUnlock;
   renderNavigation();
   void initNotifications();
@@ -810,7 +843,7 @@ $('app-update').addEventListener('click',async()=>{
   try{await appUpdates.check();}finally{$('app-update').disabled=false;}
 });
 
-function messageTitle(item){return item.kind==='reply'?'Ответ на сообщение':item.kind==='review'?'Проверочная история':'Новый пациент';}
+function messageTitle(item){return item.kind==='reply'?'Ответ на сообщение':isRehabGroup(item.group)?'Запрос на реабилитацию':item.kind==='review'?'Проверочная история':'Новый пациент';}
 function dateLabel(time){return new Date(time).toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'});}
 function renderInbox(){
   $('inbox-list').replaceChildren();
@@ -820,7 +853,7 @@ function renderInbox(){
   for(const item of inboxItems){
     const row=document.createElement('article');row.className='message-row';
     const title=document.createElement('strong');title.textContent=messageTitle(item);row.append(title);
-    const info=document.createElement('p');info.className='message-meta';info.textContent=(item.kind==='reply'?'Личный ответ':item.group==='orit'?'Реаниматологи':'Кардиолог')+' · '+dateLabel(item.issued);row.append(info);
+    const info=document.createElement('p');info.className='message-meta';info.textContent=(item.kind==='reply'?'Личный ответ':GROUP_LABELS[item.group]||'Группа')+' · '+dateLabel(item.issued);row.append(info);
     const sender=document.createElement('p');sender.className='message-meta';sender.textContent='От '+item.senderName;row.append(sender);
     if(activeBox==='inbox'){
       const button=document.createElement('button');button.type='button';button.className='button '+(item.openedAt?'button-secondary':'button-primary');button.textContent=item.openedAt?'Открыть снова':'Открыть';button.addEventListener('click',()=>revealDirect(item.id));row.append(button);
@@ -857,12 +890,13 @@ async function revealDirect(id,fromIncoming=false){
     let sender;
     if(record.sender.id===organizerPin.id&&record.senderRole==='admin')sender={...organizerPin,name:record.senderName,role:'admin',verified:true};
     else sender=await verifyRecipientGrant({id:record.sender.id,name:record.senderName,role:record.senderRole,card:record.senderCard,approvalProof:record.senderApprovalProof},organizerPin);
+    if(isRehabGroup(record.meta.group)&&(!record.payload||!canSendGroup(record.senderRole,record.meta.group,record.meta.kind)))throw new Error('Реабилитационное сообщение должно быть зашифровано и отправлено неврологом ПСО.');
     if(record.meta.kind==='admission'&&record.senderRole!=='bot'||record.meta.kind==='review'&&!['admin','neurologist'].includes(record.senderRole)||record.meta.kind==='reply'&&!['admin','neurologist','cardiologist','intensivist'].includes(sender.role))throw new Error('Роль отправителя не разрешает это сообщение.');
     const ownRecord=(await directClient.directory(device)).find(member=>member.id===selfContact.id);
     const ownRole=ownRecord?.id===organizerPin.id&&ownRecord.role==='admin'?'admin':(await verifyRecipientGrant(ownRecord,organizerPin)).role;
     if(record.meta.kind==='reply'){
       if(!record.payload||!['admin','neurologist','cardiologist','intensivist'].includes(ownRole))throw new Error('Ответ недоступен этому получателю.');
-    }else if(record.meta.group!==(ownRole==='cardiologist'?'cardiology':ownRole==='intensivist'?'orit':null))throw new Error('Сообщение адресовано другой группе врачей.');
+    }else if(record.meta.group!==roleGroup(ownRole))throw new Error('Сообщение адресовано другой группе врачей.');
     if(current!==generation||document.hidden)return;
     const data=record.payload?await openMessage(device,record.token,record.payload,[sender]):await openSurname(device,record.token,[sender]);
     if(current!==generation||document.hidden)return;
@@ -874,7 +908,7 @@ async function revealDirect(id,fromIncoming=false){
     $('result-comment').textContent=data.comment||'';$('case-code').textContent='Отправитель: '+data.senderName;
     if(data.photo){photoURL=photoObjectURL(data.photo);$('result-photo').src=photoURL;$('result-photo').hidden=false;}
     $('result').hidden=false;$('token').value='';endsAt=performance.now()+Math.min(30000,Math.max(0,data.expires-Date.now()));tick();timer=setInterval(tick,250);
-    if(!$('result').hidden&&canReply()&&record.meta.kind!=='admission'&&['admin','neurologist','cardiologist','intensivist'].includes(sender.role)&&sender.id!==selfContact.id){
+    if(!$('result').hidden&&canReply()&&!isRehabGroup(record.meta.group)&&record.meta.kind!=='admission'&&['admin','neurologist','cardiologist','intensivist'].includes(sender.role)&&sender.id!==selfContact.id){
       revealedReply={id,group:record.meta.group,expires:data.expires,recipient:sender,hasSurname:!!data.surname};$('reply-message').hidden=false;
     }
     if(fromIncoming&&activeIncoming)activeIncoming.pending=false;
@@ -939,6 +973,15 @@ async function refreshPending(){
   try{const items=await loadPending();$('pending-count').textContent=items.length?'Ожидают подтверждения: '+items.length+'. Сохранён только шифр; повтор не создаёт второе сообщение.':'';$('retry-pending').hidden=!items.length;$('discard-pending').hidden=!items.length;discardPendingConfirmed=false;$('discard-pending').textContent='Удалить очередь с телефона';}
   catch{$('pending-count').textContent='Очередь этого телефона недоступна.';}
 }
+// Recover server-side queued notifications even when the encrypted local send
+// queue is empty. Only human PSO senders participate; one bounded batch/minute.
+async function retryDelivery(){
+  if(!directClient||!ready||busy||teamBusy||directPendingBusy||deliveryRetryBusy||document.hidden||!canReview())return;
+  const at=performance.now();if(at-lastDeliveryRetry<60000)return;
+  lastDeliveryRetry=at;deliveryRetryBusy=true;
+  try{await directClient.retry(device);}catch{/* Inbox records remain available; next foreground/poll retries. */}
+  finally{deliveryRetryBusy=false;}
+}
 async function retryPending(announce=true){
   if(!directClient||!ready||busy||teamBusy||directPendingBusy||document.hidden||!canReply())return;
   directPendingBusy=true;setBusy(busy);let sent=0;
@@ -953,13 +996,14 @@ async function retryPending(announce=true){
 async function composeDirectReview(){
   if(draftReply)return composeDirectReply();
   if(!canReview()||teamBusy||photoBusy){say('Проверочные истории отправляют подключённые неврологи.',true);return;}
-  hideResult();const current=generation,group=$('recipient').value,issued=Date.now(),expires=issued+Number($('expiry').value)*60000;
+  hideResult();const current=generation,group=selectedGroup(),issued=Date.now(),expires=issued+Number($('expiry').value)*60000;
   let content={surname:$('compose-surname').value,department:$('compose-orit').checked?'ОРИТ':'ПСО',comment:$('compose-comment').value,photo:directPhoto};
   let queued=false;
   setBusy(true);say('Шифруем для получателей…');
   try{
-    const role=group==='cardiology'?'cardiologist':group==='orit'?'intensivist':'',directory=await trustedDirectory(role);
-    const recipients=directory.filter(member=>member.role===role);if(!recipients.length)throw new Error('В выбранной группе пока нет подключённых врачей.');
+    if(!canSendGroup(teamState.role,group,'review'))throw new Error('Выберите доступное направление.');
+    const recipients=await trustedGroupDirectory(group);if(!recipients.length)throw new Error('В выбранной группе пока нет подключённых специалистов.');
+    if(recipients.length>25)throw new Error('В группе больше 25 устройств. Обратитесь к организатору.');
     const id=newMessageID(),sealed=await sealMessage(device,recipients,content,{id,group,kind:'review',issued,expires});
     content=null;$('compose-surname').value='';$('compose-comment').value='';clearPhoto();
     if(current!==generation||document.hidden)return;
@@ -998,7 +1042,7 @@ $('compose-photo').addEventListener('change',async()=>{
   catch(e){if(current===generation&&!document.hidden)$('photo-status').textContent=e.message;}
   finally{photoBusy=false;setBusy(busy);}
 });
-addEventListener('online',async()=>{await refreshInbox();await retryPending(false);});
+addEventListener('online',async()=>{await refreshInbox();await retryPending(false);await retryDelivery();});
 async function renderDirectAdmin(){
   if(teamState.state!=='active'||teamState.role!=='admin')return;
   $('team-pending').replaceChildren();$('team-members').replaceChildren();
@@ -1032,7 +1076,7 @@ async function renderDirectAdmin(){
       const inner=document.createElement('div');inner.className='details-body';const info=document.createElement('p');info.className='fingerprint';info.textContent=member.fingerprint;inner.append(info);
       if(member.role!=='admin'&&member.state==='active'){
         const name=document.createElement('input');name.type='text';name.maxLength=60;name.value=member.name;name.setAttribute('aria-label','Имя врача');
-        const role=document.createElement('select');role.setAttribute('aria-label','Роль врача');for(const key of ['neurologist','intensivist','cardiologist','bot']){const o=document.createElement('option');o.value=key;o.textContent=roleLabels[key];role.append(o);}role.value=member.role;
+        const role=document.createElement('select');role.setAttribute('aria-label','Роль врача');for(const key of INVITE_ROLES){const o=document.createElement('option');o.value=key;o.textContent=roleLabels[key];role.append(o);}role.value=member.role;
         const save=document.createElement('button');save.type='button';save.className='button button-secondary';save.textContent='Сохранить изменения';save.addEventListener('click',async()=>{if(busy||teamBusy||!canAdmin())return;teamBusy=true;updateTeamButtons();try{await directClient.update(device,{id:member.id,name:name.value.trim(),role:role.value,state:'active',approvalProof:await makeRecipientGrant(device,{...member,name:name.value.trim(),role:role.value})});say('Данные участника обновлены.');}catch(e){say(e.message,true);}finally{teamBusy=false;await refreshTeam();}});
         const revoke=document.createElement('button');revoke.type='button';revoke.className='button button-secondary danger-button';revoke.textContent='Отключить доступ';let confirmed=false;
         revoke.addEventListener('click',async()=>{if(busy||teamBusy||!canAdmin())return;if(!confirmed){confirmed=true;revoke.textContent='Подтвердить отключение';return;}teamBusy=true;updateTeamButtons();try{await directClient.update(device,{id:member.id,name:member.name,role:member.role,state:'revoked'});say('Доступ отключён. Уже просмотренное удалить с чужого телефона нельзя.');}catch(e){say(e.message,true);}finally{teamBusy=false;await refreshTeam();}});
@@ -1045,10 +1089,6 @@ async function renderDirectAdmin(){
 }
 
 
-async function trustedDirectory(role){
-  if(!organizerPin)throw new Error('Сначала подключите ключ организатора через его личное приглашение.');
-  const all=await directClient.directory(device);return verifyRecipientDirectory(role?all.filter(m=>m.role===role):all.filter(m=>m.id!==organizerPin.id),organizerPin);
-}
 $('organizer-confirm').addEventListener('change',()=>{$('organizer-save').disabled=!$('organizer-confirm').checked;});
 $('organizer-save').addEventListener('click',async()=>{
   if(busy||!invitationOrganizer||!$('organizer-confirm').checked)return;setBusy(true);
@@ -1079,3 +1119,10 @@ function installBrandScroll(){
 installBrandScroll();
 init();
 
+
+async function trustedGroupDirectory(group){
+  if(!organizerPin)throw new Error('Сначала подключите ключ организатора через его личное приглашение.');
+  const roles=rolesForGroup(group),all=await directClient.directory(device);
+  const members=all.filter(member=>roles.includes(member.role));
+  return verifyRecipientDirectory(members,organizerPin);
+}

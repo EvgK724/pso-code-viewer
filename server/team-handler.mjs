@@ -1,5 +1,6 @@
 // Role-bound, device-signed team workflow. Patient plaintext never reaches here.
 // The database rechecks roles and the exact active recipient set atomically.
+import {ROLES,INVITE_ROLES,REHAB_ROLES} from '../docs/care-routing.mjs';
 import {importPublicCard} from '../docs/exchange.mjs';
 import {createVapidKeys, sendWebPush} from './web-push.mjs';
 
@@ -7,7 +8,6 @@ export const MAX_TEAM_BODY_BYTES = 32768;
 const DOMAIN = 'PSO-TEAM-v1\0', TOKEN_DOMAIN = 'PSO-SURNAME-LINK-v1\0';
 const MAX_TTL = 86400000, MAX_RECIPIENTS = 25;
 const OPS = ['status','directory','invite','invite_info','claim','pending','approve','revoke','create','resolve'];
-const ROLES = ['admin','neurologist','cardiologist','intensivist','bot'];
 const DIAGNOSTIC_STAGES = new Set(['validation','accept',...OPS,'configuration','database_connect','organizer_check','handler_setup','dispatch']);
 const DIAGNOSTIC_CODES = new Set(['database_conflict','database_deadline','database_unavailable','invalid_record','invalid_result','result_limit','database_closed','transaction_closed','operation_limit']);
 // Explicit error values from the pinned ydb-sdk 5.11.1 StatusCode enum. Do not
@@ -148,10 +148,12 @@ export function createTeamHandler({store,allowedOrigin,crypto=globalThis.crypto,
       const unsigned={v:1,op:e.op,issued:e.issued,nonce:e.nonce,card:e.card,data:e.data};
       if(!await crypto.subtle.verify({name:'ECDSA',hash:'SHA-256'},owner.signingPublicKey,signature,enc.encode(DOMAIN+JSON.stringify(unsigned))))throw new Rejected(403);
       const data=e.data;let idHash,normalizedCreate;
-      if(['status','directory','pending'].includes(e.op)) {
+      if(e.op==='status') {
         if(!exact(data,''))throw new Rejected();
+      } else if(['directory','pending'].includes(e.op)) {
+        if(!exact(data,'')&&!(exact(data,'includeRehab')&&data.includeRehab===true))throw new Rejected();
       } else if(e.op==='invite') {
-        if(!(exact(data,'id,name,role')||exact(data,'id,name,organizerCard,role'))||!['neurologist','cardiologist','intensivist','bot'].includes(data.role))throw new Rejected();
+        if(!(exact(data,'id,name,role')||exact(data,'id,name,organizerCard,role'))||!INVITE_ROLES.includes(data.role))throw new Rejected();
         name(data.name);idHash=await hash(crypto,bytes(data.id,16));
         if(Object.hasOwn(data,'organizerCard')) {
           let organizer;try{organizer=await importPublicCard(data.organizerCard);}catch{throw new Rejected();}
@@ -193,7 +195,8 @@ export function createTeamHandler({store,allowedOrigin,crypto=globalThis.crypto,
       }
       if(e.op==='directory'||e.op==='pending') {
         const result=await store[e.op](owner.id);if(result?.status&&result.status!=='ok')failure(result.status);
-        return response(200,{members:members(result?.members)});
+        const listing=members(result?.members);
+        return response(200,{members:data.includeRehab===true?listing:listing.filter(m=>!REHAB_ROLES.includes(m.role))});
       }
       if(e.op==='invite') {
         const result=await store.invite(owner.id,idHash,data.name,data.role,data.organizerCard);

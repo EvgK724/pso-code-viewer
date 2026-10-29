@@ -1,11 +1,20 @@
 // Transactional YDB document port of team-schema.sql and direct-schema.sql's
 // updated role limits. HTTP handlers verify signatures before using this store.
 // Documents contain public staff keys and ciphertext, never patient plaintext.
+import {INVITE_ROLES as INVITABLE_ROLES,roleGroup,isRehabGroup} from '../../docs/care-routing.mjs';
 import {revokeDeviceAuthTx} from './device-auth-store.mjs';
 
 const MINUTE = 60000, DAY = 86400000;
 const TEAM_OPS = new Set(['status','directory','invite','invite_info','claim','pending','approve','revoke','create','resolve']);
-const INVITE_ROLES = new Set(['neurologist','cardiologist','intensivist','bot']);
+const INVITE_ROLES = new Set(INVITABLE_ROLES);
+// Rehab capacity is shared across specialties, not 25 seats per specialty.
+export function roleCapacityReached(members,role) {
+  const group=roleGroup(role);
+  const peers=members.filter(m=>m.state==='active'&&(isRehabGroup(group)?roleGroup(m.role)===group:m.role===role));
+  if (role==='cardiologist') return peers.length>=1;
+  if (role==='bot'||role==='intensivist'||isRehabGroup(group)) return peers.length>=25;
+  return false;
+}
 export const validId = value => typeof value === 'string' && /^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/.test(value);
 export const validNonce = value => typeof value === 'string' && /^[A-Za-z0-9_-]{21}[AQgw]$/.test(value);
 export const validHash = value => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
@@ -113,8 +122,12 @@ export function createTeamStore(db,{now=Date.now}={}) {
     },
     directory(deviceId) {
       return transaction(async tx => {
-        if (!validId(deviceId) || (await tx.get(memberKey(deviceId)))?.state !== 'active') return {status:'denied'};
-        return {members:(await teamMembers(tx)).filter(m => m.state === 'active' && m.card != null)
+        const actor=validId(deviceId)?await tx.get(memberKey(deviceId)):null;
+        if (actor?.state !== 'active') return {status:'denied'};
+        return {members:(await teamMembers(tx)).filter(m => m.state === 'active' && m.card != null &&
+          // Older installed bots validate a closed set of roles. Preserve their
+          // directory contract; rehab has no bot sender or recipient.
+          (actor.role !== 'bot' || !isRehabGroup(roleGroup(m.role))))
           .sort((a,b) => compare(a.role,b.role)||compare(a.name,b.name)||compare(a.device_id,b.device_id)).map(memberView)};
       });
     },
@@ -182,8 +195,7 @@ export function createTeamStore(db,{now=Date.now}={}) {
         if (!member || !INVITE_ROLES.has(member.role) || member.state === 'revoked') return 'denied';
         if (member.state === 'active') return 'active';
         if (member.state !== 'pending') return 'denied';
-        const sameRole = (await teamMembers(tx)).filter(m => m.state === 'active' && m.role === member.role);
-        if ((member.role === 'cardiologist' && sameRole.length) || (['bot','intensivist'].includes(member.role) && sameRole.length >= 25)) return 'conflict';
+        if (roleCapacityReached(await teamMembers(tx),member.role)) return 'conflict';
         await tx.put(memberKey(deviceId),{...member,state:'active',approved_at:at});
         return 'active';
       });

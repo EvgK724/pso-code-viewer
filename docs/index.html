@@ -99,6 +99,23 @@
             <button id="cancel-reply" type="button" class="text-button">Отменить ответ</button>
           </section>
           <form id="compose-form" autocomplete="off">
+            <section id="care-directions" class="care-directions" aria-labelledby="care-direction-label" hidden>
+              <h2 id="care-direction-label">Направление</h2>
+              <div class="direction-buttons" role="group" aria-label="Направление сообщения">
+                <button id="direction-pso" type="button" aria-pressed="true"><strong>ПСО</strong><span>Кардиолог · ОРИТ</span></button>
+                <button id="direction-rehab1" type="button" aria-pressed="false"><strong>Реабилитация · I этап</strong><span>Ранняя реабилитация</span></button>
+                <button id="direction-rehab2" type="button" aria-pressed="false"><strong>ОМР · II этап</strong><span>Медицинская реабилитация</span></button>
+              </div>
+            </section>
+            <div id="recipient-routing" class="recipient-routing">
+              <div id="pso-recipient-picker">
+                <label for="recipient">Кому отправить</label>
+                <select id="recipient" name="recipient" required><option value="">Выберите группу врачей</option></select>
+              </div>
+              <p id="recipient-summary" class="recipient-summary" role="status" aria-live="polite" hidden></p>
+              <p id="rehab-members" class="field-help" hidden></p>
+              <p id="rehab-delivery-note" class="field-help" hidden>Фамилия, комментарий и фото будут зашифрованы. Запись появится у всей группы; время push-уведомления зависит от связи на телефоне.</p>
+            </div>
             <div class="compose-content">
             <label id="compose-label" for="compose-surname">Фамилия пациента</label>
             <input id="compose-surname" name="surname" type="text" maxlength="80" spellcheck="false" autocapitalize="words" autocomplete="off" autocorrect="off" placeholder="Введите фамилию" required>
@@ -113,13 +130,6 @@
             </div>
             </div>
             <div class="compose-routing">
-            <div id="recipient-routing">
-            <label for="recipient">Кому отправить</label>
-            <select id="recipient" name="recipient" required>
-              <option value="">Выберите группу врачей</option>
-            </select>
-            <p class="field-help">Содержимое доступно только подключённым врачам выбранной группы.</p>
-            </div>
             <label class="check-label" for="compose-orit"><input id="compose-orit" type="checkbox"><span>Пациент в ОРИТ</span></label>
             <label for="expiry">Срок доступа к сообщению</label>
             <select id="expiry" name="expiry">
@@ -180,7 +190,13 @@
               <label for="invite-name">Фамилия и имя</label>
               <input id="invite-name" type="text" maxlength="60" required autocomplete="off" placeholder="Фамилия врача">
               <label for="invite-role">Роль</label>
-              <select id="invite-role"><option value="neurologist">Невролог</option><option value="intensivist">Реаниматолог</option><option value="cardiologist">Кардиолог</option><option value="bot">Бот поступлений</option></select>
+              <select id="invite-role">
+                <optgroup label="ПСО"><option value="neurologist">Невролог ПСО</option><option value="intensivist">Реаниматолог</option><option value="cardiologist">Кардиолог</option></optgroup>
+                <optgroup label="Реабилитация · I этап"><option value="rehab1_physician">Реабилитолог · I этап</option><option value="psychologist">Медицинский психолог · I этап</option><option value="speech_therapist">Логопед · I этап</option><option value="exercise_therapist">Методист ЛФК · I этап</option></optgroup>
+                <optgroup label="ОМР · II этап"><option value="rehab2_physician">Реабилитолог ОМР · II этап</option></optgroup>
+                <optgroup label="Автоматизация"><option value="bot">Бот поступлений</option></optgroup>
+              </select>
+              <p class="field-help">Выберите этап и специальность: они определяют, какие сообщения получит специалист.</p>
               <button id="invite-create" type="submit" class="button button-primary">Создать приглашение</button>
             </form>
             <div id="invite-output" class="output-block" hidden>

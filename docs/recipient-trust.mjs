@@ -6,7 +6,7 @@ import {deviceIdentity, exportPublicCard, importPublicCard} from './exchange.mjs
 
 export const RECIPIENT_GRANT_DOMAIN = 'PSO-RECIPIENT-GRANT-v1\0';
 export const MAX_GRANT_TTL = 365 * 24 * 60 * 60 * 1000;
-const ROLES = ['admin','neurologist','cardiologist','intensivist','bot'];
+import {ROLES} from './care-routing.mjs';
 const enc = new TextEncoder();
 const scope = encodeURIComponent(new URL('./', import.meta.url).pathname);
 const PIN_KEY = 'pso-organizer-pin-v1-' + scope;
