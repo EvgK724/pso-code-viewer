@@ -168,11 +168,12 @@ def ingest(db, book, moment, baseline=False):
 
 
 class ApiFailure(Exception):
-    def __init__(self, kind, note, retry_after=60):
+    def __init__(self, kind, note, retry_after=60, scope='global'):
         super().__init__(note)
         self.kind = kind
         self.note = note
         self.retry_after = retry_after
+        self.scope = scope
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -235,6 +236,11 @@ def dispatch(db, publisher, valid_ids, clock=now, should_stop=lambda: False):
                 db.execute('UPDATE deliveries SET status=?,note=? WHERE id=?', (status, exc.note, row['id']))
                 if status == 'pending':
                     set_meta(db, 'retry_after', moment.timestamp() + exc.retry_after)
+            # A verified empty recipient list blocks only this destination.
+            # Authentication, trust, rate-limit and uncertain network failures
+            # retain the global stop/backoff behavior.
+            if status == 'blocked' and exc.scope == 'destination':
+                continue
             break
         except Exception:
             with db:

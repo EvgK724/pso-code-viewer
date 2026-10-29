@@ -241,7 +241,7 @@ class TeamClient:
                     raise TeamFailure('blocked', 'Ключ получателя не подтверждён вашим организатором. Проверьте раздел «Команда» и закреплённый ключ бота.') from None
                 selected.append(member)
         if not selected:
-            raise TeamFailure('blocked', 'Для этого чата ещё нет активированных получателей.')
+            raise TeamFailure('blocked', 'Для этого чата ещё нет активированных получателей.', 'no_recipients')
         return sorted(selected, key=lambda m: m['id'])
 
     def create(self, data):
@@ -299,7 +299,8 @@ class TeamPublisher:
                 raise TeamFailure('blocked', 'Истёк срок подготовленной записи. Требуется проверить очередь; новая запись автоматически не создаётся.')
             return data
         except TeamFailure as exc:
-            raise ApiFailure(exc.kind, exc.note) from None
+            scope = 'destination' if exc.kind == 'blocked' and exc.code == 'no_recipients' else 'global'
+            raise ApiFailure(exc.kind, exc.note, scope=scope) from None
         except (OSError, ValueError, RuntimeError):
             raise ApiFailure('blocked', 'Не удалось зашифровать запись. Открытая фамилия не отправлена.') from None
 

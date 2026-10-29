@@ -314,9 +314,33 @@ class EngineTests(unittest.TestCase):
 
     def test_auth_error_is_blocked_not_retried_each_cycle(self):
         self.api = MockTransport([n.ApiFailure('blocked', 'synthetic 403')])
-        self.send([rec()])
+        self.assertEqual(self.send([rec()]), 0)
+        self.assertEqual(self.statuses(), ['blocked', 'pending'])
+        self.assertEqual(len(self.api.calls), 1)
         self.send([rec()])
         self.assertEqual(len([x for x in self.api.calls if x[0] == 'cardio']), 1)
+
+    def test_destination_block_does_not_delay_other_patients_or_routes(self):
+        prepare = self.publisher.prepare
+        def available_destination(db, row, at):
+            if row['destination'] == 'cardio':
+                raise n.ApiFailure('blocked', 'Нет получателей', scope='destination')
+            return prepare(db, row, at)
+        self.publisher.prepare = available_destination
+        records = [rec(), rec('Пробов', row=14)]
+        self.assertEqual(self.send(records), 2)
+        self.assertEqual(self.statuses(), ['blocked', 'sent', 'blocked', 'sent'])
+        self.assertEqual([destination for destination, _ in self.api.calls], ['orit', 'orit'])
+        self.assertEqual(self.send(records), 0)
+        self.assertEqual(len(self.api.calls), 2)
+        self.assertEqual(n.meta(self.db, 'retry_after', '0'), '0')
+
+    def test_destination_scoped_retry_still_obeys_global_backoff(self):
+        self.api = MockTransport([n.ApiFailure('retry', 'synthetic timeout', 120, scope='destination')])
+        self.assertEqual(self.send([rec()]), 0)
+        self.assertEqual(self.statuses(), ['pending', 'pending'])
+        self.assertEqual(self.send([rec()], moment(minute=1)), 0)
+        self.assertEqual(len(self.api.calls), 1)
 
     def test_rate_limit_cooldown_survives_cycles(self):
         self.api = MockTransport([n.ApiFailure('retry', 'synthetic 429', 180)])
