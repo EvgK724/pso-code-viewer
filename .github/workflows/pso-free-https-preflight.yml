@@ -1,0 +1,177 @@
+name: Isolated browser on a stable HTTPS test origin
+on:
+  push:
+    branches: ['qa/free-https-preflight']
+    paths: ['.github/workflows/pso-free-https-preflight.yml']
+permissions: {}
+jobs:
+  probe:
+    if: ${{ github.repository == 'EvgK724/pso-code-viewer' && github.event.repository.visibility == 'public' && github.event.deleted == false }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 4
+    steps:
+      - name: Exercise two public test workers in a fresh browser
+        shell: bash
+        run: |
+          set -eu
+          cd "$RUNNER_TEMP"
+          cat > driver.py <<'PY_SOURCE'
+          """Ordinary ChromeDriver session, two built-in WPT workers, and two fixed echo requests."""
+          import json
+          import os
+          from pathlib import Path
+          import shutil
+          import socket
+          import subprocess
+          from tempfile import TemporaryDirectory
+          import time
+          import urllib.request
+          import urllib.error
+
+          origin = 'https://wpt.live'
+          report = {'fixture':'wpt-service-worker','scope':'synthetic','stage':'start-driver'}
+          def main():
+              driver = shutil.which('chromedriver')
+              chrome = shutil.which('google-chrome') or shutil.which('chromium')
+              if not driver or not chrome:
+                  raise RuntimeError('missing-browser-or-driver')
+              with socket.socket() as sock:
+                  sock.bind(('127.0.0.1',0))
+                  port = sock.getsockname()[1]
+              local = 'http://127.0.0.1:'+str(port)
+              # This opener only accesses the loopback WebDriver control port.
+              client = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+              def wd(method, path, data=None):
+                  body = None if data is None else json.dumps(data).encode()
+                  req = urllib.request.Request(local+path,method=method,data=body,headers={'Content-Type':'application/json'})
+                  with client.open(req,timeout=55) as response:
+                      return json.load(response)['value']
+              with TemporaryDirectory(prefix='wpt-clean-browser-') as profile:
+                  try:
+                      with subprocess.Popen([driver,'--port='+str(port)],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL) as proc:
+                          session = None
+                          try:
+                              for i in range(40):
+                                  try:
+                                      if wd('GET','/status')['ready']:break
+                                  except OSError:pass
+                                  time.sleep(.15)
+                              else: raise RuntimeError('driver-unavailable')
+                              caps = {'browserName':'chrome','acceptInsecureCerts':False,
+                                      'goog:chromeOptions':{'binary':chrome,'args':['--headless','--no-first-run','--disable-sync','--disable-background-networking','--user-data-dir='+profile]}}
+                              report['stage']='new-session'
+                              info=wd('POST','/session',{'capabilities':{'alwaysMatch':caps}})
+                              session='/session/'+info['sessionId']
+                              report['browser']=info['capabilities']['browserVersion']
+                              if info['capabilities']['acceptInsecureCerts'] is not False: raise RuntimeError('invalid-tls-mode')
+                              report['acceptInsecureCerts']=False
+                              report['stage']='public-https'
+                              wd('POST',session+'/timeouts',{'pageLoad':20000,'script':45000})
+                              wd('POST',session+'/url',{'url':origin+'/common/blank.html'})
+                              report['stage']='workers-and-post'
+                              result=wd('POST',session+'/execute/async',{'script':Path('probe.js').read_text(),'args':[]})
+                              report['browserResult']=result
+                              report['pass']=result.get('ok') is True and result.get('unregistered') is True and not result.get('cleanupError')
+                          finally:
+                              if session:
+                                  try: wd('DELETE',session)
+                                  except OSError: pass
+                              proc.terminate()
+                              try: proc.wait(timeout=4)
+                              except subprocess.TimeoutExpired: proc.kill()
+                  finally:
+                      report['ephemeralProfileUsed']=True
+              report['profileRemoved']=not os.path.exists(profile)
+          try:
+              main()
+          except urllib.error.HTTPError as err:
+              report['webdriverStatus']=err.code
+              try:
+                  value=json.loads(err.read(12000))['value']
+                  msg=value.get('message','')
+                  report['webdriverError']=value.get('error','unknown')[:80]
+                  report['indicators']=[x for x in ('ERR_NAME_NOT_RESOLVED','ERR_TIMED_OUT','ERR_CERT_AUTHORITY_INVALID','ERR_PROXY_CONNECTION_FAILED','ERR_CONNECTION_REFUSED','ERR_CONNECTION_RESET','ERR_CONNECTION_TIMED_OUT','ERR_TUNNEL_CONNECTION_FAILED','version of Chrome','No usable sandbox') if x in msg]
+              except Exception: pass
+          except RuntimeError as err:
+              report['reason']=str(err)
+          except Exception as err:
+              report['reason']=type(err).__name__
+          print('WPT_SYNTHETIC_RESULT '+json.dumps(report))
+          raise SystemExit(0 if report.get('pass') else 1)
+          PY_SOURCE
+          cat > probe.js <<'JS_SOURCE'
+          const done = arguments[arguments.length - 1];
+          const report = {passed: [], stage: "secure page"};
+          const check = (v, name) => { if (!v) throw new Error(name); report.passed.push(name); };
+          const sleep = ms => new Promise(r => setTimeout(r, ms));
+          async function until(fn) {
+            for (let i=0; i<140; i++) {
+              const value = fn();
+              if (value) return value;
+              await sleep(50);
+            }
+            throw new Error("lifecycle-timeout");
+          }
+          (async () => {
+            const root = "/service-workers/service-worker/resources/";
+            const framePath = root + "empty.html";
+            const localMarker = "synthetic-browser-update";
+            const storageKey = "wpt-probe-" + crypto.randomUUID();
+            let frame, reg;
+            try {
+              check(location.origin === "https://wpt.live" && isSecureContext, "trusted-origin");
+              check((await navigator.serviceWorker.getRegistrations()).length === 0, "fresh-profile");
+              localStorage.setItem(storageKey, localMarker);
+              const openFrame = async () => {
+                const f = document.createElement("iframe");
+                const loaded = new Promise(resolve => f.onload = resolve);
+                f.src = framePath;
+                document.body.append(f);
+                frame = f;
+                await loaded;
+                return f.contentWindow;
+              };
+              const scriptFor = file => new URL(root + file, location.href).href;
+              const sequence = ["empty-worker.js", "empty.js", "empty-worker.js"];
+              let previousUrl;
+              for (const [i, file] of sequence.entries()) {
+                report.stage = ["first-worker","changed-worker","restored-worker"][i];
+                const wanted = scriptFor(file);
+                reg = await navigator.serviceWorker.register(wanted,{scope: framePath,updateViaCache:"none"});
+                if (i) {
+                  await until(() => reg.waiting && reg.waiting.scriptURL === wanted);
+                  check(frame.contentWindow.navigator.serviceWorker.controller.scriptURL === previousUrl, "old-client-still-controlled-"+i);
+                  frame.remove(); frame = undefined;
+                }
+                await until(() => reg.active && reg.active.state === "activated" && reg.active.scriptURL === wanted);
+                const child = await openFrame();
+                await until(() => child.navigator.serviceWorker.controller?.scriptURL === wanted);
+                check(child.localStorage.getItem(storageKey) === localMarker, "storage-and-controller-"+i);
+                if (i===1 || i===2) {
+                  report.stage = "same-origin-post-"+i;
+                  const data = ["","synthetic-one","synthetic-two"][i];
+                  try {
+                    const response = await child.fetch("/fetch/api/resources/echo-content.py",{
+                    method:"POST", body:data, credentials:"omit", redirect:"error",cache:"no-store"
+                    });
+                    report["postStatus"+i]=response.status;
+                    check(response.ok && response.headers.get("X-Request-Method")==="POST" && await response.text()===data, "network-post-echo-"+i);
+                  } catch { report["postFailed"+i] = true; }
+                }
+                previousUrl = wanted;
+              }
+              report.ok = !report.postFailed1 && !report.postFailed2;
+            } catch (error) {
+              report.ok = false;
+              report.error = ["SecurityError","TypeError","InvalidStateError","NetworkError"].includes(error.name) ? error.name : "assertion-or-timeout";
+            } finally {
+              if (frame) frame.remove();
+              try {
+                if (reg) report.unregistered = await reg.unregister();
+                localStorage.removeItem(storageKey);
+              } catch { report.cleanupError = true; }
+              done(report);
+            }
+          })();
+          JS_SOURCE
+          python3 driver.py
